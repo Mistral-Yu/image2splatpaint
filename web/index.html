@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data: blob:; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+    <link rel="icon" href="data:," />
+    <title>Image2GaussianPaint</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <section class="workspace">
+        <div class="viewer">
+          <canvas id="previewCanvas" data-testid="preview-canvas" width="640" height="420"></canvas>
+          <canvas id="gpuCanvas" data-testid="gpu-canvas" width="640" height="420" hidden></canvas>
+          <div id="previewImageFrame" class="preview-image-frame" data-testid="preview-image-frame" hidden></div>
+          <div class="view-controls" data-testid="view-controls" role="group" aria-label="Canvas view">
+            <button id="actualSizeButton" data-testid="actual-size-button" type="button" title="View at one image pixel per screen pixel" disabled>1:1</button>
+            <button id="fitViewButton" data-testid="fit-view-button" type="button" title="Fit the image in the canvas" disabled>Fit</button>
+          </div>
+          <div id="dropZone" class="drop-zone" data-testid="drop-zone">
+            <strong>Drop an image</strong>
+            <span>or choose a local file</span>
+            <input id="fileInput" data-testid="file-input" type="file" accept="image/*" />
+          </div>
+        </div>
+        <div class="progress">
+          <div>
+            <span>iteration</span>
+            <strong id="stepText" data-testid="step-text">0 / 0</strong>
+          </div>
+          <div>
+            <span>splats</span>
+            <strong id="splatText" data-testid="splat-text">-</strong>
+          </div>
+          <div>
+            <span>L1 loss</span>
+            <strong id="lossText" data-testid="loss-text">-</strong>
+          </div>
+          <div>
+            <span>SSIM global</span>
+            <strong id="ssimText" data-testid="ssim-text">-</strong>
+          </div>
+          <div>
+            <span>SSIM local p10</span>
+            <strong id="regionalSsimText" data-testid="regional-ssim-text">-</strong>
+          </div>
+          <div>
+            <span>image size</span>
+            <strong id="imageSizeText" data-testid="image-size-text">-</strong>
+          </div>
+          <div>
+            <span>background pixels</span>
+            <strong id="backgroundPixelText" data-testid="background-pixel-text">-</strong>
+          </div>
+          <div>
+            <span>outside splats</span>
+            <strong id="outsideSplatText" data-testid="outside-splat-text">-</strong>
+          </div>
+          <div title="Estimated active bytes / total capacity of this app's live WebGPU training buffers. This is not system-wide, free, or total device VRAM.">
+            <span>VRAM active / reserved</span>
+            <strong id="gpuMemoryText" data-testid="gpu-memory-text">0 / 0 MB</strong>
+          </div>
+          <div>
+            <span>state</span>
+            <strong id="statusText" data-testid="status-text">idle</strong>
+          </div>
+        </div>
+        <strong id="backendText" data-testid="backend-text" hidden>checking</strong>
+        <strong id="boundaryText" data-testid="boundary-text" hidden>-</strong>
+      </section>
+
+      <aside class="controls">
+        <nav class="log-tabs" data-testid="log-tabs" role="tablist" aria-label="Workspace">
+          <button id="trainingLogTab" class="active" data-testid="training-log-tab" type="button" role="tab" aria-controls="trainingLogPanel" aria-selected="true">Training</button>
+          <button id="splatsTab" data-testid="splats-tab" type="button" role="tab" aria-controls="splatsPanel" aria-selected="false">Splats</button>
+          <button id="exportTab" data-testid="export-tab" type="button" role="tab" aria-controls="exportPanel" aria-selected="false">Export</button>
+          <button id="eventLogTab" data-testid="event-log-tab" type="button" role="tab" aria-controls="eventLogPanel" aria-selected="false">Log</button>
+        </nav>
+
+        <div class="tab-viewport">
+          <section id="trainingLogPanel" class="tab-panel active" data-testid="training-log-panel" role="tabpanel" aria-labelledby="trainingLogTab">
+            <div class="training-panel-body">
+              <div class="brand">
+                <h1>Image2GaussianPaint</h1>
+                <p>Paint one image with planar Gaussian splats.</p>
+              </div>
+
+              <div class="image-actions">
+                <button id="loadImageButton" data-testid="load-image-button" type="button">Load image</button>
+                <button id="clearImageButton" data-testid="clear-image-button" type="button" disabled>Clear</button>
+                <button id="sampleButton" data-testid="sample-button" type="button" title="Load generated sample">Sample</button>
+                <input id="pathInput" data-testid="path-input" type="hidden" value="outputs/lr-search-photo.jpg" />
+                <button id="pathButton" data-testid="path-button" type="button" hidden>Load path</button>
+              </div>
+
+              <div class="preview-mode" role="group" aria-label="Preview image">
+                <span>Preview</span>
+                <div class="preview-mode-buttons">
+                  <button id="splatsPreviewButton" data-testid="splats-preview-button" type="button" aria-pressed="false" disabled>Splats</button>
+                  <button id="originalPreviewButton" class="active" data-testid="original-preview-button" type="button" aria-pressed="true" disabled>Original</button>
+                </div>
+              </div>
+
+              <div class="actions">
+                <button id="startButton" data-testid="start-button" type="button">Train</button>
+                <button id="pauseButton" data-testid="pause-button" type="button" disabled>Pause</button>
+                <button id="stopButton" data-testid="stop-button" type="button" disabled>Stop</button>
+                <button id="resetButton" data-testid="reset-button" type="button" disabled>Reset</button>
+              </div>
+
+              <div class="training-grid">
+                <label class="field-wide">
+                  Max image side
+                  <input id="trainSize" data-testid="train-size" type="number" min="32" max="3200" step="64" value="3200" />
+                </label>
+                <label class="field-wide">
+                  Initialization
+                  <select id="initializationMode" data-testid="initialization-mode">
+                    <option value="random-rgb">Painterly random RGB</option>
+                    <option value="image-rgb">Image RGB</option>
+                  </select>
+                </label>
+                <label>
+                  Initial splats
+                  <input id="initialSplatCount" data-testid="initial-splat-count" type="number" min="4" max="262144" step="4" value="2048" />
+                </label>
+                <label>
+                  Max splats
+                  <input id="finalSplatCount" data-testid="final-splat-count" type="number" min="4" max="1048576" step="4" value="8192" />
+                </label>
+                <label>
+                  Iterations
+                  <input id="stepCount" data-testid="step-count" type="number" min="1" step="100" value="7000" />
+                </label>
+                <label>
+                  Preview refresh
+                  <select id="previewRefresh" data-testid="preview-refresh">
+                    <option value="frame">Every frame</option>
+                    <option value="10" selected>Every 10 iterations</option>
+                    <option value="metrics">Metrics only</option>
+                  </select>
+                </label>
+              </div>
+
+              <details class="lr-panel" data-testid="lr-panel">
+                <summary>Learning rates</summary>
+                <div class="lr-body">
+                  <label class="inline-option">
+                    <input id="tileCullingToggle" data-testid="tile-culling-toggle" type="checkbox" checked />
+                    Tile/subtile culling
+                  </label>
+                  <div class="lr-grid">
+                    <label>Position<input id="positionLearningRate" data-testid="position-learning-rate" type="number" min="0" max="1" step="0.000001" value="0.00016" /></label>
+                    <label>Color<input id="colorLearningRate" data-testid="color-learning-rate" type="number" min="0" max="1" step="0.0001" value="0.0025" /></label>
+                    <label>Opacity<input id="opacityLearningRate" data-testid="opacity-learning-rate" type="number" min="0" max="1" step="0.001" value="0.05" /></label>
+                    <label>Scale<input id="scaleLearningRate" data-testid="scale-learning-rate" type="number" min="0" max="1" step="0.0001" value="0.002" /></label>
+                    <label>Rotation<input id="rotationLearningRate" data-testid="rotation-learning-rate" type="number" min="0" max="1" step="0.0001" value="0.001" /></label>
+                    <label>Theta align<input id="thetaAlignRate" data-testid="theta-align-rate" type="number" min="0" max="1" step="0.001" value="0.005" /></label>
+                    <label>Max anisotropy<input id="maxAnisotropy" data-testid="max-anisotropy" type="number" min="1" max="32" step="0.1" value="8" /></label>
+                    <label>Detail coherence<input id="detailCoherence" data-testid="detail-coherence" type="number" min="0" max="1" step="0.05" value="0.80" /></label>
+                    <label>ADC split interval<input id="adcSplitInterval" data-testid="adc-split-interval" type="number" min="100" max="20000" step="100" value="3000" /></label>
+                    <label>ADC reset interval<input id="adcResetInterval" data-testid="adc-reset-interval" type="number" min="100" max="20000" step="100" value="3000" /></label>
+                    <label>Splat growth interval<input id="densifyInterval" data-testid="densify-interval" type="number" min="1" max="1000" step="1" value="100" /></label>
+                    <label>Growth per event %<input id="growthPercentage" data-testid="growth-percentage" type="number" min="0.1" max="100" step="0.1" value="15" /></label>
+                    <label>Growth signal threshold<input id="growthSignalThreshold" data-testid="growth-signal-threshold" type="number" min="0" max="1000" step="0.00001" value="0.0003" /></label>
+                    <label>ADC split signal threshold<input id="adcSplitSignalThreshold" data-testid="adc-split-signal-threshold" type="number" min="0" max="1000" step="0.00001" value="0.0003" /></label>
+                    <label>ADC split residual threshold<input id="adcSplitResidualThreshold" data-testid="adc-split-residual-threshold" type="number" min="0" max="1000" step="0.0001" value="0.0025" /></label>
+                    <label>ADC recycle %<input id="adcRecyclePercentage" data-testid="adc-recycle-percentage" type="number" min="0" max="100" step="0.01" value="25" /></label>
+                    <label>ADC late recycle %<input id="adcLateRecyclePercentage" data-testid="adc-late-recycle-percentage" type="number" min="0" max="100" step="0.01" value="10" /></label>
+                  </div>
+                </div>
+              </details>
+
+              <label class="capacity-control" title="Use Max splats for the GPU allocation, or reduce the allocation automatically when the requested WebGPU capacity does not fit.">
+                GPU memory mode
+                <select id="capacityMode" data-testid="capacity-mode">
+                  <option value="manual" selected>Use Max splats</option>
+                  <option value="auto-probe">Auto by GPU memory</option>
+                </select>
+              </label>
+
+              <details class="budget-panel" data-testid="budget-panel">
+                <summary>GPU memory details</summary>
+                <div class="budget-body">
+                  <button id="retryWebGpuButton" data-testid="retry-webgpu" type="button" hidden>Reinitialize WebGPU</button>
+                  <div class="budget-grid">
+                    <div><span>limit</span><strong id="gpuLimitText" data-testid="gpu-limit">checking</strong></div>
+                    <div><span>estimate</span><strong id="memoryEstimateText" data-testid="memory-estimate">-</strong></div>
+                    <div><span>budget headroom</span><strong id="headroomText" data-testid="headroom">-</strong></div>
+                    <div><span>limiter</span><strong id="limiterText" data-testid="limiter">-</strong></div>
+                    <div><span>recommended</span><strong id="recommendationText" data-testid="recommendation">-</strong></div>
+                    <div><span>speed</span><strong id="speedEstimateText" data-testid="speed-estimate">-</strong></div>
+                    <div><span>detail cap</span><strong id="detailCapText" data-testid="detail-cap">-</strong></div>
+                    <div><span>Splat capacity</span><strong id="capacityProbeText" data-testid="capacity-probe">Manual limit</strong></div>
+                    <div><span>tile reserve</span><strong id="tileReserveText" data-testid="tile-reserve">-</strong></div>
+                    <div><span>measured speed</span><strong id="measuredSpeedText" data-testid="measured-speed">-</strong></div>
+                  </div>
+                  <p id="budgetNote" data-testid="budget-note">Auto keeps browser and system headroom from standard memory hints. Exact free VRAM is unavailable.</p>
+                </div>
+              </details>
+            </div>
+          </section>
+
+          <section id="eventLogPanel" class="tab-panel" data-testid="event-log-panel" role="tabpanel" aria-labelledby="eventLogTab">
+            <div class="event-log-layout">
+              <div class="log-toolbar">
+                <strong>Session log</strong>
+                <button id="clearLogButton" data-testid="clear-log-button" type="button">Clear</button>
+              </div>
+              <div class="log" id="log" data-testid="log"></div>
+            </div>
+          </section>
+
+          <section id="splatsPanel" class="tab-panel" data-testid="splats-panel" role="tabpanel" aria-labelledby="splatsTab">
+            <div class="splat-editor">
+              <p id="splatsEmpty" class="panel-message">Finish training to adjust the splats.</p>
+              <div id="splatsContent" hidden>
+                <div class="editor-heading">
+                  <strong>Post-training adjustments</strong>
+                  <span id="splatsMeta" data-testid="splats-meta">-</span>
+                </div>
+                <label class="outside-preview-toggle">
+                  <input id="outsidePreviewToggle" data-testid="outside-preview-toggle" type="checkbox" />
+                  Show outside image
+                </label>
+                <label class="adjustment-row">Opacity <output id="splatOpacityValue">1.00x</output><input id="splatOpacity" data-testid="splat-opacity" type="range" min="0" max="2" step="0.01" value="1" /></label>
+                <label class="adjustment-row">Local scale X <output id="splatScaleXValue">1.00x</output><input id="splatScaleX" data-testid="splat-scale-x" type="range" min="0.25" max="2" step="0.01" value="1" /></label>
+                <label class="adjustment-row">Local scale Y <output id="splatScaleYValue">1.00x</output><input id="splatScaleY" data-testid="splat-scale-y" type="range" min="0.25" max="2" step="0.01" value="1" /></label>
+                <label class="adjustment-row">2D rotation <output id="splatRotationValue">0°</output><input id="splatRotation" data-testid="splat-rotation" type="range" min="-180" max="180" step="1" value="0" /></label>
+                <button id="resetSplatAdjustments" data-testid="reset-splat-adjustments" type="button">Reset adjustments</button>
+                <p id="splatAdjustStatus" class="panel-message" data-testid="splat-adjust-status" aria-live="polite">Ready.</p>
+              </div>
+            </div>
+          </section>
+
+          <section id="exportPanel" class="tab-panel" data-testid="export-panel" role="tabpanel" aria-labelledby="exportTab">
+            <div class="export-panel-body">
+              <p id="exportDescription" class="panel-message">Graphdeco-style SH0 PLY with aspect-preserving planar geometry. Depth-sorted viewers can blend overlapping opacity differently.</p>
+              <div class="export-summary">
+                <span>splats<strong id="exportCount">-</strong></span>
+              </div>
+              <div class="export-actions">
+                <button id="savePlyButton" data-testid="export-splat-button" class="export-button" type="button" disabled>Export PLY</button>
+                <div class="export-divider" role="separator"></div>
+                <p class="panel-message">Rendered result inside the source image frame.</p>
+                <button id="savePngButton" data-testid="export-png-button" class="export-button export-button-secondary" type="button" disabled>Save PNG</button>
+              </div>
+              <p id="exportStatus" class="panel-message" data-testid="export-status" aria-live="polite">Train or stop with verified coverage before export.</p>
+              <p class="license-links"><a href="../LICENSE" target="_blank" rel="noopener">MIT License</a></p>
+            </div>
+          </section>
+        </div>
+      </aside>
+    </main>
+    <script src="./app.js?v=ply-aspect-v1"></script>
+  </body>
+</html>

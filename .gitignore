@@ -1,0 +1,26 @@
+.venv/
+.DS_Store
+.playwright-cli/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Local development, experiments, AI working documents, and evidence.
+outputs/
+references/
+_site/
+checkpoints/
+doc/
+runbooks/
+AGENTS.md
+.local-archives/
+
+# Keep only the small release/build surface under scripts/. All phase, A/B,
+# CDP, Python, profiling, and experimental harnesses remain local.
+scripts/*
+!scripts/build-pages.mjs
+!scripts/pages_artifact_tests.mjs
+!scripts/public_surface_tests.mjs
+!scripts/static-server-lib.mjs
+!scripts/static-server.mjs
