@@ -87,6 +87,45 @@ canvas {
   user-select: none;
 }
 
+.viewer .tilt-canvas {
+  inset: 0;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background: #000000;
+  cursor: default;
+  transform: none;
+}
+
+.tilt-frame-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.tilt-frame-overlay span {
+  position: absolute;
+  height: 1px;
+  border-top: 1px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 0 1px rgba(20, 26, 36, 0.55);
+  transform-origin: 0 50%;
+}
+
+.tilt-frame-overlay i {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border: 1px solid #ffffff;
+  border-radius: 50%;
+  background: rgba(20, 26, 36, 0.7);
+  transform: translate(-50%, -50%);
+}
+
 .viewer.is-panning canvas {
   cursor: grabbing;
 }
@@ -120,6 +159,10 @@ canvas {
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.94);
   box-shadow: 0 2px 8px rgba(23, 32, 44, 0.1);
+}
+
+.view-controls[hidden] {
+  display: none;
 }
 
 .view-controls button {
@@ -213,7 +256,7 @@ label {
 
 .controls {
   display: grid;
-  grid-template-rows: 28px minmax(0, 1fr);
+  grid-template-rows: auto 28px minmax(0, 1fr);
   grid-template-columns: minmax(0, 1fr);
   gap: 6px;
   padding: 10px;
@@ -233,7 +276,8 @@ label {
 .tab-panel {
   display: none;
   height: 100%;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .tab-panel.active {
@@ -249,7 +293,6 @@ label {
   padding-right: 2px;
 }
 
-.brand,
 .image-actions,
 .preview-mode,
 .training-grid,
@@ -271,6 +314,10 @@ label {
   color: var(--muted);
   font-size: 14px;
   line-height: 1.25;
+}
+
+.controls-brand {
+  min-width: 0;
 }
 
 label {
@@ -360,6 +407,34 @@ label {
   margin: 0;
 }
 
+.alpha-background-row,
+.export-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.alpha-background-row {
+  margin-bottom: 14px;
+}
+
+.alpha-background-row input[type="color"] {
+  width: 44px;
+  height: 28px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+}
+
+.export-option {
+  justify-content: flex-start;
+}
+
 .training-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -427,6 +502,18 @@ select {
 .inline-option input {
   width: auto;
   min-height: auto;
+}
+
+.growth-option {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 2px;
+  padding-top: 4px;
+}
+
+.growth-option small {
+  color: var(--muted);
+  line-height: 1.3;
 }
 
 .panel-title {
@@ -523,8 +610,102 @@ button:disabled {
 
 .log-tabs {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 4px;
+}
+
+.tilt-panel-body {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  min-height: 0;
+}
+
+.tilt-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 6px;
+}
+
+.tilt-sweep-status {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.tilt-sweep-status progress {
+  width: 100%;
+  height: 8px;
+  accent-color: var(--accent);
+}
+
+.tilt-contact-sheet {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.tilt-contact-sheet:empty {
+  display: none;
+}
+
+.tilt-contact-sheet button {
+  display: grid;
+  min-width: 0;
+  padding: 3px;
+  gap: 3px;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.tilt-contact-sheet button[data-stress="true"] {
+  border-color: var(--accent);
+}
+
+.tilt-contact-sheet img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  background: #000000;
+}
+
+.tilt-contact-sheet span {
+  overflow: hidden;
+  font-size: 9px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tilt-diagnostics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 12px;
+  margin: 0;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.tilt-diagnostics div {
+  min-width: 0;
+}
+
+.tilt-diagnostics dt {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.tilt-diagnostics dd {
+  margin: 2px 0 0;
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .log-tabs button {
@@ -738,7 +919,7 @@ button:disabled {
 
 @media (min-width: 1800px) {
   .controls {
-    grid-template-rows: 32px minmax(0, 1fr);
+    grid-template-rows: auto 32px minmax(0, 1fr);
     gap: 8px;
     padding: 12px;
   }
@@ -778,7 +959,7 @@ button:disabled {
   }
 
   .controls {
-    grid-template-rows: 28px minmax(560px, auto);
+    grid-template-rows: auto 28px minmax(560px, auto);
     overflow: visible;
   }
 

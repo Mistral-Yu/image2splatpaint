@@ -24,8 +24,20 @@ jobs:
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
       - name: Verify JavaScript
         run: |
-          for file in web/app.js web/export-formats.mjs scripts/*.mjs; do node --check "$file"; done
+          for file in web/app.js scripts/*.mjs; do node --check "$file"; done
           node scripts/public_surface_tests.mjs
+          node scripts/standard_alpha_tests.mjs
+          node scripts/tilt_robustness_tests.mjs
+          node scripts/tilt_camera_tests.mjs
+          node scripts/virtual_tilt_tests.mjs
+          node scripts/large_dispatch_tests.mjs
+          node scripts/p2_budget_contract_tests.mjs
+          node scripts/p2_optimizer_input_tests.mjs
+          node scripts/p2_export_memory_tests.mjs
+          node scripts/independent_ply_parser_tests.mjs
+          node scripts/adaptive_capacity_tests.mjs
+          node scripts/gpu_memory_status_tests.mjs
+          node scripts/export_cross_platform_tests.mjs
       - name: Build static artifact
         run: node scripts/build-pages.mjs
       - name: Verify Pages artifact

@@ -6,5 +6,5 @@ const root = resolve(process.argv[3] || process.cwd());
 const basePath = normalizeBasePath(process.argv[4] || "/");
 
 createStaticServer({ root, basePath }).listen(port, "127.0.0.1", () => {
-  console.log(`Image2GaussianPaint: http://127.0.0.1:${port}${basePath}`);
+  console.log(`Image2SplatPaint: http://127.0.0.1:${port}${basePath}`);
 });
