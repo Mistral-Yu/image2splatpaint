@@ -11,9 +11,6 @@ const DEFAULT_ITERATIONS = 3000;
 const DEFAULT_MAX_SIDE = 512;
 const DEFAULT_INITIAL_SPLATS = 128;
 const DEFAULT_FINAL_SPLATS = 8192;
-const AUTO_SPLATS_MAX = 65535;
-const AUTO_INITIAL_SPLATS_MIN = 128;
-const AUTO_FINAL_SPLATS_MIN = 3000;
 const MANUAL_SPLATS_MAX = 1048576;
 const CAPACITY_PROBE_FAST_PATH_MAX = 262144;
 const CAPACITY_PROBE_TIERS = [262144, 524288, 786432, 1048576];
@@ -113,6 +110,8 @@ const DEFAULT_VIRTUAL_CAMERA_FULL_ANGLE_DEGREES = 5;
 const VIRTUAL_CAMERA_GOLDEN_ANGLE_RADIANS = Math.PI * (3 - Math.sqrt(5));
 const TRAIN_CONFIG_FLOATS = 84;
 const TRAIN_CONFIG_BYTES = TRAIN_CONFIG_FLOATS * 4;
+const MAX_TRAIN_BATCH_SIZE = 16;
+const TRAIN_BATCH_CONFIG_BYTES = TRAIN_CONFIG_BYTES * MAX_TRAIN_BATCH_SIZE;
 const ALPHA_STATE_BYTES_PER_PIXEL = 16;
 const LAYER_TRAIN_INTERVAL = 500;
 const EXACT_GRADIENT_STRIDE = 16;
@@ -125,7 +124,7 @@ const TILE_OFFSET_OVERFLOW_BIT = 0x80000000;
 const TILE_OFFSET_VALUE_MASK = 0x7fffffff;
 const DEFAULT_GROWTH_FRACTION = 0.15;
 const DEFAULT_GROWTH_SIGNAL_THRESHOLD = 0.0003;
-const STAGE_AWARE_GROWTH_RESERVE = 0.30;
+const DEFAULT_STAGE_GROWTH_SHARES = Object.freeze({ p1: 18.15, p2: 51.85, p3: 30 });
 const METRIC_TILE_STRIDE = 33;
 // Final-only virtual-camera readback. Keep this separate from the training
 // metric layout so front-only training retains its established fast path.
@@ -827,7 +826,7 @@ function performanceVariants() {
   const subgroupQuery = query.get("subgroup-backward");
   const bindGroupCacheQuery = query.get("bind-group-cache");
   const opacitySupportQuery = query.get("opacity-support");
-  const subgroupSyncQuery = query.get("subgroup-sync-reduction");
+  const adaptiveThroughputQuery = query.get("adaptive-gpu-throughput");
   const opacitySupportMode = overrides.opacityAwareSupportMode === "aggressive"
     ? "aggressive"
     : QA_RUNTIME_ENABLED && query.has("opacity-support")
@@ -835,6 +834,11 @@ function performanceVariants() {
       : document.querySelector("#opacitySupportAggressive")?.checked
         ? "aggressive"
         : "off";
+  const adaptiveGpuThroughput = typeof overrides.adaptiveGpuThroughput === "boolean"
+    ? overrides.adaptiveGpuThroughput
+    : QA_RUNTIME_ENABLED && query.has("adaptive-gpu-throughput")
+      ? adaptiveThroughputQuery !== "0"
+      : Boolean(document.querySelector("#adaptiveGpuThroughput")?.checked);
   return {
     tileCooperativeRenderer: overrides.tileCooperativeRenderer === true,
     quadExactBackward: typeof overrides.quadExactBackward === "boolean"
@@ -856,11 +860,10 @@ function performanceVariants() {
       ? overrides.bindGroupCache
       : QA_RUNTIME_ENABLED && query.has("bind-group-cache") && bindGroupCacheQuery === "1",
     opacityAwareSupportMode: opacitySupportMode,
-    subgroupSyncReduction: typeof overrides.subgroupSyncReduction === "boolean"
-      ? overrides.subgroupSyncReduction
-      : QA_RUNTIME_ENABLED && query.has("subgroup-sync-reduction")
-        ? subgroupSyncQuery !== "0"
-        : Boolean(document.querySelector("#subgroupSyncReduction")?.checked),
+    adaptiveGpuThroughput,
+    gpuSchedulingMode: adaptiveGpuThroughput ? "adaptive" : "compatible",
+    asyncPresentation: adaptiveGpuThroughput,
+    metricTileReuse: adaptiveGpuThroughput,
   };
 }
 
@@ -942,6 +945,15 @@ function phase39Variants() {
     const value = Number(document.querySelector(selector)?.value);
     return Number.isFinite(value) ? value : fallback;
   };
+  const requestedStageShares = {
+    p1: Math.max(0, finite("stageGrowthP1", controlNumber("#stageGrowthP1", DEFAULT_STAGE_GROWTH_SHARES.p1))),
+    p2: Math.max(0, finite("stageGrowthP2", controlNumber("#stageGrowthP2", DEFAULT_STAGE_GROWTH_SHARES.p2))),
+    p3: Math.max(0, finite("stageGrowthP3", controlNumber("#stageGrowthP3", DEFAULT_STAGE_GROWTH_SHARES.p3))),
+  };
+  const stageShareTotal = requestedStageShares.p1 + requestedStageShares.p2 + requestedStageShares.p3;
+  const stageGrowthShares = stageShareTotal > 0
+    ? Object.fromEntries(Object.entries(requestedStageShares).map(([key, value]) => [key, value / stageShareTotal]))
+    : Object.fromEntries(Object.entries(DEFAULT_STAGE_GROWTH_SHARES).map(([key, value]) => [key, value / 100]));
   return {
     // Density relocation mutates a destination while reading a source. Role
     // reservation is therefore a correctness invariant.
@@ -952,6 +964,8 @@ function phase39Variants() {
     stageAwareGrowth: typeof overrides.stageAwareGrowth === "boolean"
       ? overrides.stageAwareGrowth
       : Boolean(document.querySelector("#stageAwareGrowth")?.checked),
+    stageGrowthShares,
+    requestedStageGrowthShares: requestedStageShares,
     qaGrowthComparisons: QA_RUNTIME_ENABLED && overrides.qaGrowthComparisons === true,
     // The ADC-specialized split window and recycle reset were retired after
     // paired 7000-step front/virtual tests showed no repeatable net benefit.
@@ -1492,7 +1506,7 @@ const els = {
   opacityLearningRate: document.querySelector("#opacityLearningRate"),
   alphaLossWeight: document.querySelector("#alphaLossWeight"),
   opacitySupportAggressive: document.querySelector("#opacitySupportAggressive"),
-  subgroupSyncReduction: document.querySelector("#subgroupSyncReduction"),
+  adaptiveGpuThroughput: document.querySelector("#adaptiveGpuThroughput"),
   virtualBoundedDepth: document.querySelector("#virtualBoundedDepth"),
   virtualGofDensity: document.querySelector("#virtualGofDensity"),
   virtualCameraShare: document.querySelector("#virtualCameraShare"),
@@ -1501,6 +1515,9 @@ const els = {
   virtualCameraFov: document.querySelector("#virtualCameraFov"),
   virtualCameraCoverageEstimate: document.querySelector("#virtualCameraCoverageEstimate"),
   stageAwareGrowth: document.querySelector("#stageAwareGrowth"),
+  stageGrowthP1: document.querySelector("#stageGrowthP1"),
+  stageGrowthP2: document.querySelector("#stageGrowthP2"),
+  stageGrowthP3: document.querySelector("#stageGrowthP3"),
   scaleLearningRate: document.querySelector("#scaleLearningRate"),
   rotationLearningRate: document.querySelector("#rotationLearningRate"),
   thetaAlignRate: document.querySelector("#thetaAlignRate"),
@@ -1887,7 +1904,7 @@ function publishState() {
   data.opacityLearningRateInput = els.opacityLearningRate.value;
   data.alphaLossWeightInput = els.alphaLossWeight.value;
   data.opacityAwareSupportInput = performanceVariants().opacityAwareSupportMode;
-  data.subgroupSyncReductionInput = String(Boolean(els.subgroupSyncReduction.checked));
+  data.adaptiveGpuThroughputInput = String(Boolean(els.adaptiveGpuThroughput.checked));
   data.virtualCameraSamplingInput = String(algorithmUsesVirtualCameras());
   data.virtual3dgsMultiviewInput = "true";
   data.virtualGofDensityInput = String(Boolean(els.virtualGofDensity.checked));
@@ -1932,6 +1949,8 @@ function publishState() {
     ? JSON.stringify(state.metrics.render_surface_parity.maximum_pixel)
     : "";
   data.stageAwareGrowthInput = String(Boolean(els.stageAwareGrowth.checked));
+  const stageShares = phase39Variants().stageGrowthShares;
+  data.stageGrowthShares = `${(stageShares.p1 * 100).toFixed(2)},${(stageShares.p2 * 100).toFixed(2)},${(stageShares.p3 * 100).toFixed(2)}`;
   data.scaleLearningRateInput = els.scaleLearningRate.value;
   data.rotationLearningRateInput = els.rotationLearningRate.value;
   data.thetaAlignRateInput = els.thetaAlignRate.value;
@@ -2465,6 +2484,7 @@ function trainingBufferDescriptors(
     if (size > 0) descriptors.push({ name, size: Math.max(4, Math.ceil(size / 4) * 4), storage });
   };
   add("config", TRAIN_CONFIG_BYTES, true);
+  add("batch-config", TRAIN_BATCH_CONFIG_BYTES);
   add("present-config", 16);
   add("target-rgb", image.rgb.byteLength, true);
   add("coarse-target-rgb", coarseImage?.rgb.byteLength || 0, true);
@@ -2539,6 +2559,7 @@ function trainStateAllocatedDescriptors(trainState) {
   if (!trainState) return [];
   const entries = [
     ["config", trainState.configBuffer],
+    ["batch-config", trainState.batchConfigBuffer],
     ["present-config", trainState.presentConfigBuffer],
     ["target-rgb", trainState.targetBuffer],
     ["coarse-target-rgb", trainState.coarseTargetBuffer],
@@ -2766,21 +2787,6 @@ function computeBudgetFor(trainSize, finalSplats, steps) {
     overBudget: current.peakBytes > budgetBytes,
     overHardLimit: largestPixelStorageBytes > hardBufferBytes,
   };
-}
-
-function imageBasedSplatCounts(image = state.image) {
-  if (!image) return { initial: DEFAULT_INITIAL_SPLATS, final: DEFAULT_FINAL_SPLATS };
-  const pixels = Math.max(1, image.width * image.height);
-  const previousEstimate = clampNumber(pixels / 96, 1024, AUTO_SPLATS_MAX, DEFAULT_FINAL_SPLATS);
-  const final = roundDownStep(Math.max(AUTO_FINAL_SPLATS_MIN, previousEstimate / 2), 4);
-  const initial = roundDownStep(Math.min(final, AUTO_INITIAL_SPLATS_MIN), 4);
-  return { initial: Math.min(initial, final), final };
-}
-
-function applyLoadedImageSplatEstimate() {
-  const counts = imageBasedSplatCounts();
-  els.initialSplatCount.value = String(counts.initial);
-  els.finalSplatCount.value = String(counts.final);
 }
 
 function updateImageSizeStatus() {
@@ -3032,7 +3038,6 @@ async function loadFile(file) {
       sourceBitmap: canvas,
     };
     if (loadGeneration !== state.imageLoadGeneration) return false;
-    applyLoadedImageSplatEstimate();
     updateImageSizeStatus();
     state.params = null;
     state.metrics = null;
@@ -4563,6 +4568,7 @@ function growthSchedulePlan({
   growthFraction,
   densifyInterval,
   stageAware,
+  stageGrowthShares = Object.fromEntries(Object.entries(DEFAULT_STAGE_GROWTH_SHARES).map(([key, value]) => [key, value / 100])),
 }) {
   const normalTarget = splatTargetForGrowth(currentCount, finalCount, growthFraction);
   const normalIncrement = Math.max(0, normalTarget - currentCount);
@@ -4582,12 +4588,17 @@ function growthSchedulePlan({
   }
 
   const warmup = densifyWarmupSteps(densityEnd);
+  const p1End = experimentalCoarseSteps(steps);
   const range = Math.max(0, finalCount - initialCount);
+  const p1Share = Math.max(0, Math.min(1, Number(stageGrowthShares.p1) || 0));
+  const p2Share = Math.max(0, Math.min(1 - p1Share, Number(stageGrowthShares.p2) || 0));
+  const p2Cumulative = p1Share + p2Share;
   const desiredAt = (targetStep) => {
-    const segmentProgress = targetStep <= densityEnd
-      ? Math.max(0, Math.min(1, (targetStep - warmup) / Math.max(1, densityEnd - warmup))) * (1 - STAGE_AWARE_GROWTH_RESERVE)
-      : (1 - STAGE_AWARE_GROWTH_RESERVE) +
-        Math.max(0, Math.min(1, (targetStep - densityEnd) / Math.max(1, growthEnd - densityEnd))) * STAGE_AWARE_GROWTH_RESERVE;
+    const segmentProgress = targetStep <= p1End
+      ? Math.max(0, Math.min(1, (targetStep - warmup) / Math.max(1, p1End - warmup))) * p1Share
+      : targetStep <= densityEnd
+        ? p1Share + Math.max(0, Math.min(1, (targetStep - p1End) / Math.max(1, densityEnd - p1End))) * p2Share
+        : p2Cumulative + Math.max(0, Math.min(1, (targetStep - densityEnd) / Math.max(1, growthEnd - densityEnd))) * (1 - p2Cumulative);
     return Math.min(finalCount, initialCount + Math.round(range * segmentProgress));
   };
   const desiredCount = desiredAt(step);
@@ -4607,6 +4618,7 @@ function growthSchedulePlan({
     requestedCount,
     densityEnd,
     growthEnd,
+    stageGrowthShares: { p1: p1Share, p2: p2Share, p3: Math.max(0, 1 - p2Cumulative) },
   };
 }
 
@@ -5110,7 +5122,6 @@ class WebGpuPreview {
     this.exactTileIntersectionEnabled = performance.exactTileIntersection;
     this.subgroupExactBackwardEnabled = Boolean(profile.subgroupExactBackward && device.features.has("subgroups"));
     this.opacityAwareSupportMode = performance.opacityAwareSupportMode;
-    this.subgroupSyncReductionEnabled = Boolean(this.subgroupExactBackwardEnabled && performance.subgroupSyncReduction);
     this.pixelMetricsPipeline = null;
     this.virtualCameraMetricsPipeline = null;
     this.overlapMetricsPipeline = null;
@@ -5127,9 +5138,6 @@ class WebGpuPreview {
     const opacityAwareSupportMode = performance.opacityAwareSupportMode === "aggressive"
       ? "aggressive"
       : "off";
-    const subgroupSyncReductionEnabled = Boolean(
-      this.subgroupExactBackwardEnabled && performance.subgroupSyncReduction,
-    );
     if (this.opacityAwareSupportMode !== opacityAwareSupportMode) {
       this.opacityAwareSupportMode = opacityAwareSupportMode;
       this.tileCountPipeline = null;
@@ -5138,23 +5146,12 @@ class WebGpuPreview {
       this.tileSortPipeline = null;
       if (this.trainState) this.trainState.tileReady = false;
     }
-    if (this.subgroupSyncReductionEnabled !== subgroupSyncReductionEnabled) {
-      this.subgroupSyncReductionEnabled = subgroupSyncReductionEnabled;
-      this.renderStatePipeline = null;
-      this.tileCooperativeRenderPipeline = null;
-      this.ssimTilePipeline = null;
-      this.renderGradientPipeline = null;
-      this.parallelRenderGradientPipeline = null;
-      this.lossGradientPipeline = null;
-      this.exactAlphaBackwardPipeline = null;
-      this.sourceDomainBackwardPipeline = null;
-      this.virtualOrderPenaltyPipeline = null;
-      this.exactBackwardTelemetryPipeline = null;
-      this.exactOptimizerPipeline = null;
-    }
     return {
       opacityAwareSupportMode: this.opacityAwareSupportMode,
-      subgroupSyncReduction: this.subgroupSyncReductionEnabled,
+      adaptiveGpuThroughput: performance.adaptiveGpuThroughput,
+      gpuSchedulingMode: performance.gpuSchedulingMode,
+      asyncPresentation: performance.asyncPresentation,
+      metricTileReuse: performance.metricTileReuse,
     };
   }
 
@@ -5709,7 +5706,7 @@ fn sort_tiles(
 }
 `;
     const shader = `
-struct Config { values: array<vec4<f32>, 19>, };
+struct Config { values: array<vec4<f32>, 21>, };
 @group(0) @binding(0) var<uniform> config: Config;
 struct SplatPosition { center: vec2<f32>, rawDepth: f32, depthGradient: f32, };
 @group(0) @binding(1) var<storage, read> xy: array<SplatPosition>;
@@ -5883,7 +5880,12 @@ ${sortTilesFunction}`;
   async prepareTileLists(
     image,
     params,
-    { sync = false, encoder = null, profileSample = null, writeConfig = true } = {},
+    {
+      sync = false,
+      encoder = null,
+      profileSample = null,
+      writeConfig = true,
+    } = {},
   ) {
     if (!this.trainState || this.trainState.capacity < params.count) return false;
     await this.ensureTilePipelines();
@@ -6435,11 +6437,22 @@ fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     return true;
   }
 
-  async computeMetrics(image, params, sourceBuffers = null) {
+  async computeMetrics(image, params, sourceBuffers = null, options = {}) {
     if (!sourceBuffers?.pixelStateBuffer) {
       throw new Error("Experimental metrics require active WebGPU render state");
     }
-    return this.computeTrainStateMetrics(image, params);
+    return this.computeTrainStateMetrics(image, params, options);
+  }
+
+  canReuseMetricRender(image) {
+    const resolution = this.trainState?.pixelStateResolution;
+    return Boolean(
+      this.trainState?.tileReady &&
+      this.trainState.pixelStateKind === "full" &&
+      this.trainState.pixelStateViewKey === "front" &&
+      resolution?.[0] === image.width &&
+      resolution?.[1] === image.height
+    );
   }
 
   async ensureRenderGradientPipelines() {
@@ -7120,66 +7133,8 @@ fn ssim_tiles(
         "  workgroupBarrier();",
         "}",
       ];
-    const subgroupSyncReductionLines = [
-        "fn add_subtile_gradient(localIndex: u32, subgroupSize: u32, subgroupInvocation: u32, g: u32, geom: vec4<f32>, appearance: vec4<f32>, misc: vec4<f32>, density: vec4<f32>, depth: f32) {",
-        "  let subgroupGeom = subgroupAdd(geom);",
-        "  let subgroupAppearance = subgroupAdd(appearance);",
-        "  let subgroupMisc = subgroupAdd(misc);",
-        "  let subgroupDensity = subgroupAdd(density);",
-        "  let subgroupDepth = subgroupAdd(depth);",
-        "  let subgroupSlot = localIndex / subgroupSize;",
-        "  if (subgroupElect()) {",
-        "    reduceGeom[subgroupSlot] = subgroupGeom;",
-        "    reduceAppearance[subgroupSlot] = subgroupAppearance;",
-        "    reduceMisc[subgroupSlot] = subgroupMisc;",
-        "    reduceDensity[subgroupSlot] = subgroupDensity;",
-        "    reduceDepth[subgroupSlot] = subgroupDepth;",
-        "  }",
-        "  workgroupBarrier();",
-        "  let partialCount = (64u + subgroupSize - 1u) / subgroupSize;",
-        "  if (subgroupSize >= 8u) {",
-        "    let firstSubgroup = subgroupSlot == 0u;",
-        "    let partialIndex = subgroupInvocation;",
-        "    let partialGeom = select(vec4<f32>(0.0), reduceGeom[partialIndex], firstSubgroup && partialIndex < partialCount);",
-        "    let partialAppearance = select(vec4<f32>(0.0), reduceAppearance[partialIndex], firstSubgroup && partialIndex < partialCount);",
-        "    let partialMisc = select(vec4<f32>(0.0), reduceMisc[partialIndex], firstSubgroup && partialIndex < partialCount);",
-        "    let partialDensity = select(vec4<f32>(0.0), reduceDensity[partialIndex], firstSubgroup && partialIndex < partialCount);",
-        "    let partialDepth = select(0.0, reduceDepth[partialIndex], firstSubgroup && partialIndex < partialCount);",
-        "    let totalGeom = subgroupAdd(partialGeom);",
-        "    let totalAppearance = subgroupAdd(partialAppearance);",
-        "    let totalMisc = subgroupAdd(partialMisc);",
-        "    let totalDensity = subgroupAdd(partialDensity);",
-        "    let totalDepth = subgroupAdd(partialDepth);",
-        "    if (firstSubgroup && subgroupElect()) {",
-        "      add_gradient(g, totalGeom, totalAppearance, totalMisc, totalDensity, totalDepth);",
-        "    }",
-        "    workgroupBarrier();",
-        "    return;",
-        "  }",
-        "  reduceGeom[localIndex] = select(vec4<f32>(0.0), reduceGeom[localIndex], localIndex < partialCount);",
-        "  reduceAppearance[localIndex] = select(vec4<f32>(0.0), reduceAppearance[localIndex], localIndex < partialCount);",
-        "  reduceMisc[localIndex] = select(vec4<f32>(0.0), reduceMisc[localIndex], localIndex < partialCount);",
-        "  reduceDensity[localIndex] = select(vec4<f32>(0.0), reduceDensity[localIndex], localIndex < partialCount);",
-        "  reduceDepth[localIndex] = select(0.0, reduceDepth[localIndex], localIndex < partialCount);",
-        "  workgroupBarrier();",
-        "  for (var stride = 32u; stride > 0u; stride /= 2u) {",
-        "    if (localIndex < stride) {",
-        "      reduceGeom[localIndex] += reduceGeom[localIndex + stride];",
-        "      reduceAppearance[localIndex] += reduceAppearance[localIndex + stride];",
-        "      reduceMisc[localIndex] += reduceMisc[localIndex + stride];",
-        "      reduceDensity[localIndex] += reduceDensity[localIndex + stride];",
-        "      reduceDepth[localIndex] += reduceDepth[localIndex + stride];",
-        "    }",
-        "    workgroupBarrier();",
-        "  }",
-        "  if (localIndex == 0u) { add_gradient(g, reduceGeom[0], reduceAppearance[0], reduceMisc[0], reduceDensity[0], reduceDepth[0]); }",
-        "  workgroupBarrier();",
-        "}",
-      ];
     const exactBackwardReductionLines = this.subgroupExactBackwardEnabled
-      ? this.subgroupSyncReductionEnabled
-        ? subgroupSyncReductionLines
-        : subgroupCounterReductionLines
+      ? subgroupCounterReductionLines
       : [
         "fn add_subtile_gradient(localIndex: u32, g: u32, geom: vec4<f32>, appearance: vec4<f32>, misc: vec4<f32>, density: vec4<f32>, depth: f32) {",
         "  reduceGeom[localIndex] = geom;",
@@ -8445,7 +8400,6 @@ fn optimize_exact(
       const errors = info.messages.filter((message) => message.type === "error");
       if (errors.length && module === exactBackwardModule && this.subgroupExactBackwardEnabled) {
         this.subgroupExactBackwardEnabled = false;
-        this.subgroupSyncReductionEnabled = false;
         eventLog(`subgroup exact backward unavailable; using portable workgroup reduction: ${errors[0].message}`);
         return this.ensureRenderGradientPipelines();
       }
@@ -9357,7 +9311,10 @@ fn alpha_loss(
         const { config, pitchDegrees, yawDegrees, cameraDistance } = await buildConfig(view, scale);
         this.device.queue.writeBuffer(this.trainState.configBuffer, 0, config);
         if (els.tileCullingToggle.checked) {
-          await this.prepareTileLists(image, params, { sync: true, writeConfig: false });
+          await this.prepareTileLists(image, params, {
+            sync: true,
+            writeConfig: false,
+          });
         }
         this.device.queue.writeBuffer(configBuffer, 0, config);
         const entries = [
@@ -9552,7 +9509,10 @@ fn alpha_loss(
     config[74] = virtualView && requestedView?.cameraCovariance3d ? 1 : 0;
     this.device.queue.writeBuffer(this.trainState.configBuffer, 0, config);
     if (virtualView && els.tileCullingToggle.checked) {
-      await this.prepareTileLists(image, params, { sync: true, writeConfig: false });
+      await this.prepareTileLists(image, params, {
+        sync: true,
+        writeConfig: false,
+      });
     }
     const front = this.trainState.front;
     const renderChoice = this.renderStatePipelineChoice();
@@ -9614,11 +9574,13 @@ fn alpha_loss(
     await this.device.queue.onSubmittedWorkDone();
     this.trainState.pixelStateResolution = [image.width, image.height];
     this.trainState.pixelStateKind = stageKind;
+    this.trainState.pixelStateViewKey = virtualView ? "virtual" : "front";
   }
 
-  async computeTrainStateMetrics(image, params) {
+  async computeTrainStateMetrics(image, params, { reuseCurrentRender = false } = {}) {
     await this.ensurePixelMetricsPipeline();
-    await this.refreshRenderState(image, params);
+    const reusedRender = Boolean(reuseCurrentRender && this.canReuseMetricRender(image));
+    if (!reusedRender) await this.refreshRenderState(image, params);
     const partialCount = Math.ceil(image.width / 8) * Math.ceil(image.height / 8);
     const outputBytes = partialCount * METRIC_TILE_STRIDE * 4;
     const lossBuffer = this.device.createBuffer({ size: outputBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
@@ -9750,8 +9712,8 @@ fn alpha_loss(
           }];
         })),
       };
-      this.lastLossStats = { loss, alphaL1, alphaSsim, alphaObjective, alphaWeight, objectiveLoss, ssim, windowedSsim, regionalSsim, highFrequency, coverage, max: maxLoss, count: pixelCount, partial_count: partialCount, bytes: outputBytes, reduction: "tile-8x8-from-compact-render", compact_tile_candidates: Boolean(els.tileCullingToggle.checked) };
-      return { loss, alphaL1, alphaSsim, alphaObjective, alphaWeight, objectiveLoss, ssim, windowedSsim, regionalSsim, highFrequency, coverage };
+      this.lastLossStats = { loss, alphaL1, alphaSsim, alphaObjective, alphaWeight, objectiveLoss, ssim, windowedSsim, regionalSsim, highFrequency, coverage, max: maxLoss, count: pixelCount, partial_count: partialCount, bytes: outputBytes, reduction: "tile-8x8-from-compact-render", compact_tile_candidates: Boolean(els.tileCullingToggle.checked), reused_render: reusedRender };
+      return { loss, alphaL1, alphaSsim, alphaObjective, alphaWeight, objectiveLoss, ssim, windowedSsim, regionalSsim, highFrequency, coverage, reusedRender };
     } finally {
       lossBuffer.destroy();
       readBuffer.destroy();
@@ -11429,6 +11391,10 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
         size: TRAIN_CONFIG_BYTES,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
       }),
+      batchConfigBuffer: allocationDevice.createBuffer({
+        size: TRAIN_BATCH_CONFIG_BYTES,
+        usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+      }),
       presentConfigBuffer: allocationDevice.createBuffer({
         size: 16,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -12259,6 +12225,7 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
     if (!this.trainState) return [];
     return [...new Set([
       this.trainState.configBuffer,
+      this.trainState.batchConfigBuffer,
       this.trainState.presentConfigBuffer,
       this.trainState.targetBuffer,
       this.trainState.coarseTargetBuffer,
@@ -12331,6 +12298,9 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
 
   async trainStepRenderGradientGpu(image, params, learningRates, {
     sync = true,
+    currentStepOverride = null,
+    batchEncoder = null,
+    batchConfigSlot = -1,
     viewOverride = null,
     clearExactGradient = true,
     applyOptimizer = true,
@@ -12351,15 +12321,17 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
     const phase38 = phase38Variants();
     const phase39 = phase39Variants();
     const phase40 = phase40Variants();
-    const currentStep = (state.metrics?.steps_done || 0) + 1;
+    const currentStep = Number.isFinite(currentStepOverride)
+      ? Math.max(1, Math.round(currentStepOverride))
+      : (state.metrics?.steps_done || 0) + 1;
     const requestedSteps = state.metrics?.steps_requested || 1;
-    const profileLabels = recordTrainingStep && this.performanceProfile.timestampQuery
+    const profileLabels = !batchEncoder && recordTrainingStep && this.performanceProfile.timestampQuery
       ? performanceProfileLabels(currentStep, requestedSteps)
       : [];
     const profileSample = profileLabels.length > 0
       ? { step: currentStep, labels: profileLabels, queryCount: 0, stages: [] }
       : null;
-    const effectiveSync = sync || Boolean(profileSample);
+    const effectiveSync = !batchEncoder && (sync || Boolean(profileSample));
     const coarseStepLimit = experimentalCoarseSteps(requestedSteps, variants.coarseSteps);
     const midStepLimit = experimentalDensifySteps(requestedSteps);
     const trainingStage = curriculumTrainingStage(
@@ -12515,8 +12487,23 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
       errorScopeOpen = true;
     }
     try {
-      const encoder = this.device.createCommandEncoder();
-      this.device.queue.writeBuffer(this.trainState.configBuffer, 0, config);
+      const encoder = batchEncoder || this.device.createCommandEncoder();
+      if (batchEncoder) {
+        if (batchConfigSlot < 0 || batchConfigSlot >= MAX_TRAIN_BATCH_SIZE) {
+          throw new Error(`Invalid GPU batch config slot ${batchConfigSlot}.`);
+        }
+        const configOffset = batchConfigSlot * TRAIN_CONFIG_BYTES;
+        this.device.queue.writeBuffer(this.trainState.batchConfigBuffer, configOffset, config);
+        encoder.copyBufferToBuffer(
+          this.trainState.batchConfigBuffer,
+          configOffset,
+          this.trainState.configBuffer,
+          0,
+          TRAIN_CONFIG_BYTES,
+        );
+      } else {
+        this.device.queue.writeBuffer(this.trainState.configBuffer, 0, config);
+      }
       if (els.tileCullingToggle.checked) {
         await this.prepareTileLists(workImage, params, {
           encoder,
@@ -12710,10 +12697,13 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
           profileSample.queryCount * 8,
         );
       }
-      this.device.queue.submit([encoder.finish()]);
-      if (profileSample) profileEncodeSubmitMs = performance.now() - profileWallStarted;
+      if (!batchEncoder) {
+        this.device.queue.submit([encoder.finish()]);
+        if (profileSample) profileEncodeSubmitMs = performance.now() - profileWallStarted;
+      }
       this.trainState.pixelStateResolution = [workImage.width, workImage.height];
       this.trainState.pixelStateKind = trainingStage;
+      this.trainState.pixelStateViewKey = tiltStep.enabled || sourceDomainActive ? "virtual" : "front";
       if (recordTrainingStep && useCoarse) this.trainState.coarseTrainingSteps += 1;
       if (recordTrainingStep && useMid) this.trainState.midTrainingSteps += 1;
       if (recordTrainingStep && tiltStep.enabled) {
@@ -12797,7 +12787,6 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
         exact_alpha_backward: useExactBackward,
         quad_exact_backward: this.quadExactBackwardEnabled && !sourceDomainActive,
         subgroup_exact_backward: this.subgroupExactBackwardEnabled && !sourceDomainActive,
-        subgroup_sync_reduction: this.subgroupSyncReductionEnabled && !sourceDomainActive,
         source_domain_reprojection: sourceDomainActive,
         source_domain_jacobian_weighting: sourceDomainActive,
         sgld_noise_suppressed: Boolean(suppressSgldNoise),
@@ -12854,6 +12843,8 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
         bind_group_cache_hits: this.trainState.bindGroupCacheStats.hits,
         bind_group_cache_misses: this.trainState.bindGroupCacheStats.misses,
         sync: effectiveSync,
+        batched: Boolean(batchEncoder),
+        batch_config_slot: batchEncoder ? batchConfigSlot : null,
         updated: true,
       };
     } finally {
@@ -12861,7 +12852,13 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
     }
   }
 
-  async trainStepGpu(image, params, learningRates, { sync = true, virtualCameraSampling = null } = {}) {
+  async trainStepGpu(image, params, learningRates, {
+    sync = true,
+    virtualCameraSampling = null,
+    currentStepOverride = null,
+    batchEncoder = null,
+    batchConfigSlot = -1,
+  } = {}) {
     if (
       !this.trainState ||
       this.trainState.width !== image.width ||
@@ -12872,7 +12869,9 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
     }
     this.trainState.count = params.count;
     const variants = phase33Variants();
-    const currentStep = (state.metrics?.steps_done || 0) + 1;
+    const currentStep = Number.isFinite(currentStepOverride)
+      ? Math.max(1, Math.round(currentStepOverride))
+      : (state.metrics?.steps_done || 0) + 1;
     const requestedSteps = state.metrics?.steps_requested || 1;
     const stage = curriculumTrainingStage(
       currentStep,
@@ -12914,6 +12913,9 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
         cameraCounts.virtual % samplingVariants.depthUpdateInterval === 0;
       result = await this.trainStepRenderGradientGpu(image, params, learningRates, {
         sync,
+        currentStepOverride: currentStep,
+        batchEncoder,
+        batchConfigSlot,
         viewOverride: virtualStep ? trainingCamera : "front",
         clearExactGradient: true,
         applyOptimizer: true,
@@ -12957,6 +12959,7 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
     if (tiltStep.enabled && effectiveExactBackward && variants.ewa2x2) {
       await this.trainStepRenderGradientGpu(image, params, learningRates, {
         sync: false,
+        currentStepOverride: currentStep,
         viewOverride: "front",
         clearExactGradient: true,
         applyOptimizer: false,
@@ -12964,6 +12967,7 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
       });
       return this.trainStepRenderGradientGpu(image, params, learningRates, {
         sync,
+        currentStepOverride: currentStep,
         viewOverride: tiltStep,
         clearExactGradient: false,
         applyOptimizer: true,
@@ -12971,7 +12975,52 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
         gradientNormalization: 1 / (1 + Math.max(0, tiltStep.weight)),
       });
     }
-    return this.trainStepRenderGradientGpu(image, params, learningRates, { sync });
+    return this.trainStepRenderGradientGpu(image, params, learningRates, {
+      sync,
+      currentStepOverride: currentStep,
+      batchEncoder,
+      batchConfigSlot,
+    });
+  }
+
+  async trainStepsGpu(image, params, learningRates, steps, { virtualCameraSampling = null } = {}) {
+    const batchSteps = steps.slice(0, MAX_TRAIN_BATCH_SIZE);
+    if (batchSteps.length === 0) return null;
+    if (virtualCameraSampling?.enabled) {
+      throw new Error("Adaptive GPU batches are currently limited to Planar Gaussian training.");
+    }
+    const encoder = this.device.createCommandEncoder();
+    this.device.pushErrorScope("validation");
+    let errorScopeOpen = true;
+    try {
+      for (let slot = 0; slot < batchSteps.length; slot += 1) {
+        await this.trainStepGpu(image, params, learningRates, {
+          sync: false,
+          virtualCameraSampling,
+          currentStepOverride: batchSteps[slot],
+          batchEncoder: encoder,
+          batchConfigSlot: slot,
+        });
+      }
+      this.device.queue.submit([encoder.finish()]);
+      await this.device.queue.onSubmittedWorkDone();
+      const error = await this.device.popErrorScope();
+      errorScopeOpen = false;
+      if (error) throw new Error(error.message);
+      if (this.lastTrainStats) {
+        this.lastTrainStats = {
+          ...this.lastTrainStats,
+          sync: true,
+          batched: true,
+          batch_size: batchSteps.length,
+          batch_first_step: batchSteps[0],
+          batch_last_step: batchSteps[batchSteps.length - 1],
+        };
+      }
+      return this.lastTrainStats;
+    } finally {
+      if (errorScopeOpen) this.device.popErrorScope().catch(() => {});
+    }
   }
 
   async readTrainedColors(params) {
@@ -13531,6 +13580,88 @@ function trainSyncInterval() {
   return Math.max(1, Math.min(64, Math.round(interval)));
 }
 
+function plannedAdaptiveGpuBatch({
+  step,
+  steps,
+  desiredSize,
+  metricInterval,
+  previewRefresh,
+  structuralStep,
+  qaHashPending,
+  densitySteps,
+  growthSteps,
+  growthSettings,
+  runLayerSettings,
+  virtualCameraSampling,
+}) {
+  if (
+    performanceVariants().gpuSchedulingMode !== "adaptive" ||
+    previewRefresh === "frame" ||
+    virtualCameraSampling?.enabled ||
+    structuralStep ||
+    qaHashPending ||
+    performanceProfileLabels(step, steps).length > 0 ||
+    virtualTiltStepSpec(step, curriculumTrainingStage(
+      step,
+      steps,
+      phase33Variants(),
+      state.webgpu.renderer?.trainState?.coarseImage,
+      state.webgpu.renderer?.trainState?.midImage,
+    ), steps).enabled
+  ) return 1;
+  const startStage = curriculumTrainingStage(
+    step,
+    steps,
+    phase33Variants(),
+    state.webgpu.renderer?.trainState?.coarseImage,
+    state.webgpu.renderer?.trainState?.midImage,
+  );
+  const requested = Math.max(1, Math.min(MAX_TRAIN_BATCH_SIZE, Math.round(desiredSize) || 1));
+  let count = 1;
+  for (let candidate = step + 1; candidate <= steps && count < requested; candidate += 1) {
+    const candidateStage = curriculumTrainingStage(
+      candidate,
+      steps,
+      phase33Variants(),
+      state.webgpu.renderer?.trainState?.coarseImage,
+      state.webgpu.renderer?.trainState?.midImage,
+    );
+    const densityDue =
+      growthSettings.densityEventsEnabled &&
+      candidate > densifyWarmupSteps(densitySteps) &&
+      candidate <= growthSteps &&
+      (candidate % growthSettings.densifyInterval === 0 || candidate === growthSteps);
+    const relocationDue =
+      growthSettings.densityEventsEnabled &&
+      growthSettings.mcmcRelocationEnabled &&
+      candidate > densifyWarmupSteps(densitySteps) &&
+      candidate <= Math.floor(densitySteps * 0.85) &&
+      candidate % EXPERIMENTAL_REFINE_EVERY === 0;
+    const layerDue = layerOptimizationSettings(
+      candidate,
+      steps,
+      candidateStage,
+      runLayerSettings,
+    ).due;
+    if (
+      candidateStage !== startStage ||
+      densityDue ||
+      relocationDue ||
+      layerDue ||
+      performanceProfileLabels(candidate, steps).length > 0 ||
+      virtualTiltStepSpec(candidate, candidateStage, steps).enabled
+    ) break;
+    count += 1;
+    if (
+      candidate % metricInterval === 0 ||
+      shouldPresentTrainingStep(candidate, previewRefresh) ||
+      candidate % 32 === 0 ||
+      candidate === steps
+    ) break;
+  }
+  return count;
+}
+
 function setInputControlsDisabled(disabled) {
   for (const element of [
     els.fileInput,
@@ -13550,7 +13681,7 @@ function setInputControlsDisabled(disabled) {
     els.opacityLearningRate,
     els.alphaLossWeight,
     els.opacitySupportAggressive,
-    els.subgroupSyncReduction,
+    els.adaptiveGpuThroughput,
     els.virtualBoundedDepth,
     els.virtualGofDensity,
     els.virtualCameraShare,
@@ -13558,6 +13689,9 @@ function setInputControlsDisabled(disabled) {
     els.virtualCameraCount,
     els.virtualCameraFov,
     els.stageAwareGrowth,
+    els.stageGrowthP1,
+    els.stageGrowthP2,
+    els.stageGrowthP3,
     els.scaleLearningRate,
     els.rotationLearningRate,
     els.thetaAlignRate,
@@ -13588,10 +13722,8 @@ function setInputControlsDisabled(disabled) {
 }
 
 function syncExperimentalPerformanceControls() {
-  const subgroupUnavailable = state.webgpu.supported && !state.webgpu.subgroups;
   els.opacitySupportAggressive.disabled = state.running;
-  els.subgroupSyncReduction.disabled = state.running || subgroupUnavailable;
-  els.subgroupSyncReduction.setAttribute("aria-disabled", String(state.running || subgroupUnavailable));
+  els.adaptiveGpuThroughput.disabled = state.running;
 }
 
 function syncLayerOrderDependency() {
@@ -13818,12 +13950,19 @@ async function updatePreview(step, final = false, { present = true } = {}) {
     throw new Error(`${safety.reason}: metrics/readback skipped before budget overflow`);
   }
   if (layerTelemetryEnabled()) await recordLayerTelemetry(step);
+  const reuseMetricRender = Boolean(
+    !final &&
+    performanceVariants().metricTileReuse &&
+    state.webgpu.renderer?.canReuseMetricRender(state.image)
+  );
   if (els.tileCullingToggle.checked && state.webgpu.renderer?.trainState) {
     const includeTileDistribution = Boolean(
       performanceProfileRequested() &&
       performanceProfileLabels(step, state.metrics?.steps_requested || step).length > 0
     );
-    await state.webgpu.renderer.prepareTileLists(state.image, state.params, { sync: true });
+    if (!reuseMetricRender) {
+      await state.webgpu.renderer.prepareTileLists(state.image, state.params, { sync: true });
+    }
     let tileCounters = await state.webgpu.renderer.readTileCounters({ includeDistribution: includeTileDistribution });
     const reserveRatio = tileCounters ? tileCounters.total / Math.max(1, tileCounters.capacity) : 0;
     const qaOverflowPending =
@@ -13894,7 +14033,20 @@ async function updatePreview(step, final = false, { present = true } = {}) {
     if (outsidePreviewActive) {
       await state.webgpu.renderer.render(state.image, state.params, trainBuffers);
     }
-    metrics = await state.webgpu.renderer.computeMetrics(state.image, state.params, trainBuffers);
+    metrics = await state.webgpu.renderer.computeMetrics(
+      state.image,
+      state.params,
+      trainBuffers,
+      { reuseCurrentRender: reuseMetricRender },
+    );
+    const previousMetricReuse = state.metrics.metric_tile_reuse || {};
+    state.metrics.metric_tile_reuse = {
+      requested: performanceVariants().metricTileReuse,
+      last_applied: Boolean(metrics.reusedRender),
+      applied_count: (previousMetricReuse.applied_count || 0) + (metrics.reusedRender ? 1 : 0),
+      fallback_count: (previousMetricReuse.fallback_count || 0) + (metrics.reusedRender ? 0 : 1),
+      lag_iterations: metrics.reusedRender ? 1 : previousMetricReuse.lag_iterations || 0,
+    };
     const restoreTrainingStage = !final
       ? state.webgpu.renderer.lastTrainStats?.training_stage
       : "full";
@@ -13903,7 +14055,7 @@ async function updatePreview(step, final = false, { present = true } = {}) {
       : restoreTrainingStage === "mid"
         ? state.webgpu.renderer.trainState?.midImage
         : null;
-    if (restoreStageImage) {
+    if (restoreStageImage && !metrics.reusedRender) {
       if (els.tileCullingToggle.checked) {
         await state.webgpu.renderer.prepareTileLists(restoreStageImage, state.params, { sync: true });
       }
@@ -14195,9 +14347,12 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
   }
   const performanceSelection = state.webgpu.renderer.configureExperimentalPerformance();
   document.documentElement.dataset.opacityAwareSupport = performanceSelection.opacityAwareSupportMode;
-  document.documentElement.dataset.subgroupSyncReduction = String(performanceSelection.subgroupSyncReduction);
-  if (performanceSelection.opacityAwareSupportMode !== "off" || performanceSelection.subgroupSyncReduction) {
-    log(`experimental GPU performance opacity_support=${performanceSelection.opacityAwareSupportMode} subgroup_sync=${performanceSelection.subgroupSyncReduction}`);
+  document.documentElement.dataset.adaptiveGpuThroughput = String(performanceSelection.adaptiveGpuThroughput);
+  if (
+    performanceSelection.opacityAwareSupportMode !== "off" ||
+    performanceSelection.adaptiveGpuThroughput
+  ) {
+    log(`experimental GPU performance adaptive_throughput=${performanceSelection.adaptiveGpuThroughput} opacity_support=${performanceSelection.opacityAwareSupportMode}`);
   }
   const requestedSteps = normalizeStepInteger(els.stepCount.value, {
     min: LIMITS.stepsMin,
@@ -14257,6 +14412,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
   let learningRates = selectedLearningRates();
   let previewRefresh = selectedPreviewRefresh();
   const runStageAwareGrowth = phase39Variants().stageAwareGrowth;
+  const runStageGrowthShares = phase39Variants().stageGrowthShares;
   const runLayerSettings = phase46Variants();
   const runVirtualCameraSampling = virtualCameraSamplingVariants(virtualCameraSamplingEnabled);
   const runAdaptiveGridInitialization = adaptiveGridInitializationVariants(virtualCameraSamplingEnabled);
@@ -14281,6 +14437,9 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
   };
   els.initialSplatCount.value = String(initialCount);
   els.finalSplatCount.value = String(finalCount);
+  els.stageGrowthP1.value = (runStageGrowthShares.p1 * 100).toFixed(2);
+  els.stageGrowthP2.value = (runStageGrowthShares.p2 * 100).toFixed(2);
+  els.stageGrowthP3.value = (runStageGrowthShares.p3 * 100).toFixed(2);
   els.stepCount.value = String(steps);
   els.previewRefresh.value = previewRefresh;
   els.layerUpdateInterval.value = String(runLayerSettings.layerUpdateInterval);
@@ -14368,6 +14527,12 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
     initial_orientation: initialOrientationStats(state.params, state.image),
     param_delta: null,
     train_sync_interval: trainSyncInterval(),
+    gpu_scheduling: {
+      adaptive_throughput: performanceSelection.adaptiveGpuThroughput,
+      mode: performanceSelection.gpuSchedulingMode,
+      async_presentation: performanceSelection.asyncPresentation,
+      metric_tile_reuse: performanceSelection.metricTileReuse,
+    },
     backend: selectedBackend(),
     webgpu_supported: state.webgpu.supported,
     webgpu_reason: state.webgpu.reason,
@@ -14446,7 +14611,11 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
     phase33_variants: phase33Variants(),
     phase37_variants: phase37Variants(),
     phase38_variants: phase38Variants(),
-    phase39_variants: { ...phase39Variants(), stageAwareGrowth: runStageAwareGrowth },
+    phase39_variants: {
+      ...phase39Variants(),
+      stageAwareGrowth: runStageAwareGrowth,
+      stageGrowthShares: runStageGrowthShares,
+    },
     phase40_variants: phase40Variants(),
     phase45_variants: phase45Variants(),
     phase46_variants: runLayerSettings,
@@ -14564,9 +14733,14 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
       percentage: phase39Variants().growthFraction * 100,
       signal_threshold: phase39Variants().growthSignalThreshold,
       stage_aware: runStageAwareGrowth,
-      detail_reserve_percentage: STAGE_AWARE_GROWTH_RESERVE * 100,
+      phase_shares_percentage: {
+        p1: runStageGrowthShares.p1 * 100,
+        p2: runStageGrowthShares.p2 * 100,
+        p3: runStageGrowthShares.p3 * 100,
+      },
+      detail_reserve_percentage: runStageGrowthShares.p3 * 100,
       density_stage_target: runStageAwareGrowth
-        ? Math.min(finalCount, state.params.count + Math.round((finalCount - state.params.count) * (1 - STAGE_AWARE_GROWTH_RESERVE)))
+        ? Math.min(finalCount, state.params.count + Math.round((finalCount - state.params.count) * (runStageGrowthShares.p1 + runStageGrowthShares.p2)))
         : null,
       growth_stage_target: finalCount,
       cap_reached_step: state.params.count >= finalCount ? 0 : null,
@@ -14664,6 +14838,13 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
     const trainingPerfStarted = performance.now();
     let traceLastTime = trainingPerfStarted;
     let traceLastStep = 0;
+    const gpuBatchTuning = {
+      size: performanceSelection.gpuSchedulingMode === "adaptive" ? 8 : 1,
+      targetMs: 120,
+      submittedBatches: 0,
+      submittedIterations: 0,
+      maximumObservedSize: 1,
+    };
     for (let step = 1; step <= steps; step += 1) {
       const traceProfileLabels = state.webgpu.profile?.timing_backend === "timestamp-query"
         ? performanceProfileLabels(step, steps)
@@ -14691,7 +14872,11 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
       }
       const densitySteps = experimentalDensifySteps(steps);
       const growthSteps = experimentalGrowthSteps(steps);
-      const growthSettings = { ...phase39Variants(), stageAwareGrowth: runStageAwareGrowth };
+      const growthSettings = {
+        ...phase39Variants(),
+        stageAwareGrowth: runStageAwareGrowth,
+        stageGrowthShares: runStageGrowthShares,
+      };
       const densifyInterval = growthSettings.densifyInterval;
       const densifyDue =
         growthSettings.densityEventsEnabled &&
@@ -14708,6 +14893,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
           growthFraction: growthSettings.growthFraction,
           densifyInterval,
           stageAware: growthSettings.stageAwareGrowth,
+          stageGrowthShares: growthSettings.stageGrowthShares,
         })
         : null;
       const requestedTargetCount = growthPlan?.requestedCount ?? state.params.count;
@@ -14802,18 +14988,70 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
           state.metrics.residual_destination_oracle = state.webgpu.renderer.residualDestinationOracleSummary();
         }
       }
-      const structuralStep = densifyDue;
+      const relocationDueAtStep =
+        growthSettings.densityEventsEnabled &&
+        growthSettings.mcmcRelocationEnabled &&
+        gpuRelocationEnabled &&
+        step > densifyWarmupSteps(densitySteps) &&
+        step <= Math.floor(densitySteps * 0.85) &&
+        step % EXPERIMENTAL_REFINE_EVERY === 0;
+      const structuralStep = densifyDue || relocationDueAtStep;
       const qaHashPending = qaTileOverflowFixtureEnabled() && !state.metrics.tile_retry_parameter_hash?.matches;
-      const shouldSyncTrain = qaHashPending || structuralStep || step % state.metrics.train_sync_interval === 0 || step % metricInterval === 0 || step === steps;
+      const gpuBatchSize = plannedAdaptiveGpuBatch({
+        step,
+        steps,
+        desiredSize: gpuBatchTuning.size,
+        metricInterval,
+        previewRefresh,
+        structuralStep,
+        qaHashPending,
+        densitySteps,
+        growthSteps,
+        growthSettings,
+        runLayerSettings,
+        virtualCameraSampling: runVirtualCameraSampling,
+      });
+      const shouldSyncTrain = performanceSelection.gpuSchedulingMode === "adaptive"
+        ? true
+        : qaHashPending || structuralStep || step % state.metrics.train_sync_interval === 0 || step % metricInterval === 0 || step === steps;
       const parameterHashBefore = qaHashPending
         ? await state.webgpu.renderer.hashTrainParameters(state.params)
         : null;
       const trainStarted = performance.now();
-      await state.webgpu.renderer.trainStepGpu(state.image, state.params, learningRates, {
-        sync: shouldSyncTrain,
-        virtualCameraSampling: runVirtualCameraSampling,
-      });
+      if (gpuBatchSize > 1) {
+        const batchSteps = Array.from({ length: gpuBatchSize }, (_, index) => step + index);
+        await state.webgpu.renderer.trainStepsGpu(
+          state.image,
+          state.params,
+          learningRates,
+          batchSteps,
+          { virtualCameraSampling: runVirtualCameraSampling },
+        );
+      } else {
+        await state.webgpu.renderer.trainStepGpu(state.image, state.params, learningRates, {
+          sync: shouldSyncTrain,
+          virtualCameraSampling: runVirtualCameraSampling,
+        });
+      }
       stepTrainMs = performance.now() - trainStarted;
+      gpuBatchTuning.submittedBatches += 1;
+      gpuBatchTuning.submittedIterations += gpuBatchSize;
+      gpuBatchTuning.maximumObservedSize = Math.max(gpuBatchTuning.maximumObservedSize, gpuBatchSize);
+      if (performanceSelection.gpuSchedulingMode === "adaptive" && gpuBatchSize > 1 && stepTrainMs > 0.1) {
+        const measuredPerIteration = stepTrainMs / gpuBatchSize;
+        const proposed = Math.max(2, Math.min(MAX_TRAIN_BATCH_SIZE, Math.round(gpuBatchTuning.targetMs / measuredPerIteration)));
+        gpuBatchTuning.size = Math.max(2, Math.min(MAX_TRAIN_BATCH_SIZE, Math.round((gpuBatchTuning.size + proposed) * 0.5)));
+      }
+      state.metrics.gpu_scheduling = {
+        ...state.metrics.gpu_scheduling,
+        current_batch_size: gpuBatchTuning.size,
+        submitted_batches: gpuBatchTuning.submittedBatches,
+        submitted_iterations: gpuBatchTuning.submittedIterations,
+        maximum_observed_batch_size: gpuBatchTuning.maximumObservedSize,
+        target_batch_ms: gpuBatchTuning.targetMs,
+      };
+      const completedStep = step + gpuBatchSize - 1;
+      step = completedStep;
       state.metrics.webgpu_train_executed = true;
       state.metrics.webgpu_train_update = Boolean(state.webgpu.renderer.lastTrainStats?.updated);
       const virtualCameraSample = state.webgpu.renderer.lastTrainStats?.virtual_camera_sample || null;
@@ -14866,13 +15104,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
         if (state.metrics.layer_update_first_steps.length < 16) state.metrics.layer_update_first_steps.push(step);
       }
       state.metrics.steps_done = step;
-      const relocationDue =
-        growthSettings.densityEventsEnabled &&
-        growthSettings.mcmcRelocationEnabled &&
-        gpuRelocationEnabled &&
-        step > densifyWarmupSteps(densitySteps) &&
-        step <= Math.floor(densitySteps * 0.85) &&
-        step % EXPERIMENTAL_REFINE_EVERY === 0;
+      const relocationDue = relocationDueAtStep;
       if (relocationDue) {
         const relocationStarted = performance.now();
         const relocatedOnGpu = await state.webgpu.renderer.relocateExperimentalGpu(state.image, state.params, step, learningRates);
@@ -14881,6 +15113,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
         if (relocatedOnGpu) {
           state.metrics.webgpu_relocation = true;
           state.metrics.webgpu_refine = true;
+          if (state.webgpu.renderer.trainState) state.webgpu.renderer.trainState.tileReady = false;
         }
       }
       if (state.stopRequested) {
@@ -14906,20 +15139,20 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
           break;
         }
         await updatePreview(step, false);
-        await nextFrame();
+        if (!performanceSelection.asyncPresentation) await nextFrame();
         stepPresentationMs = performance.now() - presentationStarted;
       } else if (shouldPresentTrainingStep(step, previewRefresh)) {
         const presentationStarted = performance.now();
         presentation = "preview";
         if (!(await presentTrainingPreview(step))) throw new Error("WebGPU live preview state is unavailable");
-        await nextFrame();
+        if (!performanceSelection.asyncPresentation) await nextFrame();
         stepPresentationMs = performance.now() - presentationStarted;
       } else if (step % 32 === 0) {
         const presentationStarted = performance.now();
         presentation = "status";
         els.stepText.textContent = `${step} / ${state.metrics.steps_requested}`;
         publishState();
-        await nextFrame();
+        if (!performanceSelection.asyncPresentation) await nextFrame();
         stepPresentationMs = performance.now() - presentationStarted;
       }
       if (step % metricInterval === 0 || step === steps) {
@@ -16795,7 +17028,10 @@ const commitFinalSplatCount = () => {
 els.finalSplatCount.addEventListener("change", commitFinalSplatCount);
 els.finalSplatCount.addEventListener("blur", commitFinalSplatCount);
 els.tileCullingToggle.addEventListener("change", publishState);
-for (const element of [els.opacitySupportAggressive, els.subgroupSyncReduction]) {
+for (const element of [
+  els.opacitySupportAggressive,
+  els.adaptiveGpuThroughput,
+]) {
   element.addEventListener("change", () => {
     syncExperimentalPerformanceControls(element);
     publishState();
@@ -16818,6 +17054,9 @@ for (const element of [els.virtualCameraMaxAngle, els.virtualCameraCount, els.vi
   });
 }
 els.stageAwareGrowth.addEventListener("change", publishState);
+for (const element of [els.stageGrowthP1, els.stageGrowthP2, els.stageGrowthP3]) {
+  element.addEventListener("input", publishState);
+}
 els.detailCoherence.addEventListener("input", publishState);
 els.densifyInterval.addEventListener("input", publishState);
 els.growthPercentage.addEventListener("input", publishState);
@@ -17224,7 +17463,11 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
       gpuDensifyEnabled: true,
       tileCullingEnabled: Boolean(els.tileCullingToggle.checked),
       opacityAwareSupport: performanceVariants().opacityAwareSupportMode,
-      subgroupSyncReduction: Boolean(els.subgroupSyncReduction.checked),
+      adaptiveGpuThroughput: performanceVariants().adaptiveGpuThroughput,
+      gpuSchedulingMode: performanceVariants().gpuSchedulingMode,
+      asyncPresentation: performanceVariants().asyncPresentation,
+      metricTileReuse: performanceVariants().metricTileReuse,
+      stageGrowthShares: phase39Variants().stageGrowthShares,
       loss: els.lossText.textContent,
       step: els.stepText.textContent,
       previewRefresh: els.previewRefresh.value,
@@ -17469,6 +17712,8 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
       stage_profile: m.stage_profile || [],
       stage_profile_backend: m.stage_profile_backend || "off",
       scheduling_profile: m.scheduling_profile || null,
+      gpu_scheduling: m.gpu_scheduling ? structuredClone(m.gpu_scheduling) : null,
+      metric_tile_reuse: m.metric_tile_reuse ? structuredClone(m.metric_tile_reuse) : null,
       importance_stats: m.importance_stats,
       residual_destination_oracle: m.residual_destination_oracle
         ? structuredClone(m.residual_destination_oracle)
