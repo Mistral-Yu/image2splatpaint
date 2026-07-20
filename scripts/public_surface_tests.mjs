@@ -152,7 +152,10 @@ const contracts = {
     index.includes("PLY uses standard SH0 Gaussian Splatting fields.") &&
     index.includes("For conventional multi-angle 3DGS viewing, train with GS Virtual Camera Sampling") &&
     app.includes("For conventional multi-angle 3DGS viewing, train with GS Virtual Camera Sampling") &&
-    readme.includes("Use `GS Virtual Camera Sampling` for conventional multi-angle 3DGS viewing") &&
+    !readme.includes("sRGB colors") &&
+    !readme.includes("Initial splat colors come from the image") &&
+    !readme.includes("With `GS Virtual Camera Sampling`, inspect the in-memory PLY") &&
+    !readme.includes("Use `GS Virtual Camera Sampling` for conventional multi-angle 3DGS viewing") &&
     !/Graphdeco/i.test(`${index}\n${app}\n${readme}`) &&
     !/[ぁ-んァ-ヶ一-龯]/.test(`${index}\n${app}`) &&
     (index.match(/data-testid="app-footer"/g)?.length || 0) === 1 &&

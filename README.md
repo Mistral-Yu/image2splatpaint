@@ -7,10 +7,10 @@ implementation and validation.
 
 ## Use
 
-[Open Image2SplatPaint on GitHub Pages](https://mistral-yu.github.io/image2splatpaint/)
+[Open Image2SplatPaint on GitHub Pages](https://mistral-yu.github.io/image2splatpaint/web/index.html)
 
 WebGPU is required. The active model is a custom planar Gaussian optimizer with
-sRGB colors, SH0, and planar splats with bounded micro-depth for layer order. Virtual-camera training can optionally learn an additional thin bounded depth. Training and preview use a
+SH0 and planar splats with bounded micro-depth for layer order. Virtual-camera training can optionally learn an additional thin bounded depth. Training and preview use a
 custom WebGPU renderer. Grid initialization and density growth respect the
 source image's pixel aspect.
 
@@ -19,21 +19,17 @@ from `GS Virtual Camera Sampling`. Virtual-camera teachers and the `Tilt` tab
 are only enabled for the latter, so front-only optimizer changes do not alter
 the virtual-camera path.
 
-Initial splat colors come from the image. Opacity remains trainable and is
-evaluated separately from RGB reconstruction quality.
-
 ## Workflow
 
 1. Load or drop an image.
 2. Set the image limit, splat counts, iterations, and optimizer controls.
 3. Train while L1 and SSIM update, then compare against the original.
-4. With `GS Virtual Camera Sampling`, inspect the in-memory PLY and training cameras in the `Tilt` tab.
-5. Save the rendered frame or export the splats.
+4. Save the rendered frame or export the splats.
 
 ## Exports
 
 - PNG: current Splats preview, including shape, effects, alpha background, and optional outside-image padding.
-- PLY: standard SH0 Gaussian Splatting fields in aspect-preserving coordinates. It stores the learned layer-order depth plus any enabled bounded virtual depth in `z`. Use `GS Virtual Camera Sampling` for conventional multi-angle 3DGS viewing; `Planar Gaussian` is front-view only.
+- PLY: standard SH0 Gaussian Splatting fields in aspect-preserving coordinates. It stores the learned layer-order depth plus any enabled bounded virtual depth in `z`.
 
 PLY opacity, color, scale, and rotation use standard pre-activation fields. The
 training renderer and exported result use standard front-to-back alpha blending.
