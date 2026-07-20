@@ -27,9 +27,12 @@ jobs:
           for file in web/app.js scripts/*.mjs; do node --check "$file"; done
           node scripts/public_surface_tests.mjs
           node scripts/standard_alpha_tests.mjs
+          node scripts/train_bind_group_cache_tests.mjs
+          node scripts/stage_min_scale_tests.mjs
           node scripts/tilt_robustness_tests.mjs
           node scripts/tilt_camera_tests.mjs
           node scripts/virtual_tilt_tests.mjs
+          node scripts/virtual_bounded_depth_tests.mjs
           node scripts/large_dispatch_tests.mjs
           node scripts/p2_budget_contract_tests.mjs
           node scripts/p2_optimizer_input_tests.mjs

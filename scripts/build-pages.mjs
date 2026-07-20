@@ -14,12 +14,12 @@ await cp(resolve(root, "index.html"), resolve(output, "index.html"));
 await cp(resolve(root, "LICENSE"), resolve(output, "LICENSE"));
 await cp(resolve(root, "THIRD_PARTY_NOTICES.md"), resolve(output, "THIRD_PARTY_NOTICES.md"));
 await mkdir(resolve(output, "web"), { recursive: true });
-for (const filename of ["index.html", "app.js", "styles.css", "tilt-camera.mjs", "tilt-viewer.mjs"]) {
+for (const filename of ["index.html", "app.js", "sample-image-data.js", "styles.css", "tilt-camera.mjs", "tilt-viewer.mjs", "tilt-viewer.bundle.js"]) {
   await cp(resolve(root, "web", filename), resolve(output, "web", filename));
 }
 await cp(resolve(root, "web/vendor"), resolve(output, "web/vendor"), { recursive: true });
 await mkdir(resolve(output, "assets/source-images"), { recursive: true });
-for (const filename of ["README.md", "ramen-photo.jpg"]) {
+for (const filename of ["README.md", "ramen-photo.jpg", "generated-geometric-sample.jpg"]) {
   await cp(resolve(root, "assets/source-images", filename), resolve(output, "assets/source-images", filename));
 }
 await writeFile(resolve(output, ".nojekyll"), "", "utf8");

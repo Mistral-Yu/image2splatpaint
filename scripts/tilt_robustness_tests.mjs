@@ -118,31 +118,37 @@ const sourceContracts = {
   colorAndDepthGate: app.includes("supportDepth / depthThreshold") && app.includes("colorMismatch / colorThreshold"),
   fourSigmaColorGate: app.includes("center - axisX * 4.0") && app.includes("center + axisY * 4.0"),
   singleSourceRequired: app.includes("var tiltTrueSplit = mode == 1u && tiltProfile.x > 0.0 && config[42] > 0.5"),
-  sourceReplaced: app.includes("xy[source] = replacementSourcePos") &&
+  sourceReplaced: app.includes("xy[source].center = replacementSourcePos") &&
     app.includes("transform[source] = vec4<f32>(replacementSourceScale"),
   adcOnlyGrowthGate: app.includes("let tiltRisk = adc && tiltProfile.x > 0.0"),
-  symmetricOffsets: app.includes("xy[source] - axis * major * 0.34") &&
+  symmetricOffsets: app.includes("xy[source].center - axis * major * 0.34") &&
     app.includes("major * splitOffset * select(side, 1.0, tiltTrueSplit)"),
   broadSplitShrinksBothAxes: app.includes("nextScale = select(axisShrink, sourceT.xy * splitShrink, tiltTrueSplit)") &&
     app.includes("splitScale = select(axisShrink, sourceT.xy * splitShrink, tiltTrueSplit)"),
   appearancePreservingSplit: app.includes("const DEFAULT_TILT_SPLIT_SHRINK = 0.8") &&
     app.includes("color[source] = vec4<f32>(sourceC.rgb, childOpacity)"),
   runtimePlanarScaleCap: app.includes("maxPlanarScale: clampNumber(els.maxPlanarScale.value") &&
-    app.includes("const optimizerShader = `\nstruct Config { values: array<vec4<f32>, 16>, };") &&
-    app.includes("nextScale = min(nextScale, vec2<f32>(max(cfg(62u), minScale)))") &&
+    app.includes('const optimizerShader = `') &&
+    app.includes("struct Config { values: array<vec4<f32>, 21>, };") &&
+    app.includes("let phaseMaxPlanarScale = mix(max(cfg(62u), ${PHASE_ONE_MAX_PLANAR_SCALE}), max(cfg(62u), minScale), phaseOneProgress)") &&
+    app.includes("nextScale = min(nextScale, vec2<f32>(phaseMaxPlanarScale))") &&
     app.includes("vec2<f32>(max(config[56], ${MIN_SPLAT_SCALE}))"),
-  safeDefaults: app.includes("const DEFAULT_MAX_PLANAR_SCALE = 0.03") &&
-    index.includes('id="maxPlanarScale"') && index.includes('value="0.03"') &&
+  safeDefaults: app.includes("const DEFAULT_MAX_PLANAR_SCALE = 0.1") &&
+    index.includes('id="maxPlanarScale"') && index.includes('value="0.1"') &&
     app.includes('query.get("tilt-robust-split") !== "0"\n        : false') &&
     app.includes('query.get("virtual-tilt") !== "0"\n        : false') &&
     app.includes("const DEFAULT_VIRTUAL_ORDER_PENALTY_WEIGHT = 0"),
   viewerFrontOrientation: !tiltViewer.includes("splat.setEulerAngles") &&
     tiltViewer.includes('const camera = new Entity("Tilt Camera")'),
-  viewerRuntimeSafety: tiltViewer.includes("function plySupportHalfExtents") &&
+  viewerRuntimeSafety: tiltViewer.includes("canonicalOrbitRadius(frame") &&
+    !tiltViewer.includes("plySupportHalfExtents") &&
     tiltViewer.includes("const sortTimeoutMs = Math.min(30000") &&
     tiltViewer.includes("requestedPitch === pitch && requestedYaw === yaw") &&
     tiltViewer.includes('from "./tilt-camera.mjs"') &&
-    tiltViewer.includes("orbitCameraPose(pitch, yaw, orbitRadius)") &&
+    tiltViewer.includes("orbitCameraPose(viewPitch, viewYaw, viewRadius)") &&
+    tiltViewer.includes('viewMode: cameraMarkersVisible ? "camera-pool-overview" : "center-orbit"') &&
+    tiltViewer.includes("fitOrbitRadius(supportFrame") &&
+    app.includes("supportFrame: renderFootprintSupportFrame(state.image, state.params)") &&
     tiltViewer.includes('blobUrl = ""') &&
     app.includes("function assertTiltViewerCapacity") &&
     index.includes('data-testid="tilt-pitch" type="range" min="-75" max="75"') &&

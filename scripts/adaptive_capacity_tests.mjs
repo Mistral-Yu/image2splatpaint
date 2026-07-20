@@ -20,8 +20,10 @@ const checks = {
     html.includes('>Auto by GPU memory</option>') &&
     app.includes('els.capacityMode.value === "auto-probe"'),
   capacity_control_order:
-    html.indexOf('data-testid="lr-panel"') < html.indexOf('data-testid="capacity-mode"') &&
-    html.indexOf('data-testid="capacity-mode"') < html.indexOf('data-testid="budget-panel"') &&
+    html.indexOf('data-testid="lr-panel"') < html.indexOf('data-testid="virtual-camera-panel"') &&
+    html.indexOf('data-testid="virtual-camera-panel"') < html.indexOf('data-testid="budget-panel"') &&
+    html.indexOf('data-testid="budget-panel"') < html.indexOf('data-testid="capacity-mode"') &&
+    html.indexOf('data-testid="capacity-mode"') < html.indexOf('<div class="budget-grid">') &&
     !html.slice(html.indexOf('<div class="training-grid">'), html.indexOf('</div>', html.indexOf('<div class="training-grid">'))).includes('data-testid="capacity-mode"'),
   low_capacity_fast_path:
     app.includes("const CAPACITY_PROBE_FAST_PATH_MAX = 262144") &&

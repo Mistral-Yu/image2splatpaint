@@ -1,4 +1,5 @@
 import {
+  ASPECT_MANUAL,
   Application,
   Asset,
   AssetListLoader,
@@ -13,10 +14,12 @@ import {
 import {
   TILT_FOV_DEGREES,
   cameraDiagnostics,
+  canonicalOrbitRadius,
   clampOrbitAngles,
   fitOrbitRadius,
   frameWorldCorners,
   orbitCameraPose,
+  trainingCameraMarkerGeometry,
 } from "./tilt-camera.mjs";
 
 const ENGINE_VERSION = "2.20.6";
@@ -50,36 +53,6 @@ function loadAssets(assets, registry, signal) {
 function plyVertexCount(buffer) {
   const prefix = new TextDecoder("ascii").decode(new Uint8Array(buffer, 0, Math.min(buffer.byteLength, 4096)));
   return Number(prefix.match(/^element vertex (\d+)$/m)?.[1] || 0);
-}
-
-function plySupportHalfExtents(buffer, fallback, sigma = 3) {
-  const bytes = new Uint8Array(buffer);
-  const prefix = new TextDecoder("ascii").decode(bytes.subarray(0, Math.min(bytes.byteLength, 4096)));
-  const marker = "end_header\n";
-  const headerEnd = prefix.indexOf(marker);
-  const vertices = Number(prefix.match(/^element vertex (\d+)$/m)?.[1] || 0);
-  const dataOffset = headerEnd < 0 ? -1 : headerEnd + marker.length;
-  if (dataOffset < 0 || vertices <= 0 || dataOffset + vertices * 68 > buffer.byteLength) return fallback;
-
-  const view = new DataView(buffer, dataOffset);
-  let x = Math.max(1e-3, Number(fallback?.x) || 1);
-  let y = Math.max(1e-3, Number(fallback?.y) || 1);
-  for (let index = 0; index < vertices; index += 1) {
-    const row = index * 68;
-    const centerX = view.getFloat32(row, true);
-    const centerY = view.getFloat32(row + 4, true);
-    const sx = Math.exp(view.getFloat32(row + 40, true));
-    const sy = Math.exp(view.getFloat32(row + 44, true));
-    const theta = 2 * Math.atan2(view.getFloat32(row + 64, true), view.getFloat32(row + 52, true));
-    const c = Math.cos(theta);
-    const s = Math.sin(theta);
-    const extentX = sigma * Math.hypot(c * sx, s * sy);
-    const extentY = sigma * Math.hypot(s * sx, c * sy);
-    if (!Number.isFinite(centerX + centerY + extentX + extentY)) continue;
-    x = Math.max(x, Math.abs(centerX) + extentX);
-    y = Math.max(y, Math.abs(centerY) + extentY);
-  }
-  return { x, y };
 }
 
 async function sha256Hex(buffer) {
@@ -116,7 +89,15 @@ function nextAnimationFrame() {
   return new Promise((resolve) => requestAnimationFrame(resolve));
 }
 
-export async function createTiltViewer({ canvas, plyBuffer, frame, signal, onCameraChange }) {
+export async function createTiltViewer({
+  canvas,
+  plyBuffer,
+  frame,
+  supportFrame = frame,
+  signal,
+  onCameraChange,
+  cameraPool = null,
+}) {
   if (!(canvas instanceof HTMLCanvasElement)) throw new Error("Tilt viewer canvas is unavailable.");
   if (!(plyBuffer instanceof ArrayBuffer) || plyBuffer.byteLength === 0) throw new Error("Tilt viewer PLY is empty.");
   signal?.throwIfAborted?.();
@@ -139,11 +120,13 @@ export async function createTiltViewer({ canvas, plyBuffer, frame, signal, onCam
     app.autoRender = false;
     app.start();
 
+    const sharedFovDegrees = Math.max(25, Math.min(55, Number(cameraPool?.fov_degrees) || TILT_FOV_DEGREES));
     const camera = new Entity("Tilt Camera");
     camera.addComponent("camera", {
+      aspectRatioMode: ASPECT_MANUAL,
       clearColor: new Color(0, 0, 0, 1),
       farClip: 100,
-      fov: TILT_FOV_DEGREES,
+      fov: sharedFovDegrees,
       gammaCorrection: GAMMA_SRGB,
       nearClip: 0.01,
       toneMapping: TONEMAP_NONE,
@@ -165,12 +148,55 @@ export async function createTiltViewer({ canvas, plyBuffer, frame, signal, onCam
     splat.addComponent("gsplat", { asset });
     app.root.addChild(splat);
 
-    const support = plySupportHalfExtents(plyBuffer, frame);
     let pitch = 0;
     let yaw = 0;
-    let orbitRadius = 1;
+    const orbitRadius = Number.isFinite(Number(cameraPool?.orbit_radius))
+      ? Math.max(0.01, Number(cameraPool.orbit_radius))
+      : canonicalOrbitRadius(frame, {
+        fovDegrees: sharedFovDegrees,
+        maxAngleDegrees: 75,
+      });
+    let radiusMode = "training";
+    let fitAllOrbitRadius = orbitRadius;
+    let viewerOrbitRadius = orbitRadius;
     let lastCameraDiagnostics = null;
     let destroyed = false;
+    let cameraMarkersVisible = true;
+    let cameraPoolSnapshot = cameraPool ? structuredClone(cameraPool) : null;
+    let cameraMarkers = trainingCameraMarkerGeometry(cameraPoolSnapshot);
+    const markerOverviewPitch = 20;
+    const markerOverviewYaw = -42;
+    let markerOverviewRadius = orbitRadius * 2.65;
+    const frontCameraColor = new Color(0.12, 0.72, 0.95, 1);
+    const virtualCameraColor = new Color(1, 0.48, 0.12, 1);
+    const activeCameraColor = new Color(1, 0.9, 0.18, 1);
+
+    const drawMarkerSegment = (start, end, color) => {
+      app.drawLine(new Vec3(...start), new Vec3(...end), color, false);
+    };
+
+    const drawCameraMarkers = () => {
+      if (!cameraMarkersVisible) return;
+      for (const marker of cameraMarkers) {
+        const color = marker.active
+          ? activeCameraColor
+          : marker.kind === "front" ? frontCameraColor : virtualCameraColor;
+        const scale = orbitRadius * (marker.active ? 0.025 : 0.016);
+        for (let axis = 0; axis < 3; axis += 1) {
+          const low = [...marker.position];
+          const high = [...marker.position];
+          low[axis] -= scale;
+          high[axis] += scale;
+          drawMarkerSegment(low, high, color);
+        }
+        const corners = marker.frustumCorners;
+        for (let index = 0; index < corners.length; index += 1) {
+          drawMarkerSegment(marker.position, corners[index], color);
+          drawMarkerSegment(corners[index], corners[(index + 1) % corners.length], color);
+        }
+      }
+    };
+    app.on("prerender", drawCameraMarkers);
 
     const requestPresentedFrame = async () => {
       if (destroyed) return;
@@ -187,10 +213,8 @@ export async function createTiltViewer({ canvas, plyBuffer, frame, signal, onCam
     const resize = () => {
       if (destroyed || !canvas.clientWidth || !canvas.clientHeight) return;
       app.resizeCanvas(canvas.clientWidth, canvas.clientHeight);
-      orbitRadius = fitOrbitRadius(support, {
-        width: canvas.clientWidth,
-        height: canvas.clientHeight,
-      });
+      camera.camera.aspectRatioMode = ASPECT_MANUAL;
+      camera.camera.aspectRatio = canvas.clientWidth / canvas.clientHeight;
       app.renderNextFrame = true;
     };
 
@@ -200,10 +224,13 @@ export async function createTiltViewer({ canvas, plyBuffer, frame, signal, onCam
         width: Math.max(1, canvas.clientWidth),
         height: Math.max(1, canvas.clientHeight),
       };
-      const pose = orbitCameraPose(pitch, yaw, orbitRadius);
+      const viewPitch = cameraMarkersVisible ? markerOverviewPitch : pitch;
+      const viewYaw = cameraMarkersVisible ? markerOverviewYaw : yaw;
+      const viewRadius = cameraMarkersVisible ? markerOverviewRadius : viewerOrbitRadius;
+      const pose = orbitCameraPose(viewPitch, viewYaw, viewRadius);
       camera.setPosition(...pose.position);
       camera.lookAt(0, 0, 0);
-      const analytic = cameraDiagnostics(frame, viewport, pitch, yaw, orbitRadius, TILT_FOV_DEGREES);
+      const analytic = cameraDiagnostics(frame, viewport, viewPitch, viewYaw, viewRadius, sharedFovDegrees);
       const playCanvasCorners = frameWorldCorners(frame).map((corner) => {
         const screen = camera.camera.worldToScreen(
           new Vec3(corner[0], corner[1], corner[2]),
@@ -217,6 +244,12 @@ export async function createTiltViewer({ canvas, plyBuffer, frame, signal, onCam
       )));
       lastCameraDiagnostics = {
         ...analytic,
+        viewMode: cameraMarkersVisible ? "camera-pool-overview" : "center-orbit",
+        trainingOrbitRadius: orbitRadius,
+        fitAllOrbitRadius,
+        radiusMode,
+        viewerOrbitRadius,
+        supportFrame: { ...supportFrame },
         playCanvasCorners,
         cornerErrorMaxPx,
       };
@@ -226,10 +259,28 @@ export async function createTiltViewer({ canvas, plyBuffer, frame, signal, onCam
 
     const resizeObserver = new ResizeObserver(() => {
       resize();
+      fitAllOrbitRadius = fitOrbitRadius(supportFrame, {
+        width: Math.max(1, canvas.clientWidth),
+        height: Math.max(1, canvas.clientHeight),
+      }, {
+        fovDegrees: sharedFovDegrees,
+        maxAngleDegrees: 75,
+      });
+      viewerOrbitRadius = radiusMode === "fit" ? fitAllOrbitRadius : orbitRadius;
+      markerOverviewRadius = Math.max(orbitRadius, viewerOrbitRadius) * 2.65;
       updateCamera();
     });
     resizeObserver.observe(canvas);
     resize();
+    fitAllOrbitRadius = fitOrbitRadius(supportFrame, {
+      width: Math.max(1, canvas.clientWidth),
+      height: Math.max(1, canvas.clientHeight),
+    }, {
+      fovDegrees: sharedFovDegrees,
+      maxAngleDegrees: 75,
+    });
+    viewerOrbitRadius = orbitRadius;
+    markerOverviewRadius = Math.max(orbitRadius, viewerOrbitRadius) * 2.65;
     updateCamera();
     const firstSortMs = await firstSort;
     await requestPresentedFrame();
@@ -299,15 +350,56 @@ export async function createTiltViewer({ canvas, plyBuffer, frame, signal, onCam
           pitch,
           yaw,
           orbitRadius,
-          fovDegrees: TILT_FOV_DEGREES,
+          viewerOrbitRadius,
+          fitAllOrbitRadius,
+          radiusMode,
+          fovDegrees: sharedFovDegrees,
           camera: lastCameraDiagnostics,
+          cameraMarkers: {
+            visible: cameraMarkersVisible,
+            count: cameraMarkers.length,
+            sampleCount: cameraMarkers.reduce((total, marker) => total + marker.multiplicity, 0),
+            frontCount: cameraMarkers.filter((marker) => marker.kind === "front").length,
+            virtualCount: cameraMarkers.filter((marker) => marker.kind === "virtual").length,
+            frontSampleCount: cameraMarkers.reduce(
+              (total, marker) => total + (marker.kind === "front" ? marker.multiplicity : 0),
+              0,
+            ),
+            virtualSampleCount: cameraMarkers.reduce(
+              (total, marker) => total + (marker.kind === "virtual" ? marker.multiplicity : 0),
+              0,
+            ),
+            samplingEnabled: Boolean(cameraPoolSnapshot?.sampling_enabled),
+            activeCameraId: cameraPoolSnapshot?.active_camera_id || "",
+            trainingOrbitRadius: orbitRadius,
+          },
         };
+      },
+      setCameraMarkersVisible(visible) {
+        cameraMarkersVisible = Boolean(visible);
+        updateCamera();
+        return cameraMarkersVisible;
+      },
+      setRadiusMode(mode) {
+        radiusMode = mode === "fit" ? "fit" : "training";
+        viewerOrbitRadius = radiusMode === "fit" ? fitAllOrbitRadius : orbitRadius;
+        markerOverviewRadius = Math.max(orbitRadius, viewerOrbitRadius) * 2.65;
+        updateCamera();
+        return radiusMode;
+      },
+      setActiveCamera(cameraId) {
+        if (!cameraPoolSnapshot) return false;
+        cameraPoolSnapshot.active_camera_id = String(cameraId || "");
+        cameraMarkers = trainingCameraMarkerGeometry(cameraPoolSnapshot);
+        app.renderNextFrame = true;
+        return cameraMarkers.some((marker) => marker.active);
       },
       destroy() {
         if (destroyed) return;
         destroyed = true;
         resizeObserver.disconnect();
         app.scene.off("gsplat:sorted", onSorted);
+        app.off("prerender", drawCameraMarkers);
         app.destroy();
         if (blobUrl) URL.revokeObjectURL(blobUrl);
       },

@@ -165,13 +165,32 @@ const sourceContracts = {
   transparentBackgroundAlpha: app.includes("let compositeAlpha = 1.0 - transmittance") && !/compositeAlpha\s*=\s*1\.0\s*;/.test(app),
   graphdecoCutoffs: app.includes("alpha >= 0.0039215686") && app.includes("transmittance < 0.0001"),
   deterministicTileOrder: app.includes("fn sort_tiles(") && app.includes("sift_down(base, count, start)"),
+  directSplatBuffers:
+    app.includes("let bounds = tile_bounds(g);") &&
+    app.includes("var center = xy[g].center;") &&
+    app.includes("@group(0) @binding(8) var<storage, read_write> stats: array<vec4<f32>>;"),
   blackTrainingBackground: app.includes("const bg = new Float32Array([0, 0, 0])"),
   trainedPlyOpacity: app.includes("comment image2gaussianpaint_blend standard_alpha"),
   trainedPlyLayerOrder: app.includes("comment image2gaussianpaint_layer_order"),
   externalSortDepthSpan: app.includes("const PLY_LAYER_DEPTH_SPAN = 1e-2"),
-  packedLayerTraining: app.includes("var layerOrder = clamp(fract(t.w)"),
+  packedLayerTraining: app.includes("var layerOrder = clamp(min(fract(t.w), ${LAYER_CODE_RANGE}) / ${LAYER_CODE_RANGE}, 0.0, 1.0)"),
   deterministicLayerSort: app.includes("fn tile_less("),
-  standaloneLayerOrder: app.includes("const useGlobalOrder = !useTileOrder && Boolean(params.layerOrderEnabled)"),
+  standaloneLayerOrder:
+    app.includes("const useSplatPreviewOrder = Boolean(options.splatSmallFirstOrder)") &&
+    app.includes("const useGlobalOrder = !useTileOrder && (Boolean(params.layerOrderEnabled) || useSplatPreviewOrder)") &&
+    app.includes("function frontRenderLayerDepth(index, params)") &&
+    app.includes("return order * LAYER_CODE_RANGE") &&
+    app.includes("frontRenderLayerDepth(b, params) - frontRenderLayerDepth(a, params)") &&
+    app.includes("return Math.abs(delta) > 1e-7 ? delta : a - b;"),
+  finalFrontConfigReset:
+    app.includes("const config = new Float32Array(TRAIN_CONFIG_FLOATS);") &&
+    app.includes('async refreshRenderState(image, params, { view = null } = {})') &&
+    app.includes('const requestedView = view === "front" ? null : view;') &&
+    app.includes("config[56] = virtualView ? 1 : 0;") &&
+    app.includes("config[67] = params.virtualDepthEnabled ? 1 : 0;"),
+  sharedEwaQuadrature:
+    app.includes("useGaussLegendre: f32") &&
+    app.includes("uniforms.useGaussLegendre > 0.5"),
   sharedAlphaCutoff: (app.match(/alpha >= 0\.0039215686/g) || []).length >= 3,
   renderSurfaceParity:
     app.includes('source: "training-pixel-state-vs-standalone-rgba"') &&
@@ -190,11 +209,14 @@ const sourceContracts = {
   flatDensifyLayer: app.includes("config[35] > 0.5"),
   noForceMode: !html.includes("forceOpaqueAlpha") && !app.includes("FORCED_ALPHA_TARGET"),
   noClosedFormCalibration: !html.includes("calibratePlyCoverage") && !app.includes("plyCoverageCalibration"),
+  imageGsTopKBackwardRetired:
+    !/top.?k|image.?gs/i.test(html + app),
   exactBackwardDefault: app.includes('exactBackward: booleanVariant("exactBackward", true)'),
   cooperativeExactBackward: !app.includes('replayCursor: booleanVariant') &&
-    app.includes("struct AlphaState { compositeAlpha: f32, acceptedEnd: u32, };") &&
+    app.includes("struct AlphaState { compositeAlpha: f32, acceptedEnd: u32, pad0: f32, pad1: u32, };") &&
     (app.match(/alphaState: array<AlphaState>/g) || []).length >= 5 &&
-    app.includes("AlphaState(1.0 - transmittance, acceptedEnd)") &&
+    app.includes("AlphaState(1.0 - transmittance, acceptedEnd, 0.0, contributorCount)") &&
+    app.includes("contributorCount += 1u") &&
     app.includes("alphaState[pixel].acceptedEnd") &&
     app.includes("alphaState[pixel].compositeAlpha") &&
     !app.includes("bitcast<f32>(acceptedEnd)") &&
@@ -203,7 +225,7 @@ const sourceContracts = {
     app.includes("fn exact_alpha_backward_quad") &&
     app.includes('entryPoint: this.quadExactBackwardEnabled ? "exact_alpha_backward_quad" : "exact_alpha_backward"') &&
     app.includes("this.quadExactBackwardEnabled ? TILE_SIZE : 8"),
-  selectiveAnisotropy: app.includes("const DEFAULT_SURFACE_ANISOTROPY = 6") &&
+  selectiveAnisotropy: app.includes("const DEFAULT_SURFACE_ANISOTROPY = 8") &&
     (app.match(/floor\(t\.w\) >= 2\.0/g) || []).length >= 2 &&
     (app.match(/max\(config\[55\], 1\.0\)/g) || []).length >= 2,
   selectiveAnisotropyReadback: app.includes("surface_anisotropy_max") && app.includes("detail_anisotropy_max"),
@@ -220,12 +242,18 @@ const sourceContracts = {
   exactLossGradient: app.includes('entryPoint: "loss_gradient"'),
   exactOptimizer: app.includes('entryPoint: "optimize_exact"'),
   configurableAlphaWeight: html.includes('id="alphaLossWeight"') && app.includes("DEFAULT_ALPHA_LOSS_WEIGHT = 0.2"),
-  optionalDualBackground: html.includes('id="dualBackgroundToggle"') && app.includes("dTransmittanceExtra") && app.includes("dualBackgroundGradient"),
-  exposureRatioPrimary: html.includes("background exposed") && app.includes("metrics.coverage.background_exposure_ratio * 100"),
-  exportRenderParityGate:
+  dualBackgroundRetired: !html.includes('id="dualBackgroundToggle"') &&
+    !html.includes('id="dualBackgroundWeight"') &&
+    !app.includes("dTransmittanceExtra") &&
+    !app.includes("dualBackgroundGradient"),
+  exposureRatioPrimary: html.includes("background / outside") && app.includes("metrics.coverage.background_exposure_ratio * 100"),
+  renderParityQa:
     app.includes('reason: "render_parity_mismatch"') &&
     app.includes("typeof parity.display_equivalent") &&
     app.includes("if (!parity.display_equivalent)"),
+  productExportIgnoresParity: !app
+    .slice(app.indexOf("async function saveExport("), app.indexOf("function inspectPlyContract("))
+    .includes("exportCoverageStatus()"),
   profileQueryCapacityGuard: app.includes("PERFORMANCE_PROFILE_QUERY_CAPACITY = 32") &&
     app.includes("Performance profile query capacity exceeded"),
 };

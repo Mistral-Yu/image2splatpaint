@@ -15,11 +15,13 @@ doc/
 runbooks/
 AGENTS.md
 .local-archives/
+.temp/
 
 # Local source images stay out of releases unless explicitly allowlisted.
 assets/source-images/*
 !assets/source-images/README.md
 !assets/source-images/ramen-photo.jpg
+!assets/source-images/generated-geometric-sample.jpg
 
 # Keep only the small release/build surface under scripts/. All phase, A/B,
 # CDP, Python, profiling, and experimental harnesses remain local.
@@ -28,9 +30,12 @@ scripts/*
 !scripts/pages_artifact_tests.mjs
 !scripts/public_surface_tests.mjs
 !scripts/standard_alpha_tests.mjs
+!scripts/train_bind_group_cache_tests.mjs
+!scripts/stage_min_scale_tests.mjs
 !scripts/tilt_camera_tests.mjs
 !scripts/tilt_robustness_tests.mjs
 !scripts/virtual_tilt_tests.mjs
+!scripts/virtual_bounded_depth_tests.mjs
 !scripts/adaptive_capacity_tests.mjs
 !scripts/export_cross_platform_tests.mjs
 !scripts/gpu_memory_status_tests.mjs

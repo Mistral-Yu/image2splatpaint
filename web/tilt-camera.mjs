@@ -86,6 +86,67 @@ export function orbitCameraPose(pitchDegrees, yawDegrees, radius) {
   };
 }
 
+export function orbitProjectionContract(frame, viewport, pitchDegrees, yawDegrees, radius, fovDegrees = TILT_FOV_DEGREES) {
+  const pose = orbitCameraPose(pitchDegrees, yawDegrees, radius);
+  const width = Math.max(1, finite(viewport?.width, 1));
+  const height = Math.max(1, finite(viewport?.height, 1));
+  const longSide = Math.max(1, finite(frame?.width ?? frame?.x, 1), finite(frame?.height ?? frame?.y, 1));
+  const frameX = Math.max(EPSILON, finite(frame?.width ?? frame?.x, 1) / longSide);
+  const frameY = Math.max(EPSILON, finite(frame?.height ?? frame?.y, 1) / longSide);
+  return {
+    ...pose,
+    fovDegrees: Math.max(1, finite(fovDegrees, TILT_FOV_DEGREES)),
+    tanHalfFov: Math.tan(Math.max(1, finite(fovDegrees, TILT_FOV_DEGREES)) * Math.PI / 360),
+    aspect: width / height,
+    frameX,
+    frameY,
+    viewport: { width, height },
+  };
+}
+
+export function projectPlanarSplatPoint(point, contract, z = 0) {
+  const world = [
+    contract.frameX * finite(point?.[0]),
+    -contract.frameY * finite(point?.[1]),
+    finite(z),
+  ];
+  const cameraX = dot(world, contract.right);
+  const cameraY = dot(world, contract.up);
+  const depth = contract.radius + dot(world, contract.forward);
+  const ndcX = cameraX / Math.max(EPSILON, depth * contract.tanHalfFov * contract.aspect);
+  const ndcY = -cameraY / Math.max(EPSILON, depth * contract.tanHalfFov);
+  return {
+    point: [ndcX, ndcY],
+    depth,
+    valid: Number.isFinite(ndcX + ndcY + depth) && depth > EPSILON,
+  };
+}
+
+export function inverseProjectPlanarSplatPoint(point, contract, z = 0) {
+  const u = finite(point?.[0]);
+  const v = finite(point?.[1]);
+  const depthBase = contract.radius + contract.forward[2] * finite(z);
+  const ax = contract.frameX * contract.right[0];
+  const ay = -contract.frameY * contract.right[1];
+  const bx = contract.frameX * contract.up[0];
+  const by = -contract.frameY * contract.up[1];
+  const cx = contract.frameX * contract.forward[0];
+  const cy = -contract.frameY * contract.forward[1];
+  const focalX = 1 / Math.max(EPSILON, contract.tanHalfFov * contract.aspect);
+  const focalY = 1 / Math.max(EPSILON, contract.tanHalfFov);
+  const a00 = u * cx - focalX * ax;
+  const a01 = u * cy - focalX * ay;
+  const a10 = v * cx + focalY * bx;
+  const a11 = v * cy + focalY * by;
+  const rhsX = focalX * contract.right[2] * z - u * depthBase;
+  const rhsY = -focalY * contract.up[2] * z - v * depthBase;
+  const determinant = a00 * a11 - a01 * a10;
+  if (!Number.isFinite(determinant) || Math.abs(determinant) < EPSILON) return { point: [0, 0], valid: false };
+  const x = (rhsX * a11 - a01 * rhsY) / determinant;
+  const y = (a00 * rhsY - rhsX * a10) / determinant;
+  return { point: [x, y], valid: Number.isFinite(x + y) };
+}
+
 export function fibonacciHemispherePoses(
   count = FIBONACCI_HEMISPHERE_POSE_COUNT,
   maxPolarDegrees = TILT_MAX_ANGLE_DEGREES,
@@ -185,6 +246,13 @@ export function fitOrbitRadius(frame, viewport, options = {}) {
   return high;
 }
 
+export function canonicalOrbitRadius(frame, options = {}) {
+  const x = Math.max(EPSILON, finite(frame?.x, 1));
+  const y = Math.max(EPSILON, finite(frame?.y, 1));
+  const scale = 1024 / Math.max(x, y);
+  return fitOrbitRadius(frame, { width: x * scale, height: y * scale }, options);
+}
+
 export function cameraDiagnostics(frame, viewport, pitchDegrees, yawDegrees, radius, fovDegrees = TILT_FOV_DEGREES) {
   const pose = orbitCameraPose(pitchDegrees, yawDegrees, radius);
   const corners = projectFrameCorners(frame, pose, viewport, fovDegrees);
@@ -195,4 +263,58 @@ export function cameraDiagnostics(frame, viewport, pitchDegrees, yawDegrees, rad
     center: projectWorldPoint([0, 0, 0], pose, viewport, fovDegrees),
     corners,
   };
+}
+
+export function trainingCameraMarkerGeometry(snapshot) {
+  const cameras = Array.isArray(snapshot?.cameras) ? snapshot.cameras : [];
+  const radius = Math.max(0.01, finite(snapshot?.orbit_radius, 1));
+  const fovDegrees = Math.max(1, finite(snapshot?.fov_degrees, TILT_FOV_DEGREES));
+  const aspect = Math.max(EPSILON, finite(snapshot?.image_aspect, 1));
+  const target = Array.isArray(snapshot?.target) && snapshot.target.length === 3
+    ? snapshot.target.map((value) => finite(value))
+    : [0, 0, 0];
+  const activeId = String(snapshot?.active_camera_id || "");
+  const unique = new Map();
+  for (const camera of cameras) {
+    const pitchDegrees = finite(camera?.pitch_degrees);
+    const yawDegrees = finite(camera?.yaw_degrees);
+    const key = `${pitchDegrees.toFixed(6)}:${yawDegrees.toFixed(6)}`;
+    const existing = unique.get(key);
+    if (existing) {
+      existing.ids.push(String(camera?.id || key));
+      existing.multiplicity += Math.max(1, Math.round(finite(camera?.multiplicity, 1)));
+      existing.active ||= String(camera?.id || "") === activeId;
+      continue;
+    }
+    const cameraFovDegrees = Math.max(
+      1,
+      finite(camera?.intrinsics?.fov_degrees, fovDegrees),
+    );
+    const pose = orbitCameraPose(pitchDegrees, yawDegrees, radius);
+    const forward = normalize(target.map((value, index) => value - pose.position[index]));
+    const right = normalize(cross(forward, [0, 1, 0]));
+    const up = normalize(cross(right, forward));
+    const frustumDepth = radius * 0.055;
+    const halfHeight = frustumDepth * Math.tan(cameraFovDegrees * Math.PI / 360);
+    const halfWidth = halfHeight * aspect;
+    const center = pose.position.map((value, index) => value + forward[index] * frustumDepth);
+    const frustumCorners = [
+      [-1, 1], [1, 1], [1, -1], [-1, -1],
+    ].map(([x, y]) => center.map((value, index) => value + right[index] * halfWidth * x + up[index] * halfHeight * y));
+    unique.set(key, {
+      ids: [String(camera?.id || key)],
+      kind: camera?.kind === "front" ? "front" : "virtual",
+      pitchDegrees: pose.pitchDegrees,
+      yawDegrees: pose.yawDegrees,
+      position: pose.position,
+      target,
+      forward,
+      fovDegrees: cameraFovDegrees,
+      intrinsics: camera?.intrinsics ? { ...camera.intrinsics } : null,
+      frustumCorners,
+      multiplicity: Math.max(1, Math.round(finite(camera?.multiplicity, 1))),
+      active: String(camera?.id || "") === activeId,
+    });
+  }
+  return [...unique.values()];
 }

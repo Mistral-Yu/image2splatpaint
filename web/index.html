@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="referrer" content="no-referrer" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; worker-src 'self' blob:; connect-src 'self' blob:; img-src 'self' data: blob:; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; worker-src 'self' blob:; connect-src 'self' blob:; img-src 'self' file: data: blob:; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
     <link rel="icon" href="data:," />
     <title>Image2SplatPaint</title>
     <link rel="stylesheet" href="./styles.css" />
@@ -16,6 +16,7 @@
           <canvas id="previewCanvas" data-testid="preview-canvas" width="640" height="420"></canvas>
           <canvas id="gpuCanvas" data-testid="gpu-canvas" width="640" height="420" hidden></canvas>
           <canvas id="tiltCanvas" class="tilt-canvas" data-testid="tilt-canvas" width="640" height="420" hidden></canvas>
+          <canvas id="tiltTeacherCanvas" class="tilt-teacher-canvas" data-testid="tilt-teacher-canvas" width="640" height="420" hidden></canvas>
           <div id="tiltFrameOverlay" class="tilt-frame-overlay" data-testid="tilt-frame-overlay" aria-hidden="true" hidden>
             <span></span><span></span><span></span><span></span><i></i>
           </div>
@@ -55,13 +56,13 @@
             <span>image size</span>
             <strong id="imageSizeText" data-testid="image-size-text">-</strong>
           </div>
-          <div>
-            <span>background exposed</span>
-            <strong id="backgroundPixelText" data-testid="background-pixel-text">-</strong>
+          <div title="Exposed background pixel ratio / splats whose Gaussian footprint extends outside the image">
+            <span>background / outside</span>
+            <strong id="coverageText" data-testid="coverage-text">- / -</strong>
           </div>
-          <div>
-            <span>outside splats</span>
-            <strong id="outsideSplatText" data-testid="outside-splat-text">-</strong>
+          <div title="Current training iterations per second / active training time excluding pauses">
+            <span>speed / elapsed</span>
+            <strong id="trainingTimingText" data-testid="training-timing-text">- / -</strong>
           </div>
           <div title="Estimated active bytes / total capacity of this app's live WebGPU training buffers. This is not system-wide, free, or total device VRAM.">
             <span>VRAM active / reserved</span>
@@ -83,11 +84,11 @@
         </div>
 
         <nav class="log-tabs" data-testid="log-tabs" role="tablist" aria-label="Workspace">
-          <button id="trainingLogTab" class="active" data-testid="training-log-tab" type="button" role="tab" aria-controls="trainingLogPanel" aria-selected="true">Training</button>
+          <button id="trainingLogTab" class="active" data-testid="training-log-tab" type="button" role="tab" aria-controls="trainingLogPanel" aria-selected="true">Train</button>
           <button id="splatsTab" data-testid="splats-tab" type="button" role="tab" aria-controls="splatsPanel" aria-selected="false">Splats</button>
           <button id="exportTab" data-testid="export-tab" type="button" role="tab" aria-controls="exportPanel" aria-selected="false">Export</button>
           <button id="eventLogTab" data-testid="event-log-tab" type="button" role="tab" aria-controls="eventLogPanel" aria-selected="false">Log</button>
-          <button id="tiltTab" data-testid="tilt-tab" type="button" role="tab" aria-controls="tiltPanel" aria-selected="false" disabled>Tilt</button>
+          <button id="tiltTab" data-testid="tilt-tab" type="button" role="tab" aria-controls="tiltPanel" aria-selected="false">Tilt</button>
         </nav>
 
         <div class="tab-viewport">
@@ -115,21 +116,21 @@
                 <button id="stopButton" data-testid="stop-button" type="button" disabled>Stop</button>
                 <button id="resetButton" data-testid="reset-button" type="button" disabled>Reset</button>
               </div>
-
               <div class="training-grid">
                 <label class="field-wide">
                   Algorithm
                   <select id="algorithmSelect" data-testid="algorithm-select">
                     <option value="planar-gaussian" selected>Planar Gaussian</option>
+                    <option value="gs-virtual-camera-sampling">GS Virtual Camera Sampling</option>
                   </select>
                 </label>
                 <label class="field-wide">
                   Max image side
-                  <input id="trainSize" data-testid="train-size" type="number" min="32" max="3200" step="64" value="1600" />
+                  <input id="trainSize" data-testid="train-size" type="number" min="32" max="3200" step="64" value="512" />
                 </label>
                 <label>
                   Initial splats
-                  <input id="initialSplatCount" data-testid="initial-splat-count" type="number" min="4" max="262144" step="4" value="2048" />
+                  <input id="initialSplatCount" data-testid="initial-splat-count" type="number" min="4" max="262144" step="4" value="128" />
                 </label>
                 <label>
                   Max splats
@@ -137,7 +138,7 @@
                 </label>
                 <label>
                   Iterations
-                  <input id="stepCount" data-testid="step-count" type="number" min="1" step="100" value="7000" />
+                  <input id="stepCount" data-testid="step-count" type="number" min="1" step="100" value="3000" />
                 </label>
                 <label>
                   Preview refresh
@@ -160,55 +161,78 @@
                     <input id="trainLayerOrder" data-testid="train-layer-order" type="checkbox" checked />
                     Train layer order
                   </label>
-                  <label class="inline-option" title="Evaluate opaque reconstruction against black and white backgrounds without changing the preview background.">
-                    <input id="dualBackgroundToggle" data-testid="dual-background-toggle" type="checkbox" />
-                    Dual-background alpha
-                  </label>
+                  <div class="experimental-performance-options" aria-label="Experimental GPU performance">
+                    <strong>Experimental GPU performance</strong>
+                    <label class="inline-option" title="Default off. Reduces tile support using opacity and the 1/255 render cutoff. Previously faster, but produced a small render-parity mismatch.">
+                      <input id="opacitySupportAggressive" data-testid="opacity-support-aggressive" type="checkbox" />
+                      Opacity-aware support (aggressive)
+                    </label>
+                    <label class="inline-option" title="Default off. Removes the subgroup slot counter from exact-backward reduction on WebGPU devices with subgroup support.">
+                      <input id="subgroupSyncReduction" data-testid="subgroup-sync-reduction" type="checkbox" />
+                      Subgroup sync reduction
+                    </label>
+                  </div>
                   <div class="lr-grid">
+                    <label title="Moves this percentage of the initial grid centers toward multiscale image structure on WebGPU before iteration 1. The splat count and shape stay unchanged.">Adaptive placement (%)<input id="adaptiveGridInitializationFraction" data-testid="adaptive-grid-initialization-fraction" type="number" min="0" max="50" step="1" value="25" /></label>
                     <label title="Optimize layer-order micro-depth every N iterations. 1 updates every iteration.">Layer update interval<input id="layerUpdateInterval" data-testid="layer-update-interval" type="number" min="1" max="3000" step="1" value="500" /></label>
                     <label>Position<input id="positionLearningRate" data-testid="position-learning-rate" type="number" min="0" max="1" step="0.000001" value="0.00016" /></label>
                     <label>Color<input id="colorLearningRate" data-testid="color-learning-rate" type="number" min="0" max="1" step="0.0001" value="0.0025" /></label>
                     <label>Opacity<input id="opacityLearningRate" data-testid="opacity-learning-rate" type="number" min="0" max="1" step="0.001" value="0.05" /></label>
                     <label>Alpha loss weight<input id="alphaLossWeight" data-testid="alpha-loss-weight" type="number" min="0" max="1" step="0.01" value="0.2" /></label>
-                    <label>Dual-background weight<input id="dualBackgroundWeight" data-testid="dual-background-weight" type="number" min="0" max="1" step="0.05" value="0.25" /></label>
                     <label>Scale<input id="scaleLearningRate" data-testid="scale-learning-rate" type="number" min="0" max="1" step="0.0001" value="0.002" /></label>
                     <label>Rotation<input id="rotationLearningRate" data-testid="rotation-learning-rate" type="number" min="0" max="1" step="0.0001" value="0.001" /></label>
                     <label>Theta align<input id="thetaAlignRate" data-testid="theta-align-rate" type="number" min="0" max="1" step="0.001" value="0.005" /></label>
                     <label>Max anisotropy<input id="maxAnisotropy" data-testid="max-anisotropy" type="number" min="1" max="32" step="0.1" value="8" /></label>
-                    <label title="Caps each trained planar Gaussian axis in image-normalized coordinates. Prevents hidden frame-sized splats from becoming visible after camera tilt.">Max planar scale<input id="maxPlanarScale" data-testid="max-planar-scale" type="number" min="0.02" max="2" step="0.01" value="0.03" /></label>
+                    <label title="Caps each trained planar Gaussian axis in image-normalized coordinates. Prevents hidden frame-sized splats from becoming visible after camera tilt.">Max planar scale<input id="maxPlanarScale" data-testid="max-planar-scale" type="number" min="0.02" max="2" step="0.01" value="0.1" /></label>
                     <label title="Gaussian footprint kept inside the image. 0 keeps only the splat center inside.">Edge containment σ<input id="boundarySigma" data-testid="boundary-sigma" type="number" min="0" max="4" step="0.1" value="0" /></label>
                     <label>Detail coherence<input id="detailCoherence" data-testid="detail-coherence" type="number" min="0" max="1" step="0.05" value="0.80" /></label>
-                    <label>ADC split interval<input id="adcSplitInterval" data-testid="adc-split-interval" type="number" min="100" max="20000" step="100" value="3000" /></label>
-                    <label>ADC reset interval<input id="adcResetInterval" data-testid="adc-reset-interval" type="number" min="100" max="20000" step="100" value="3000" /></label>
+                    <label title="P1 only. New or relocated splats cannot shrink below this fraction of the initial grid-cell scale.">P1 base scale floor<input id="p1BaseScaleFloorRatio" data-testid="p1-base-scale-floor" type="number" min="0" max="1" step="0.01" value="0.50" /></label>
+                    <label title="P2 only. New or relocated splats cannot shrink below this fraction of the initial grid-cell scale.">P2 base scale floor<input id="p2BaseScaleFloorRatio" data-testid="p2-base-scale-floor" type="number" min="0" max="1" step="0.01" value="0.35" /></label>
                     <div class="growth-option">
                       <label class="inline-option">
-                        <input id="stageAwareGrowth" data-testid="stage-aware-growth" type="checkbox" aria-describedby="stageAwareGrowthHelp" checked />
+                        <input id="stageAwareGrowth" data-testid="stage-aware-growth" type="checkbox" checked />
                         Stage-aware growth
                       </label>
-                      <small id="stageAwareGrowthHelp">Experimental. Reserves 30% of Max splats for the final detail stage.</small>
                     </div>
                     <label>Splat growth interval<input id="densifyInterval" data-testid="densify-interval" type="number" min="1" max="1000" step="1" value="100" /></label>
                     <label>Growth per event %<input id="growthPercentage" data-testid="growth-percentage" type="number" min="0.1" max="100" step="0.1" value="15" /></label>
                     <label>Growth signal threshold<input id="growthSignalThreshold" data-testid="growth-signal-threshold" type="number" min="0" max="1000" step="0.00001" value="0.0003" /></label>
-                    <label>ADC split signal threshold<input id="adcSplitSignalThreshold" data-testid="adc-split-signal-threshold" type="number" min="0" max="1000" step="0.00001" value="0.0003" /></label>
-                    <label>ADC split residual threshold<input id="adcSplitResidualThreshold" data-testid="adc-split-residual-threshold" type="number" min="0" max="1000" step="0.0001" value="0.0025" /></label>
-                    <label>ADC recycle %<input id="adcRecyclePercentage" data-testid="adc-recycle-percentage" type="number" min="0" max="100" step="0.01" value="25" /></label>
-                    <label>ADC late recycle %<input id="adcLateRecyclePercentage" data-testid="adc-late-recycle-percentage" type="number" min="0" max="100" step="0.01" value="10" /></label>
                   </div>
                 </div>
               </details>
 
-              <label class="capacity-control" title="Use Max splats for the GPU allocation, or reduce the allocation automatically when the requested WebGPU capacity does not fit.">
-                GPU memory mode
-                <select id="capacityMode" data-testid="capacity-mode">
-                  <option value="manual" selected>Use Max splats</option>
-                  <option value="auto-probe">Auto by GPU memory</option>
-                </select>
-              </label>
+              <section class="virtual-camera-panel settings-section" data-testid="virtual-camera-panel">
+                <details class="virtual-camera-settings" data-testid="virtual-camera-settings">
+                  <summary>GS Virtual Camera Sampling settings</summary>
+                  <div class="virtual-camera-body">
+                    <label class="inline-option field-wide" title="Experimental. Learns a small bounded depth offset only during virtual-camera training while preserving layer-order depth.">
+                      <input id="virtualBoundedDepth" data-testid="virtual-bounded-depth" type="checkbox" checked />
+                      Bounded virtual depth
+                    </label>
+                    <small class="field-wide">3DGS-style multi-view: one front or virtual camera supplies all trainable gradients each iteration.</small>
+                    <label class="inline-option field-wide" title="Experimental. Uses the sum of per-pixel center-gradient norms when ranking splats for density events, avoiding cancellation across virtual-camera views. Does not alter the optimizer update itself.">
+                      <input id="virtualGofDensity" data-testid="virtual-gof-density" type="checkbox" checked />
+                      GOF density ranking
+                    </label>
+                    <label title="Virtual-camera probability from Phase 1 onward. At 100%, the front and every virtual camera are sampled uniformly. Applied at the next training start.">Virtual camera share (%)<input id="virtualCameraShare" data-testid="virtual-camera-share" type="number" min="1" max="100" step="0.125" value="100" /></label>
+                    <label title="Maximum polar angle of the Fibonacci virtual-camera cap. Applied at the next training start.">Virtual camera max angle<input id="virtualCameraMaxAngle" data-testid="virtual-camera-max-angle" type="number" min="5" max="75" step="5" value="60" /></label>
+                    <label title="Number of virtual cameras placed on the Fibonacci cap. Applied at the next training start. The same camera catalog is used for final all-view evaluation.">Virtual camera count<input id="virtualCameraCount" data-testid="virtual-camera-count" type="number" min="4" max="128" step="1" value="50" /></label>
+                    <label title="Shared vertical pinhole FOV for the front and every virtual camera. A smaller FOV usually increases valid virtual-teacher coverage. Applied at the next training start.">Shared camera FOV<input id="virtualCameraFov" data-testid="virtual-camera-fov" type="number" min="25" max="55" step="1" value="50" /></label>
+                    <small id="virtualCameraCoverageEstimate" class="field-wide" data-testid="virtual-camera-coverage">Teacher coverage: load an image to estimate.</small>
+                  </div>
+                </details>
+              </section>
 
               <details class="budget-panel" data-testid="budget-panel">
                 <summary>GPU memory details</summary>
                 <div class="budget-body">
+                  <label class="capacity-control" title="Use Max splats for the GPU allocation, or reduce the allocation automatically when the requested WebGPU capacity does not fit.">
+                    GPU memory mode
+                    <select id="capacityMode" data-testid="capacity-mode">
+                      <option value="manual" selected>Use Max splats</option>
+                      <option value="auto-probe">Auto by GPU memory</option>
+                    </select>
+                  </label>
                   <button id="retryWebGpuButton" data-testid="retry-webgpu" type="button" hidden>Reinitialize WebGPU</button>
                   <div class="budget-grid">
                     <div><span>limit</span><strong id="gpuLimitText" data-testid="gpu-limit">checking</strong></div>
@@ -244,8 +268,25 @@
                 <strong>PlayCanvas tilt check</strong>
                 <span>Engine 2.20.6</span>
               </div>
-              <label class="adjustment-row">Pitch X <output id="tiltPitchValue">0°</output><input id="tiltPitch" data-testid="tilt-pitch" type="range" min="-75" max="75" step="1" value="0" /></label>
-              <label class="adjustment-row">Yaw Y <output id="tiltYawValue">0°</output><input id="tiltYaw" data-testid="tilt-yaw" type="range" min="-75" max="75" step="1" value="0" /></label>
+              <div class="tilt-view-mode" data-testid="tilt-view-mode" role="group" aria-label="Tilt display">
+                <button id="tiltOriginalView" data-testid="tilt-original-view" type="button" aria-pressed="false">Original</button>
+                <button id="tiltOverlayView" data-testid="tilt-overlay-view" type="button" aria-pressed="false">Overlay</button>
+                <button id="tiltSplatsView" class="active" data-testid="tilt-splats-view" type="button" aria-pressed="true">Splats</button>
+              </div>
+              <label class="inline-option tilt-camera-markers-option">
+                <input id="tiltCameraMarkers" data-testid="tilt-camera-markers" type="checkbox" checked />
+                Show cameras used in this run
+              </label>
+              <p id="tiltCameraSummary" class="tilt-camera-summary" data-testid="tilt-camera-summary">Finish training to inspect the cameras used in this run.</p>
+              <label class="field tilt-framing-field">
+                <span>Camera framing</span>
+                <select id="tiltRadiusMode" data-testid="tilt-radius-mode">
+                  <option value="training">Training camera radius</option>
+                  <option value="fit">Fit all splats</option>
+                </select>
+              </label>
+              <label class="adjustment-row">Pitch X <output id="tiltPitchValue">0°</output><input id="tiltPitch" data-testid="tilt-pitch" type="range" min="-75" max="75" step="0.1" value="0" /></label>
+              <label class="adjustment-row">Yaw Y <output id="tiltYawValue">0°</output><input id="tiltYaw" data-testid="tilt-yaw" type="range" min="-75" max="75" step="0.1" value="0" /></label>
               <dl class="tilt-diagnostics" data-testid="tilt-diagnostics">
                 <div><dt>Camera</dt><dd id="tiltCameraMode">center orbit</dd></div>
                 <div><dt>Position</dt><dd id="tiltPositionValue">-</dd></div>
@@ -256,14 +297,13 @@
               <div class="tilt-actions">
                 <button id="tiltFrontButton" data-testid="tilt-front-button" type="button">Front</button>
                 <button id="tiltRefreshButton" data-testid="tilt-refresh-button" type="button">Refresh PLY</button>
-                <button id="tiltSweepButton" data-testid="tilt-sweep-button" type="button">Sweep hemisphere</button>
-                <button id="tiltSweepStopButton" data-testid="tilt-sweep-stop-button" type="button" disabled>Stop sweep</button>
+                <button id="tiltTrainingViewsButton" class="field-wide" data-testid="tilt-training-views-button" type="button">Show training views</button>
               </div>
-              <div class="tilt-sweep-status">
-                <progress id="tiltSweepProgress" data-testid="tilt-sweep-progress" max="49" value="0"></progress>
-                <span id="tiltSweepSummary" data-testid="tilt-sweep-summary">49-pose Fibonacci cap · 0–75°</span>
+              <div class="tilt-training-views-status">
+                <progress id="tiltTrainingViewsProgress" data-testid="tilt-training-views-progress" max="1" value="0"></progress>
+                <span id="tiltTrainingViewsSummary" data-testid="tilt-training-views-summary">Virtual teacher images used in this run.</span>
               </div>
-              <div id="tiltContactSheet" class="tilt-contact-sheet" data-testid="tilt-contact-sheet" aria-label="Hemisphere sweep results"></div>
+              <div id="tiltContactSheet" class="tilt-contact-sheet" data-testid="tilt-contact-sheet" aria-label="Virtual teacher images used in training"></div>
               <p id="tiltStatus" class="panel-message" data-testid="tilt-status" aria-live="polite">Finish training to inspect the PLY.</p>
             </div>
           </section>
@@ -276,14 +316,30 @@
                   <strong>Splat parameters</strong>
                   <span id="splatsMeta" data-testid="splats-meta">-</span>
                 </div>
+                <label class="outside-preview-toggle" title="Enables the preview-only shape, order, opacity, kernel, scale, and aspect controls below. Disable it to inspect the trained Gaussian result.">
+                  <input id="splatParameterEffects" data-testid="splat-parameter-effects" type="checkbox" checked />
+                  Splat parameter effects
+                </label>
                 <label class="outside-preview-toggle">
                   <input id="outsidePreviewToggle" data-testid="outside-preview-toggle" type="checkbox" />
                   Show outside image
                 </label>
+                <label class="outside-preview-toggle" title="Preview only. Sorts more opaque splats first; when their opacity is equal, smaller splats are composited first so fine detail remains on top.">
+                  <input id="splatSmallFirstOrder" data-testid="splat-small-first-order" type="checkbox" />
+                  Prefer small splats on equal opacity
+                </label>
                 <label class="alpha-background-row">Alpha background <input id="splatAlphaBackground" data-testid="splat-alpha-background" type="color" value="#000000" /></label>
-                <label class="adjustment-row">Opacity <output id="splatOpacityValue">1.00x</output><input id="splatOpacity" data-testid="splat-opacity" type="range" min="0" max="2" step="0.01" value="1" /></label>
-                <label class="adjustment-row">Local scale X <output id="splatScaleXValue">1.00x</output><input id="splatScaleX" data-testid="splat-scale-x" type="range" min="0" max="5" step="0.01" value="1" /></label>
-                <label class="adjustment-row">Local scale Y <output id="splatScaleYValue">1.00x</output><input id="splatScaleY" data-testid="splat-scale-y" type="range" min="0" max="5" step="0.01" value="1" /></label>
+                <div class="splat-shape-row">
+                  <span>Splat shape</span>
+                  <div class="splat-shape-options" role="group" aria-label="Splat preview shape">
+                    <button id="splatShapeGaussian" class="active" data-testid="splat-shape-gaussian" type="button" aria-pressed="true">Gaussian</button>
+                    <button id="splatShapeRectangle" data-testid="splat-shape-rectangle" type="button" aria-pressed="false">Rectangle</button>
+                  </div>
+                </div>
+                <label class="adjustment-row" title="Multiplies each splat opacity. At 10x every splat opacity saturates, so its center blocks lower layers under standard alpha compositing.">Opacity <output id="splatOpacityValue">1.00x</output><input id="splatOpacity" data-testid="splat-opacity" type="range" min="0" max="10" step="0.01" value="1" /></label>
+                <label class="adjustment-row" title="Preview only. Changes how quickly alpha falls from each splat center to its existing 4σ footprint edge. 1.00 keeps the trained Gaussian; 0.00 makes the existing footprint uniformly opaque before opacity compositing.">Kernel falloff <output id="splatKernelFalloffValue">1.00x</output><input id="splatKernelFalloff" data-testid="splat-kernel-falloff" type="range" min="0" max="2" step="0.01" value="1" /></label>
+                <label class="adjustment-row" title="Uniformly scales every splat without changing its orientation or local aspect ratio.">Splat scale <output id="splatScaleValue">1.00x</output><input id="splatScale" data-testid="splat-scale" type="range" min="0" max="5" step="0.01" value="1" /></label>
+                <label class="adjustment-row" title="Multiplies each splat's local X/Y axis ratio while preserving its area before the trained anisotropy limit is applied.">Local aspect ratio <output id="splatAspectRatioValue">1.00x</output><input id="splatAspectRatio" data-testid="splat-aspect-ratio" type="range" min="0.1" max="10" step="0.01" value="1" /></label>
                 <button id="resetSplatAdjustments" data-testid="reset-splat-adjustments" type="button">Reset parameters</button>
                 <p id="splatAdjustStatus" class="panel-message" data-testid="splat-adjust-status" aria-live="polite">Ready.</p>
               </div>
@@ -292,23 +348,29 @@
 
           <section id="exportPanel" class="tab-panel" data-testid="export-panel" role="tabpanel" aria-labelledby="exportTab">
             <div class="export-panel-body">
-              <p id="exportDescription" class="panel-message">Graphdeco-style SH0 PLY with aspect-preserving planar geometry and trained opacity.</p>
+              <p id="exportDescription" class="panel-message">PLY uses standard SH0 Gaussian Splatting fields. For conventional multi-angle 3DGS viewing, train with GS Virtual Camera Sampling; Planar Gaussian is front-view only.</p>
               <div class="export-summary">
                 <span>splats<strong id="exportCount">-</strong></span>
               </div>
               <div class="export-actions">
                 <button id="savePlyButton" data-testid="export-splat-button" class="export-button" type="button" disabled>Export PLY</button>
                 <div class="export-divider" role="separator"></div>
-                <p class="panel-message">Rendered result inside the source image frame.</p>
-                <button id="savePngButton" data-testid="export-png-button" class="export-button export-button-secondary" type="button" disabled>Save PNG</button>
+                <p class="panel-message">Current Splats preview, including shape, effects, alpha background, and optional outside-image padding.</p>
+                <button id="savePngButton" data-testid="export-png-button" class="export-button export-button-secondary" type="button" disabled>Save Splat PNG</button>
               </div>
-              <p id="exportStatus" class="panel-message" data-testid="export-status" aria-live="polite">Train or stop with verified coverage before export.</p>
-              <p class="license-links"><a href="../LICENSE" target="_blank" rel="noopener">MIT License</a> · <a href="../THIRD_PARTY_NOTICES.md" target="_blank" rel="noopener">Third-party notices</a></p>
+              <p id="exportStatus" class="panel-message" data-testid="export-status" aria-live="polite">Finish training before export.</p>
             </div>
           </section>
         </div>
+        <footer class="app-footer" data-testid="app-footer">
+          <span>Copyright (c) 2026 Mistral-Yu</span>
+          <a href="../LICENSE" target="_blank" rel="noopener">MIT License</a>
+          <a href="../THIRD_PARTY_NOTICES.md" target="_blank" rel="noopener">Third-party notices</a>
+        </footer>
       </aside>
     </main>
-    <script src="./app.js?v=tilt-safety-v1"></script>
+    <script src="./tilt-viewer.bundle.js?v=camera-summary-v2"></script>
+    <script src="./sample-image-data.js?v=sample-v1"></script>
+    <script src="./app.js?v=splat-shape-preview-v4"></script>
   </body>
 </html>
