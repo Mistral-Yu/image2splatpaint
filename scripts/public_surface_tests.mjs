@@ -199,6 +199,7 @@ const contracts = {
     "!scripts/p2_budget_contract_tests.mjs",
     "!scripts/p2_export_memory_tests.mjs",
     "!scripts/p2_optimizer_input_tests.mjs",
+    "!scripts/p1_webgpu_probe.mjs",
     "!scripts/static-server-lib.mjs",
     "!scripts/static-server.mjs",
   ].every((entry) => ignore.split(/\r?\n/).includes(entry)),
