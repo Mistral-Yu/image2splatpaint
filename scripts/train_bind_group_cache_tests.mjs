@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const [app, cdp] = await Promise.all([
-  readFile(new URL("../web/app.js", import.meta.url), "utf8"),
-  readFile(new URL("./cdp_train_check.mjs", import.meta.url), "utf8"),
-]);
+const app = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
 
 const contracts = {
-  qaOnlyDefaultOff: /bindGroupCacheQuery === "1"/.test(app) && /BIND_GROUP_CACHE/.test(cdp),
+  qaOnlyDefaultOff:
+    /bindGroupCacheQuery === "1"/.test(app) &&
+    /QA_RUNTIME_ENABLED && query\.has\("bind-group-cache"\) && bindGroupCacheQuery === "1"/.test(app),
   stateScopedCache: /bindGroupCache: new Map\(\)/.test(app) && /bindGroupCacheStats: \{ hits: 0, misses: 0 \}/.test(app),
   frontStageKeyed: /front,\s*trainingStage,/.test(app) && /bindGroupKeyBase/.test(app),
   majorIterationGroupsCached: ["render", "ssim", "loss-gradient", "exact-backward", "exact-optimizer"]
