@@ -2784,7 +2784,13 @@ function applyLoadedImageSplatEstimate() {
 }
 
 function updateImageSizeStatus() {
-  els.imageSizeText.textContent = state.image ? `${state.image.width} x ${state.image.height}` : "-";
+  if (!state.image) {
+    els.imageSizeText.textContent = "-";
+    return;
+  }
+  const originalWidth = state.image.originalWidth || state.image.width;
+  const originalHeight = state.image.originalHeight || state.image.height;
+  els.imageSizeText.textContent = `${state.image.width}x${state.image.height} / ${originalWidth}x${originalHeight}`;
 }
 
 function computeRecommendation() {

@@ -27,10 +27,12 @@ const checks = {
   visibility_pause: app.includes('document.addEventListener("visibilitychange"') && app.includes("training remains paused until Resume"),
   training_starts_fitted: app.includes('state.previewMode = "splats";\n  fitCanvases(state.image.width, state.image.height);'),
   no_os_sniffing: !/navigator\.(userAgent|platform)/.test(app),
-  external_device_checks_deferred:
-    readme.includes("Chrome on macOS is verified") &&
-    readme.includes("Windows, iPhone, and Android code paths are") &&
-    readme.includes("prepared but still need physical-device checks"),
+  runtime_webgpu_detection:
+    app.includes('if (!("gpu" in navigator))') &&
+    app.includes('reason: "navigator.gpu unavailable"') &&
+    app.includes("WebGPU unavailable; training disabled") &&
+    app.includes("WebGPU required; training not started") &&
+    !readme.includes("still need physical-device checks"),
 };
 
 const failed = Object.entries(checks).filter(([, value]) => !value).map(([key]) => key);

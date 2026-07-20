@@ -173,6 +173,12 @@ const contracts = {
     ].every((entry) => ignore.split(/\r?\n/).includes(entry)) &&
     buildScript.includes('["README.md", "ramen-photo.jpg", "generated-geometric-sample.jpg"]') &&
     !/hair|portrait|attached-photo|写真1/i.test(`${buildScript}\n${sourceImagesReadme}`),
+  imageSizeStatus:
+    index.includes('title="Training image size / original image size"') &&
+    app.includes('`${state.image.width}x${state.image.height} / ${originalWidth}x${originalHeight}`') &&
+    app.includes("state.image.originalWidth || state.image.width") &&
+    app.includes("state.image.originalHeight || state.image.height") &&
+    /@media \(max-width: 520px\)[\s\S]*?\.progress\s*\{\s*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/.test(styles),
   privateIdentityAbsent:
     !/\/Users\/mistralyu|\/home\/mistralyu|@[a-z0-9.-]+\.(?:com|jp)\b/i.test(`${app}\n${index}\n${styles}\n${readme}\n${buildScript}`) &&
     !/(?:api[_-]?key|access[_-]?token|client[_-]?secret|password)\s*[:=]\s*["'][^"']+/i.test(`${app}\n${index}\n${readme}\n${buildScript}`),
@@ -193,8 +199,6 @@ const contracts = {
     "!scripts/p2_budget_contract_tests.mjs",
     "!scripts/p2_export_memory_tests.mjs",
     "!scripts/p2_optimizer_input_tests.mjs",
-    "!scripts/p1_webgpu_probe.html",
-    "!scripts/p1_webgpu_probe.mjs",
     "!scripts/static-server-lib.mjs",
     "!scripts/static-server.mjs",
   ].every((entry) => ignore.split(/\r?\n/).includes(entry)),
@@ -205,9 +209,14 @@ const contracts = {
   legacyPathsRemoved: (await Promise.all(legacyPaths.map(absent))).every(Boolean),
   pagesPublicSurface:
     readme.includes("generated geometric Sample image") &&
-    readme.includes("author-owned ramen benchmark") &&
+    readme.includes("author-owned ramen sample") &&
     readme.includes("assets/source-images/README.md") &&
-    readme.includes("https://mistral-yu.github.io/image2splatpaint/"),
+    readme.includes("https://mistral-yu.github.io/image2splatpaint/") &&
+    !readme.includes("## Compatibility") &&
+    readme.includes("## TODO") &&
+    readme.includes("Improve training methods for paint-oriented effects.") &&
+    readme.includes("Improve compatibility with conventional 3D Gaussian Splatting workflows.") &&
+    sourceImagesReadme.includes("`ramen-photo.jpg` as an additional sample"),
   directFileLaunch:
     index.includes("img-src 'self' file: data: blob:") &&
     index.includes('<script src="./tilt-viewer.bundle.js?v=camera-summary-v2"></script>') &&

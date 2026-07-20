@@ -1108,3 +1108,24 @@ button:disabled {
     overflow: visible;
   }
 }
+
+@media (max-width: 520px) {
+  .progress {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .progress div:nth-child(5),
+  .progress div:nth-child(10),
+  .progress div:nth-child(n + 6) {
+    border-right: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+  }
+
+  .progress div:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .progress div:nth-last-child(-n + 2) {
+    border-bottom: 0;
+  }
+}

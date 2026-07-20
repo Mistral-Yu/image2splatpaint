@@ -34,11 +34,6 @@ the virtual-camera path.
 PLY opacity, color, scale, and rotation use standard pre-activation fields. The
 training renderer and exported result use standard front-to-back alpha blending.
 
-## Compatibility
-
-Chrome on macOS is verified. Windows, iPhone, and Android code paths are
-prepared but still need physical-device checks. iOS must expose `navigator.gpu`.
-
 ## Development
 
 ```bash
@@ -51,7 +46,7 @@ node scripts/pages_artifact_tests.mjs
 Open `http://127.0.0.1:8765/`. The root `index.html` also works directly.
 Training and the self-hosted PlayCanvas `Tilt` tab both work from `file://`.
 GitHub Pages is deployed by `.github/workflows/pages.yml`; the artifact contains the app, the
-generated geometric Sample image, and the author-owned ramen benchmark in `assets/source-images/`. Their provenance is recorded
+generated geometric Sample image, and the author-owned ramen sample in `assets/source-images/`. Their provenance is recorded
 in `assets/source-images/README.md`.
 
 The `Tilt` tab uses a pinned, self-hosted build of
@@ -59,6 +54,11 @@ The `Tilt` tab uses a pinned, self-hosted build of
 the generated PLY without uploading it. Training and the primary preview remain
 the custom WebGPU implementation; Tilt uses the backend negotiated by PlayCanvas.
 See [Third-Party Notices](THIRD_PARTY_NOTICES.md).
+
+## TODO
+
+- Improve training methods for paint-oriented effects.
+- Improve compatibility with conventional 3D Gaussian Splatting workflows.
 
 ## License
 
