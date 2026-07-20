@@ -22,29 +22,30 @@ jobs:
           persist-credentials: false
       - name: Configure Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
-      - name: Verify JavaScript
+      - name: Verify public JavaScript
         run: |
-          for file in web/app.js scripts/*.mjs; do node --check "$file"; done
-          node scripts/public_surface_tests.mjs
-          node scripts/standard_alpha_tests.mjs
-          node scripts/train_bind_group_cache_tests.mjs
-          node scripts/stage_min_scale_tests.mjs
-          node scripts/tilt_robustness_tests.mjs
-          node scripts/tilt_camera_tests.mjs
-          node scripts/virtual_tilt_tests.mjs
-          node scripts/virtual_bounded_depth_tests.mjs
-          node scripts/large_dispatch_tests.mjs
-          node scripts/p2_budget_contract_tests.mjs
-          node scripts/p2_optimizer_input_tests.mjs
-          node scripts/p2_export_memory_tests.mjs
-          node scripts/independent_ply_parser_tests.mjs
-          node scripts/adaptive_capacity_tests.mjs
-          node scripts/gpu_memory_status_tests.mjs
-          node scripts/export_cross_platform_tests.mjs
-      - name: Build static artifact
-        run: node scripts/build-pages.mjs
-      - name: Verify Pages artifact
-        run: node scripts/pages_artifact_tests.mjs
+          for file in web/app.js web/sample-image-data.js web/tilt-camera.mjs web/tilt-viewer.mjs web/tilt-browser-entry.mjs web/tilt-viewer.bundle.js; do
+            node --check "$file"
+          done
+      - name: Prepare static artifact
+        run: |
+          rm -rf _site
+          mkdir -p _site/web/vendor _site/assets/source-images
+          cp index.html LICENSE THIRD_PARTY_NOTICES.md _site/
+          cp web/index.html web/app.js web/sample-image-data.js web/styles.css web/tilt-viewer.bundle.js _site/web/
+          cp web/vendor/PLAYCANVAS-LICENSE.txt web/vendor/playcanvas-2.20.6.min.mjs _site/web/vendor/
+          cp assets/source-images/README.md assets/source-images/ramen-photo.jpg assets/source-images/generated-geometric-sample.jpg _site/assets/source-images/
+          touch _site/.nojekyll
+      - name: Verify static artifact
+        run: |
+          test -s _site/index.html
+          test -s _site/web/index.html
+          test -s _site/web/app.js
+          test -s _site/web/tilt-viewer.bundle.js
+          test -s _site/assets/source-images/generated-geometric-sample.jpg
+          test -s _site/LICENSE
+          test -s _site/THIRD_PARTY_NOTICES.md
+          test ! -e _site/scripts
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:

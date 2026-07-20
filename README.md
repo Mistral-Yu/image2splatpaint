@@ -36,16 +36,9 @@ training renderer and exported result use standard front-to-back alpha blending.
 
 ## Development
 
-```bash
-node scripts/static-server.mjs 8765
-node scripts/public_surface_tests.mjs
-node scripts/build-pages.mjs
-node scripts/pages_artifact_tests.mjs
-```
-
-Open `http://127.0.0.1:8765/`. The root `index.html` also works directly.
+Open the root `index.html` directly, or serve the repository root with a static server.
 Training and the self-hosted PlayCanvas `Tilt` tab both work from `file://`.
-GitHub Pages is deployed by `.github/workflows/pages.yml`; the artifact contains the app, the
+GitHub Pages is deployed by `.github/workflows/pages.yml`; the workflow publishes only the app, the
 generated geometric Sample image, and the author-owned ramen sample in `assets/source-images/`. Their provenance is recorded
 in `assets/source-images/README.md`.
 
