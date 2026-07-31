@@ -46,7 +46,7 @@ const MIP_PIXEL_SIGMA = 0.35;
 const INITIAL_SPLAT_COVERAGE_MULTIPLIER = 2.0;
 const PHASE_ONE_MAX_PLANAR_SCALE = 0.32;
 const PHASE_ONE_SHAPE_LR_MULTIPLIER = 2.5;
-const DENSITY_EVENT_SLOTS = 22;
+const DENSITY_EVENT_SLOTS = 25;
 const PHASE33_IMPORTANCE_EMA = 0.05;
 const PHASE33_COVERAGE_TARGET = 0.05;
 const PHASE33_COVERAGE_LOSS_WEIGHT = 0.02;
@@ -185,6 +185,10 @@ const DEFAULT_RECTANGLE_TOP_RATIO = 1;
 const DEFAULT_RECTANGLE_TOP_RATIO_MAX = 1;
 const MIN_RECTANGLE_TOP_RATIO = 0;
 const MAX_RECTANGLE_TOP_RATIO = 1;
+const MIN_RECTANGLE_ASPECT_RATIO = 1;
+const MAX_RECTANGLE_ASPECT_RATIO = 32;
+const DEFAULT_RECTANGLE_ASPECT_RATIO = 8;
+const DEFAULT_RECTANGLE_ORIENTATION = "free";
 const DEFAULT_RECTANGLE_PRESERVE_AREA = true;
 const DEFAULT_RECTANGLE_EDGE_DIRECTED_TAPER = true;
 const DEFAULT_RECTANGLE_STRUCTURE_AWARE_RATIO = false;
@@ -408,8 +412,13 @@ function configurePaintKernel(config, params = state.params) {
   config[89] = 0;
   // Rectangle learns opacity above this floor; Illustrative Oil stays fixed.
   config[90] = params?.minimumOpacityEnabled ? 1 : 0;
-  config[91] = 0;
-  config[92] = 0;
+  config[91] = clampNumber(
+    params?.rectangleMaxAspectRatio,
+    MIN_RECTANGLE_ASPECT_RATIO,
+    MAX_RECTANGLE_ASPECT_RATIO,
+    DEFAULT_RECTANGLE_ASPECT_RATIO,
+  );
+  config[92] = rectangleOrientationCode(params?.rectangleOrientation);
   config[93] = 0;
   config[94] = 0;
   config[95] = 0;
@@ -426,6 +435,9 @@ function configurePaintKernel(config, params = state.params) {
     MAX_RECTANGLE_TOP_RATIO,
     DEFAULT_RECTANGLE_TOP_RATIO_MAX,
   );
+  // Density pass override: final Paint repair may select only footprint-color
+  // outliers without running the ordinary inactive-splat relocation policy.
+  config[99] = 0;
   return config;
 }
 
@@ -463,6 +475,71 @@ function selectedRectangleTopRatioMax(minimum = selectedRectangleTopRatio()) {
     MAX_RECTANGLE_TOP_RATIO,
     DEFAULT_RECTANGLE_TOP_RATIO_MAX,
   );
+}
+
+function selectedRectangleMaxAspectRatio() {
+  return clampNumber(
+    document.querySelector("#rectangleMaxAspectRatio")?.value,
+    MIN_RECTANGLE_ASPECT_RATIO,
+    MAX_RECTANGLE_ASPECT_RATIO,
+    DEFAULT_RECTANGLE_ASPECT_RATIO,
+  );
+}
+
+function normalizedRectangleOrientation(value) {
+  return ["vertical", "horizontal"].includes(value)
+    ? value
+    : DEFAULT_RECTANGLE_ORIENTATION;
+}
+
+function selectedRectangleOrientation() {
+  return normalizedRectangleOrientation(
+    document.querySelector("#rectangleOrientation")?.value,
+  );
+}
+
+function rectangleOrientationCode(value) {
+  const orientation = normalizedRectangleOrientation(value);
+  return orientation === "vertical" ? 1 : orientation === "horizontal" ? 2 : 0;
+}
+
+function constrainedRectangleTheta(theta, sx, sy, orientation = DEFAULT_RECTANGLE_ORIENTATION) {
+  const normalized = normalizedRectangleOrientation(orientation);
+  if (normalized === "free") return theta;
+  const longAxisIsX = sx >= sy;
+  if (normalized === "vertical") return longAxisIsX ? Math.PI * 0.5 : 0;
+  return longAxisIsX ? 0 : Math.PI * 0.5;
+}
+
+function rectangleConstraintProbe(params = state.params) {
+  if (!params?.scale || !params?.theta || params.count <= 0) {
+    return {
+      count: 0,
+      max_aspect_ratio: null,
+      orientation: normalizedRectangleOrientation(params?.rectangleOrientation),
+      max_orientation_error: null,
+    };
+  }
+  const orientation = normalizedRectangleOrientation(params.rectangleOrientation);
+  let maxAspectRatio = 1;
+  let maxOrientationError = 0;
+  for (let i = 0; i < params.count; i += 1) {
+    const sx = Math.max(1e-12, Math.abs(params.scale[i * 2]));
+    const sy = Math.max(1e-12, Math.abs(params.scale[i * 2 + 1]));
+    maxAspectRatio = Math.max(maxAspectRatio, Math.max(sx, sy) / Math.min(sx, sy));
+    if (orientation === "free") continue;
+    const longAxisAngle = params.theta[i] + (sx >= sy ? 0 : Math.PI * 0.5);
+    const orientationError = orientation === "vertical"
+      ? Math.abs(Math.cos(longAxisAngle))
+      : Math.abs(Math.sin(longAxisAngle));
+    maxOrientationError = Math.max(maxOrientationError, orientationError);
+  }
+  return {
+    count: params.count,
+    max_aspect_ratio: maxAspectRatio,
+    orientation,
+    max_orientation_error: orientation === "free" ? null : maxOrientationError,
+  };
 }
 
 function selectedRectangleShapeSettings(params = null) {
@@ -2222,6 +2299,8 @@ const els = {
   layeredBrushOpacity: document.querySelector("#layeredBrushOpacity"),
   rectangleTopRatio: document.querySelector("#rectangleTopRatio"),
   rectangleTopRatioMax: document.querySelector("#rectangleTopRatioMax"),
+  rectangleMaxAspectRatio: document.querySelector("#rectangleMaxAspectRatio"),
+  rectangleOrientation: document.querySelector("#rectangleOrientation"),
   rectanglePreserveArea: document.querySelector("#rectanglePreserveArea"),
   rectangleEdgeDirectedTaper: document.querySelector("#rectangleEdgeDirectedTaper"),
   rectangleStructureAwareRatio: document.querySelector("#rectangleStructureAwareRatio"),
@@ -2779,6 +2858,8 @@ function publishState() {
   data.rectangleTopRatioInput = String(selectedRectangleTopRatio());
   data.rectangleTopRatioMaxInput =
     String(selectedRectangleTopRatioMax(selectedRectangleTopRatio()));
+  data.rectangleMaxAspectRatioInput = String(selectedRectangleMaxAspectRatio());
+  data.rectangleOrientationInput = selectedRectangleOrientation();
   const rectangleShape = selectedRectangleShapeSettings();
   data.rectanglePreserveAreaInput = String(rectangleShape.preserveArea);
   data.rectangleEdgeDirectedTaperInput = String(rectangleShape.edgeDirectedTaper);
@@ -5257,6 +5338,13 @@ function snapshotParams(params) {
       MAX_RECTANGLE_TOP_RATIO,
       DEFAULT_RECTANGLE_TOP_RATIO_MAX,
     ),
+    rectangleMaxAspectRatio: clampNumber(
+      params.rectangleMaxAspectRatio,
+      MIN_RECTANGLE_ASPECT_RATIO,
+      MAX_RECTANGLE_ASPECT_RATIO,
+      DEFAULT_RECTANGLE_ASPECT_RATIO,
+    ),
+    rectangleOrientation: normalizedRectangleOrientation(params.rectangleOrientation),
     rectanglePreserveArea:
       params.rectanglePreserveArea ?? DEFAULT_RECTANGLE_PRESERVE_AREA,
     rectangleEdgeDirectedTaper:
@@ -6191,6 +6279,12 @@ function initOpaqueLayeredPaint(image, count, kernelShape) {
   params.rectangleTopRatioMax = kernelShape === "rectangle"
     ? selectedRectangleTopRatioMax(params.rectangleTopRatio)
     : DEFAULT_RECTANGLE_TOP_RATIO_MAX;
+  params.rectangleMaxAspectRatio = kernelShape === "rectangle"
+    ? selectedRectangleMaxAspectRatio()
+    : DEFAULT_RECTANGLE_ASPECT_RATIO;
+  params.rectangleOrientation = kernelShape === "rectangle"
+    ? selectedRectangleOrientation()
+    : DEFAULT_RECTANGLE_ORIENTATION;
   const rectangleShape = selectedRectangleShapeSettings();
   params.rectanglePreserveArea =
     kernelShape === "rectangle" ? rectangleShape.preserveArea : DEFAULT_RECTANGLE_PRESERVE_AREA;
@@ -6243,7 +6337,7 @@ function initOpaqueLayeredPaint(image, count, kernelShape) {
     const anisotropy = oilHierarchy?.anisotropy ?? (1.35 + 2.65 * structure.coherence);
     const stretch = Math.sqrt(anisotropy);
     const scaleMultiplier = oilHierarchy?.scaleMultiplier ?? 1;
-    const theta = illustrativeOil
+    const unconstrainedTheta = illustrativeOil
       ? oilHierarchy.theta
       : rectangleDirectedTaperTheta(
           image,
@@ -6255,6 +6349,14 @@ function initOpaqueLayeredPaint(image, count, kernelShape) {
         );
     const nextSx = areaScale * scaleMultiplier * stretch;
     const nextSy = areaScale * scaleMultiplier / stretch;
+    const theta = kernelShape === "rectangle"
+      ? constrainedRectangleTheta(
+          unconstrainedTheta,
+          nextSx,
+          nextSy,
+          params.rectangleOrientation,
+        )
+      : unconstrainedTheta;
     const constrained = constrainSplat(
       x,
       y,
@@ -6262,7 +6364,9 @@ function initOpaqueLayeredPaint(image, count, kernelShape) {
       nextSy,
       theta,
       params.boundarySigma,
-      Math.max(illustrativeOil ? 7 : 4, anisotropy),
+      kernelShape === "rectangle"
+        ? Math.min(params.rectangleMaxAspectRatio, Math.max(4, anisotropy))
+        : Math.max(7, anisotropy),
     );
     params.xy[i * 2] = constrained.x;
     params.xy[i * 2 + 1] = constrained.y;
@@ -6782,6 +6886,13 @@ function growParamPlaceholders(params, targetCount) {
       MAX_RECTANGLE_TOP_RATIO,
       DEFAULT_RECTANGLE_TOP_RATIO_MAX,
     ),
+    rectangleMaxAspectRatio: clampNumber(
+      params.rectangleMaxAspectRatio,
+      MIN_RECTANGLE_ASPECT_RATIO,
+      MAX_RECTANGLE_ASPECT_RATIO,
+      DEFAULT_RECTANGLE_ASPECT_RATIO,
+    ),
+    rectangleOrientation: normalizedRectangleOrientation(params.rectangleOrientation),
     rectanglePreserveArea:
       params.rectanglePreserveArea ?? DEFAULT_RECTANGLE_PRESERVE_AREA,
     rectangleEdgeDirectedTaper:
@@ -7129,6 +7240,9 @@ function emptyFusionEvents() {
     tilt_risk_candidates: 0,
     tilt_true_splits: 0,
     tilt_opacity_saturations: 0,
+    paint_outlier_recycle: 0,
+    paint_outlier_recolor: 0,
+    paint_outlier_trim: 0,
   };
 }
 
@@ -7642,6 +7756,7 @@ class WebGpuPreview {
     this.growApplyPipeline = null;
     this.relocationSelectPipeline = null;
     this.relocationApplyPipeline = null;
+    this.finalBrushRepairPipeline = null;
     this.phase45RegionTelemetryPipeline = null;
     this.phase45RegionFinalizePipeline = null;
     this.phase45DonorSafetyPipeline = null;
@@ -11720,9 +11835,21 @@ fn apply_optimizer(
   let surfaceMaxAnisotropy = max(cfg(51u), 1.0);
   let detailTagged = floor(t.w) >= 2.0;
   var maxAnisotropy = select(min(baseMaxAnisotropy, surfaceMaxAnisotropy), baseMaxAnisotropy, detailTagged);
+  if (cfg(40u) > 0.5 && cfg(40u) < 1.5) {
+    maxAnisotropy = min(maxAnisotropy, max(cfg(91u), 1.0));
+  }
   if (major / minor > maxAnisotropy) {
     let capped = minor * maxAnisotropy;
     nextScale = select(vec2<f32>(minor, capped), vec2<f32>(capped, minor), nextScale.x >= nextScale.y);
+  }
+  if (cfg(40u) > 0.5 && cfg(40u) < 1.5 && cfg(92u) > 0.5) {
+    let longAxisIsX = nextScale.x >= nextScale.y;
+    let vertical = cfg(92u) < 1.5;
+    nextTheta = select(
+      select(1.57079632679, 0.0, longAxisIsX),
+      select(0.0, 1.57079632679, longAxisIsX),
+      vertical
+    );
   }
   let nextCos = abs(cos(nextTheta));
   let nextSin = abs(sin(nextTheta));
@@ -11921,9 +12048,21 @@ fn optimize(@builtin(global_invocation_id) id: vec3<u32>) {
   let surfaceMaxAnisotropy = max(cfg(51u), 1.0);
   let detailTagged = floor(t.w) >= 2.0;
   var maxAnisotropy = select(min(baseMaxAnisotropy, surfaceMaxAnisotropy), baseMaxAnisotropy, detailTagged);
+  if (cfg(40u) > 0.5 && cfg(40u) < 1.5) {
+    maxAnisotropy = min(maxAnisotropy, max(cfg(91u), 1.0));
+  }
   if (major / minor > maxAnisotropy) {
     let capped = minor * maxAnisotropy;
     nextScale = select(vec2<f32>(minor, capped), vec2<f32>(capped, minor), nextScale.x >= nextScale.y);
+  }
+  if (cfg(40u) > 0.5 && cfg(40u) < 1.5 && cfg(92u) > 0.5) {
+    let longAxisIsX = nextScale.x >= nextScale.y;
+    let vertical = cfg(92u) < 1.5;
+    nextTheta = select(
+      select(1.57079632679, 0.0, longAxisIsX),
+      select(0.0, 1.57079632679, longAxisIsX),
+      vertical
+    );
   }
   let nextCos = abs(cos(nextTheta));
   let nextSin = abs(sin(nextTheta));
@@ -13859,7 +13998,7 @@ fn alpha_loss(
   }
 
   async ensureDensityPipelines() {
-    if (this.growSelectPipeline && this.distributionOffsetPipeline && this.residualTileOffsetPipeline && this.relocationApplyPipeline && this.phase45RegionTelemetryPipeline && this.phase45RegionFinalizePipeline && this.phase45DonorSafetyPipeline) {
+    if (this.growSelectPipeline && this.distributionOffsetPipeline && this.residualTileOffsetPipeline && this.relocationApplyPipeline && this.finalBrushRepairPipeline && this.phase45RegionTelemetryPipeline && this.phase45RegionFinalizePipeline && this.phase45DonorSafetyPipeline) {
       await this.ensureOptimizerResetPipeline();
       return;
     }
@@ -13922,6 +14061,32 @@ fn target_at(pos: vec2<f32>, width: u32, height: u32) -> vec3<f32> {
   let py = min(height - 1u, u32(floor((safePos.y * 0.5 + 0.5) * f32(height - 1u) + 0.5)));
   let index = (py * width + px) * 3u;
   return vec3<f32>(targetRgb[index], targetRgb[index + 1u], targetRgb[index + 2u]);
+}
+
+// Paint kernels cover an oriented area, so center-pixel RGB alone is not a
+// stable outlier signal. Return a center-weighted five-sample sRGB mean plus
+// the mean sample deviation.
+fn paint_footprint_target(g: u32, width: u32, height: u32) -> vec4<f32> {
+  let t = transform[g];
+  let center = xy[g].center;
+  let c = cos(t.z);
+  let s = sin(t.z);
+  let axisX = vec2<f32>(c, s) * t.x * 0.65;
+  let axisY = vec2<f32>(-s, c) * t.y * 0.65;
+  let centerColor = target_at(center, width, height);
+  let x0 = target_at(center - axisX, width, height);
+  let x1 = target_at(center + axisX, width, height);
+  let y0 = target_at(center - axisY, width, height);
+  let y1 = target_at(center + axisY, width, height);
+  let meanColor = (centerColor * 2.0 + x0 + x1 + y0 + y1) / 6.0;
+  let deviation = (
+    dot(abs(centerColor - meanColor), vec3<f32>(0.33333334)) * 2.0 +
+    dot(abs(x0 - meanColor), vec3<f32>(0.33333334)) +
+    dot(abs(x1 - meanColor), vec3<f32>(0.33333334)) +
+    dot(abs(y0 - meanColor), vec3<f32>(0.33333334)) +
+    dot(abs(y1 - meanColor), vec3<f32>(0.33333334))
+  ) / 6.0;
+  return vec4<f32>(meanColor, deviation);
 }
 
 // Returns risk, split-axis (1 = local X), projected depth span, and color mismatch.
@@ -14163,6 +14328,19 @@ fn rotated_extent(scale: vec2<f32>, theta: f32) -> vec2<f32> {
   return max(config[54], 0.0) * vec2<f32>(
     length(vec2<f32>(c * scale.x, s * scale.y)),
     length(vec2<f32>(s * scale.x, c * scale.y))
+  );
+}
+
+fn constrain_rectangle_orientation(scale: vec2<f32>, theta: f32) -> f32 {
+  if (config[40] <= 0.5 || config[40] >= 1.5 || config[92] <= 0.5) {
+    return theta;
+  }
+  let longAxisIsX = scale.x >= scale.y;
+  let vertical = config[92] < 1.5;
+  return select(
+    select(1.57079632679, 0.0, longAxisIsX),
+    select(0.0, 1.57079632679, longAxisIsX),
+    vertical
   );
 }
 
@@ -14880,6 +15058,7 @@ fn apply_grow(@builtin(global_invocation_id) id: vec3u) {
       );
     }
     let reseedScaleCeiling = baseScale * select(0.9, 1.15, config[40] > 3.5);
+    nextTheta = constrain_rectangle_orientation(nextScale, nextTheta);
     nextScale = constrain_scale(nextPos, max(max(min(nextScale, reseedScaleCeiling), baseScaleFloor), stageMinScale), nextTheta, localMaxAnisotropy);
     nextPos = constrain_position(nextPos, nextScale, nextTheta);
     let randomizedReseedLayer = select(
@@ -14962,6 +15141,7 @@ fn apply_grow(@builtin(global_invocation_id) id: vec3u) {
   }
   if (!tiltTrueSplit) { nextScale = min(nextScale, baseScale * 0.9); }
   let scaleFloor = max(select(baseScaleFloor, vec2<f32>(${MIN_SPLAT_SCALE}), tiltTrueSplit), stageMinScale);
+  nextTheta = constrain_rectangle_orientation(nextScale, nextTheta);
   nextScale = constrain_scale(nextPos, max(nextScale, scaleFloor), nextTheta, localMaxAnisotropy);
   nextPos = constrain_position(nextPos, nextScale, nextTheta);
 
@@ -15047,14 +15227,22 @@ fn select_relocation(@builtin(global_invocation_id) id: vec3u) {
   let candidateImportance = importance_score(g);
   let radiusPx = max(t.x, t.y) * max(f32(width), f32(height)) * 1.25;
   let layerOrder = clamp(min(fract(t.w), ${LAYER_CODE_RANGE}) / ${LAYER_CODE_RANGE}, 0.0, 1.0);
-  let targetColorError = dot(abs(c.rgb - target_at(xy[g].center, width, height)), vec3<f32>(0.33333334));
+  let paintTarget = paint_footprint_target(g, width, height);
+  let centerColorError = dot(abs(c.rgb - target_at(xy[g].center, width, height)), vec3<f32>(0.33333334));
+  let footprintColorError = dot(abs(c.rgb - paintTarget.rgb), vec3<f32>(0.33333334));
+  let paintFootprintErrorThreshold = select(0.20, 0.12, config[40] > 3.5);
+  let paintFootprintConsistent =
+    config[40] > 3.5 || paintTarget.a <= 0.055;
   let frontPaintOutlier =
-    config[40] >= 2.0 &&
     config[85] > 0.5 &&
+    (config[40] > 3.5 || config[99] > 0.5) &&
     st.w > 32.0 &&
     layerOrder >= 0.625 &&
     importance_residual(g) > 0.045 &&
-    targetColorError > 0.075;
+    centerColorError > 0.075 &&
+    paintFootprintConsistent &&
+    footprintColorError > paintFootprintErrorThreshold;
+  if (config[99] > 0.5 && !frontPaintOutlier) { return; }
   let deepLowInfluence = config[62] > 0.5 && config[35] > 0.5 && st.w > 32.0 &&
     layerOrder <= config[63] && candidateImportance < config[64] && importance_residual(g) < 0.035;
   let inactiveMcmc = t.w < 0.5 || c.a < 0.006 || radiusPx < 0.55 ||
@@ -15103,7 +15291,10 @@ fn select_relocation(@builtin(global_invocation_id) id: vec3u) {
   }
   atomicAdd(&control[capacity * 2u + 17u], 1u);
   if (sourceTiltRisk) { atomicAdd(&control[capacity * 2u + 19u], 1u); }
-  atomicStore(&control[capacity + g], encode_selection(source, select(0u, 3u, adcRecycle)));
+  var relocationMode = select(0u, 3u, adcRecycle);
+  if (frontPaintOutlier) { relocationMode = 2u; }
+  atomicStore(&control[capacity + g], encode_selection(source, relocationMode));
+  if (frontPaintOutlier) { atomicAdd(&control[capacity * 2u + 22u], 1u); }
   if (adcRecycle && config[45] > 0.5) {
     let donorRegion = (phase45DonorRecord >> 8u) & 63u;
     atomicAdd(&control[phase45_region_base(capacity) + donorRegion * PHASE45_REGION_STRIDE + 23u], 1u);
@@ -15127,6 +15318,7 @@ fn apply_relocation(@builtin(global_invocation_id) id: vec3u) {
   if ((encoded & SOURCE_MASK) == 0u) { return; }
   let source = (encoded & SOURCE_MASK) - 1u;
   let selectionMode = encoded >> 30u;
+  let paintOutlierRecycle = selectionMode == 2u;
   let adcRecycle = selectionMode == 3u;
   let sourceT = transform[source];
   let sourceC = color[source];
@@ -15177,6 +15369,7 @@ fn apply_relocation(@builtin(global_invocation_id) id: vec3u) {
       height
     );
   }
+  nextTheta = constrain_rectangle_orientation(splitScale, nextTheta);
   var nextScale = constrain_scale(nextPos, max(max(splitScale, baseScaleFloor), stageMinScale), nextTheta, localMaxAnisotropy);
   nextPos = constrain_position(nextPos, nextScale, nextTheta);
   var replacementSourcePos = xy[source].center;
@@ -15213,7 +15406,7 @@ fn apply_relocation(@builtin(global_invocation_id) id: vec3u) {
     sourceC.rgb,
     tiltTrueSplit
   );
-  if (config[40] > 3.5 && !tiltTrueSplit) {
+  if ((config[40] > 3.5 || paintOutlierRecycle) && !tiltTrueSplit) {
     nextColor = targetColor;
   }
   color[g] = vec4<f32>(nextColor, childOpacity);
@@ -15253,6 +15446,58 @@ fn apply_relocation(@builtin(global_invocation_id) id: vec3u) {
 }
 
 @compute @workgroup_size(64)
+fn apply_final_brush_repair(@builtin(global_invocation_id) id: vec3u) {
+  let g = id.x;
+  let count = u32(config[2]);
+  let capacity = u32(config[10]);
+  if (
+    g >= count ||
+    config[40] <= 3.5 ||
+    config[85] <= 0.5 ||
+    config[99] <= 0.5
+  ) { return; }
+  let width = u32(config[0]);
+  let height = u32(config[1]);
+  let t = transform[g];
+  let paintTarget = paint_footprint_target(g, width, height);
+  let centerColorError = dot(
+    abs(color[g].rgb - target_at(xy[g].center, width, height)),
+    vec3<f32>(0.33333334)
+  );
+  let footprintColorError = dot(
+    abs(color[g].rgb - paintTarget.rgb),
+    vec3<f32>(0.33333334)
+  );
+  let eventBase = capacity * 2u;
+  if (
+    paintTarget.a <= 0.055 &&
+    centerColorError > 0.075 &&
+    footprintColorError > 0.12
+  ) {
+    color[g] = vec4<f32>(paintTarget.rgb, color[g].a);
+    atomicAdd(&control[eventBase + 23u], 1u);
+    return;
+  }
+  let radiusPx = max(t.x, t.y) * max(f32(width), f32(height)) * 1.25;
+  if (
+    paintTarget.a > 0.055 &&
+    footprintColorError > 0.12 &&
+    radiusPx > 3.0 &&
+    importance_residual(g) > 0.02
+  ) {
+    var trimmed = t;
+    let stageMinScale = max(vec2<f32>(${MIN_SPLAT_SCALE}), vec2<f32>(config[60]));
+    if (trimmed.x >= trimmed.y) {
+      trimmed.x = max(trimmed.x * 0.65, stageMinScale.x);
+    } else {
+      trimmed.y = max(trimmed.y * 0.65, stageMinScale.y);
+    }
+    transform[g] = trimmed;
+    atomicAdd(&control[eventBase + 24u], 1u);
+  }
+}
+
+@compute @workgroup_size(64)
 fn reset_density_aux(@builtin(global_invocation_id) id: vec3u) {
   let g = id.x;
   let count = u32(config[2]);
@@ -15281,6 +15526,7 @@ fn reset_density_aux(@builtin(global_invocation_id) id: vec3u) {
       this.growApplyPipeline,
       this.relocationSelectPipeline,
       this.relocationApplyPipeline,
+      this.finalBrushRepairPipeline,
       this.densityAuxResetPipeline,
       this.phase45RegionTelemetryPipeline,
       this.phase45RegionFinalizePipeline,
@@ -15298,6 +15544,7 @@ fn reset_density_aux(@builtin(global_invocation_id) id: vec3u) {
       make("apply_grow"),
       make("select_relocation"),
       make("apply_relocation"),
+      make("apply_final_brush_repair"),
       make("reset_density_aux"),
       make("phase45_collect_region_telemetry"),
       make("phase45_finalize_region_telemetry"),
@@ -16123,7 +16370,13 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
     };
   }
 
-  async relocateExperimentalGpu(image, params, step, learningRates = selectedLearningRates()) {
+  async relocateExperimentalGpu(
+    image,
+    params,
+    step,
+    learningRates = selectedLearningRates(),
+    { paintRepairOnly = false } = {},
+  ) {
     if (!this.trainState || this.trainState.capacity < params.count) return false;
     await this.ensureDensityPipelines();
     const layout = splatGridLayout(image, params.count);
@@ -16138,6 +16391,7 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
       capacity: this.trainState.capacity,
       mode: 2,
     });
+    config[99] = paintRepairOnly ? 1 : 0;
     this.device.queue.writeBuffer(this.trainState.configBuffer, 0, config);
     this.device.queue.writeBuffer(this.trainState.densityControlBuffer, 0, this.trainState.zeroDensityScratch);
     this.device.queue.writeBuffer(
@@ -16147,29 +16401,37 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
     );
     const front = this.trainState.front;
     const bindGroup = this.densityBindGroup(front);
+    const dedicatedBrushRepair =
+      paintRepairOnly &&
+      normalizedKernelShape(params.kernelShape) === "opaque-brush";
     const relocationProfileSample = this.operationProfileSample(step);
     const encoder = this.device.createCommandEncoder();
     const pass = encoder.beginComputePass(this.profilePassDescriptor(relocationProfileSample, "relocation"));
     pass.setBindGroup(0, bindGroup);
-    pass.setPipeline(this.distributionPipeline);
-    pass.dispatchWorkgroups(Math.ceil(params.count / 256));
-    pass.setPipeline(this.distributionBlockScanPipeline);
-    pass.dispatchWorkgroups(Math.ceil(params.count / 256));
-    pass.setPipeline(this.distributionBlockSumsPipeline);
-    pass.dispatchWorkgroups(1);
-    pass.setPipeline(this.distributionOffsetPipeline);
-    pass.dispatchWorkgroups(Math.ceil(params.count / 256));
-    pass.setPipeline(this.relocationSelectPipeline);
-    pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(Math.ceil(params.count / 64));
-    pass.setPipeline(this.relocationApplyPipeline);
-    pass.dispatchWorkgroups(Math.ceil(params.count / 64));
-    pass.setPipeline(this.optimizerResetPipeline);
-    pass.setBindGroup(0, this.optimizerResetBindGroup());
-    pass.dispatchWorkgroups(Math.ceil(params.count / 64));
-    pass.setPipeline(this.optimizerSourceResetPipeline);
-    pass.setBindGroup(0, this.optimizerResetBindGroup(this.optimizerSourceResetPipeline));
-    pass.dispatchWorkgroups(Math.ceil(params.count / 64));
+    if (dedicatedBrushRepair) {
+      pass.setPipeline(this.finalBrushRepairPipeline);
+      pass.dispatchWorkgroups(Math.ceil(params.count / 64));
+    } else {
+      pass.setPipeline(this.distributionPipeline);
+      pass.dispatchWorkgroups(Math.ceil(params.count / 256));
+      pass.setPipeline(this.distributionBlockScanPipeline);
+      pass.dispatchWorkgroups(Math.ceil(params.count / 256));
+      pass.setPipeline(this.distributionBlockSumsPipeline);
+      pass.dispatchWorkgroups(1);
+      pass.setPipeline(this.distributionOffsetPipeline);
+      pass.dispatchWorkgroups(Math.ceil(params.count / 256));
+      pass.setPipeline(this.relocationSelectPipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(Math.ceil(params.count / 64));
+      pass.setPipeline(this.relocationApplyPipeline);
+      pass.dispatchWorkgroups(Math.ceil(params.count / 64));
+      pass.setPipeline(this.optimizerResetPipeline);
+      pass.setBindGroup(0, this.optimizerResetBindGroup());
+      pass.dispatchWorkgroups(Math.ceil(params.count / 64));
+      pass.setPipeline(this.optimizerSourceResetPipeline);
+      pass.setBindGroup(0, this.optimizerResetBindGroup(this.optimizerSourceResetPipeline));
+      pass.dispatchWorkgroups(Math.ceil(params.count / 64));
+    }
     pass.end();
     const relocationProfile = await this.submitProfiledOperation(encoder, relocationProfileSample, {
       resolution: [image.width, image.height],
@@ -16185,6 +16447,8 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
       ...(this.lastTrainStats || {}),
       gpu_relocation: true,
       gpu_relocation_step: step,
+      paint_outlier_repair_only: Boolean(paintRepairOnly),
+      paint_outlier_dedicated_pass: dedicatedBrushRepair,
       weighted_mass_redistribution: true,
       active_count: params.count,
       relocation_queue_wait_count: 1,
@@ -16327,6 +16591,9 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
         tilt_risk_candidates: values[19],
         tilt_true_splits: values[20],
         tilt_opacity_saturations: values[21],
+        paint_outlier_recycle: values[22],
+        paint_outlier_recolor: values[23],
+        paint_outlier_trim: values[24],
       };
     } finally {
       readBuffer.destroy();
@@ -18428,6 +18695,7 @@ function plannedAdaptiveGpuBatch({
     ).due;
     const pruneDue = deepPruneDue(candidate, steps, deepPruneSettings);
     const recolorDue = hiddenRgbRecolorDue(candidate, steps, hiddenRgbSettings);
+    const paintOutlierFinalRepairDue = algorithmUsesPaintKernel() && candidate === steps;
     if (
       candidateStage !== startStage ||
       densityDue ||
@@ -18435,6 +18703,7 @@ function plannedAdaptiveGpuBatch({
       layerDue ||
       pruneDue ||
       recolorDue ||
+      paintOutlierFinalRepairDue ||
       performanceProfileLabels(candidate, steps).length > 0 ||
       virtualTiltStepSpec(candidate, candidateStage, steps).enabled
     ) break;
@@ -18482,6 +18751,8 @@ function setInputControlsDisabled(disabled) {
     els.layeredBrushOpacity,
     els.rectangleTopRatio,
     els.rectangleTopRatioMax,
+    els.rectangleMaxAspectRatio,
+    els.rectangleOrientation,
     els.rectanglePreserveArea,
     els.rectangleEdgeDirectedTaper,
     els.rectangleStructureAwareRatio,
@@ -18613,11 +18884,19 @@ function syncAlgorithmRequirements() {
     "Fixed opacity for Layered Opaque Brush paint splats; independent from Rectangle Splats.";
   els.rectangleTopRatio.disabled = state.running || !rectangleSelected;
   els.rectangleTopRatioMax.disabled = state.running || !rectangleSelected;
+  els.rectangleMaxAspectRatio.disabled = state.running || !rectangleSelected;
+  els.rectangleOrientation.disabled = state.running || !rectangleSelected;
   els.rectangleTopRatio.title = rectangleSelected
     ? "Minimum short-edge ratio in the deterministic Rectangle shape range; 0 allows triangle tips."
     : "Available for Rectangle Splats.";
   els.rectangleTopRatioMax.title = rectangleSelected
     ? "Maximum short-edge ratio in the deterministic Rectangle shape range; 1 allows full rectangles."
+    : "Available for Rectangle Splats.";
+  els.rectangleMaxAspectRatio.title = rectangleSelected
+    ? "Maximum long-edge / short-edge aspect ratio; 1 produces square footprints."
+    : "Available for Rectangle Splats.";
+  els.rectangleOrientation.title = rectangleSelected
+    ? "Free keeps structure-guided rotation; Vertical or Horizontal locks the long axis."
     : "Available for Rectangle Splats.";
   for (const control of [
     els.rectanglePreserveArea,
@@ -19332,6 +19611,9 @@ async function updatePreview(step, final = false, { present = true, readOnlyPeri
       state.metrics.fusion_events.tilt_risk_candidates = densityCounters.tilt_risk_candidates;
       state.metrics.fusion_events.tilt_true_splits = densityCounters.tilt_true_splits;
       state.metrics.fusion_events.tilt_opacity_saturations = densityCounters.tilt_opacity_saturations;
+      state.metrics.fusion_events.paint_outlier_recycle = densityCounters.paint_outlier_recycle;
+      state.metrics.fusion_events.paint_outlier_recolor = densityCounters.paint_outlier_recolor;
+      state.metrics.fusion_events.paint_outlier_trim = densityCounters.paint_outlier_trim;
       if (densityCounters.nonfinite_stats > 0) {
         throw runtimeSafetyError("safety_stop_nonfinite_density", `density-step-${step}`, {
           nonfinite_stats: densityCounters.nonfinite_stats,
@@ -19655,6 +19937,17 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   const runRectangleTopRatio = selectedRectangleTopRatio();
   const runRectangleTopRatioMax =
     selectedRectangleTopRatioMax(runRectangleTopRatio);
+  const runRectangleMaxAspectRatio = selectedRectangleMaxAspectRatio();
+  const runRectangleOrientation = selectedRectangleOrientation();
+  if (algorithmUsesRectangleKernel(algorithm)) {
+    learningRates = {
+      ...learningRates,
+      maxAnisotropy: Math.min(
+        learningRates.maxAnisotropy,
+        runRectangleMaxAspectRatio,
+      ),
+    };
+  }
   const runRectangleShape = selectedRectangleShapeSettings();
   const runVirtualCameraSampling = virtualCameraSamplingVariants(virtualCameraSamplingEnabled);
   const adaptiveGridRequest = adaptiveGridInitializationVariants(virtualCameraSamplingEnabled);
@@ -19716,6 +20009,8 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   els.layeredBrushOpacity.value = String(runLayeredBrushOpacity);
   els.rectangleTopRatio.value = String(runRectangleTopRatio);
   els.rectangleTopRatioMax.value = String(runRectangleTopRatioMax);
+  els.rectangleMaxAspectRatio.value = String(runRectangleMaxAspectRatio);
+  els.rectangleOrientation.value = runRectangleOrientation;
   els.rectanglePreserveArea.checked = runRectangleShape.preserveArea;
   els.rectangleEdgeDirectedTaper.checked = runRectangleShape.edgeDirectedTaper;
   els.rectangleStructureAwareRatio.checked = runRectangleShape.structureAwareRatio;
@@ -19760,6 +20055,12 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
     state.params.rectangleTopRatioMax = algorithmUsesRectangleKernel(algorithm)
       ? runRectangleTopRatioMax
       : DEFAULT_RECTANGLE_TOP_RATIO_MAX;
+    state.params.rectangleMaxAspectRatio = algorithmUsesRectangleKernel(algorithm)
+      ? runRectangleMaxAspectRatio
+      : DEFAULT_RECTANGLE_ASPECT_RATIO;
+    state.params.rectangleOrientation = algorithmUsesRectangleKernel(algorithm)
+      ? runRectangleOrientation
+      : DEFAULT_RECTANGLE_ORIENTATION;
     state.params.rectanglePreserveArea = algorithmUsesRectangleKernel(algorithm)
       ? runRectangleShape.preserveArea
       : DEFAULT_RECTANGLE_PRESERVE_AREA;
@@ -20417,7 +20718,13 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         );
       const deepPruneDueAtStep = deepPruneDue(step, steps, runDiscreteLayerSettings);
       const hiddenRgbRecolorDueAtStep = hiddenRgbRecolorDue(step, steps, runHiddenRgbRecolorSettings);
-      const structuralStep = densifyDue || relocationDueAtStep || deepPruneDueAtStep || hiddenRgbRecolorDueAtStep;
+      const paintOutlierFinalRepairDueAtStep = algorithmUsesPaintKernel() && step === steps;
+      const structuralStep =
+        densifyDue ||
+        relocationDueAtStep ||
+        deepPruneDueAtStep ||
+        hiddenRgbRecolorDueAtStep ||
+        paintOutlierFinalRepairDueAtStep;
       const effectiveSyncInterval = effectiveTrainSyncInterval(
         state.params.count,
         state.metrics.train_sync_interval,
@@ -20565,6 +20872,26 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
           await awaitTrainingRun(run, nextFrame());
         }
         await applyDeepPrune(step, steps, run);
+      }
+      if (paintOutlierFinalRepairDueAtStep && !state.metrics?.stopped) {
+        const repairStarted = performance.now();
+        await refreshTrainingResidualSignal(step, "relocation", run);
+        const repairedOnGpu = await awaitTrainingRun(
+          run,
+          renderer.relocateExperimentalGpu(
+            state.image,
+            state.params,
+            step,
+            learningRates,
+            { paintRepairOnly: true },
+          ),
+        );
+        const repairMs = performance.now() - repairStarted;
+        stepRelocationMs += repairMs;
+        state.metrics.relocation_gpu_ms += repairMs;
+        if (repairedOnGpu && state.webgpu.renderer.trainState) {
+          state.webgpu.renderer.trainState.tileReady = false;
+        }
       }
       if (hiddenRgbRecolorDueAtStep) {
         await applyHiddenRgbRecolor(step, steps, runHiddenRgbRecolorSettings, run);
@@ -22708,6 +23035,14 @@ els.rectangleTopRatioMax.addEventListener("change", () => {
   }
   publishState();
 });
+els.rectangleMaxAspectRatio.addEventListener("change", () => {
+  els.rectangleMaxAspectRatio.value = String(selectedRectangleMaxAspectRatio());
+  publishState();
+});
+els.rectangleOrientation.addEventListener("change", () => {
+  els.rectangleOrientation.value = selectedRectangleOrientation();
+  publishState();
+});
 for (const control of [
   els.rectanglePreserveArea,
   els.rectangleEdgeDirectedTaper,
@@ -23157,6 +23492,7 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
   initialSplatOrientation,
   initialSplatShape,
   initialOrientationStats,
+  rectangleConstraintProbe,
   sharedTiltOrbitRadius,
   optimizerFootprintHistogram,
   phase39ContractProbe,

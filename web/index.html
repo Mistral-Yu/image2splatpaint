@@ -127,7 +127,7 @@
                 <button id="retryWebGpuButton" data-testid="retry-webgpu" type="button">Retry WebGPU</button>
               </div>
               <div class="training-grid">
-                <label class="field-wide">
+                <label class="algorithm-field field-wide">
                   Algorithm
                   <select id="algorithmSelect" data-testid="algorithm-select">
                     <option value="planar-gaussian" selected>Planar Gaussian</option>
@@ -285,6 +285,18 @@
                             <input id="rectangleTopRatioMax" data-testid="rectangle-top-ratio-max" type="number" min="0" max="1" step="0.05" value="1" />
                           </label>
                         </div>
+                        <label title="Maximum long-edge / short-edge aspect ratio for Rectangle splats. 1 makes square footprints. The default 8 matches the current limit. Applied at the next Train start.">
+                          Max aspect ratio
+                          <input id="rectangleMaxAspectRatio" data-testid="rectangle-max-aspect-ratio" type="number" min="1" max="32" step="0.1" value="8" />
+                        </label>
+                        <label title="Constrains the Rectangle long axis. Free preserves the current structure-guided orientation. Applied at the next Train start.">
+                          Orientation
+                          <select id="rectangleOrientation" data-testid="rectangle-orientation">
+                            <option value="free" selected>Free</option>
+                            <option value="vertical">Vertical</option>
+                            <option value="horizontal">Horizontal</option>
+                          </select>
+                        </label>
                         <label class="inline-option field-wide" title="Keeps the initial footprint area stable as the top edge narrows. Ratio 1 is unchanged.">
                           <input id="rectanglePreserveArea" data-testid="rectangle-preserve-area" type="checkbox" checked />
                           Preserve footprint area
