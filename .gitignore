@@ -8,6 +8,7 @@ __pycache__/
 
 # Local development, experiments, AI working documents, and evidence.
 outputs/
+output/
 references/
 _site/
 checkpoints/

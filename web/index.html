@@ -4,6 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="referrer" content="no-referrer" />
+    <meta name="description" content="Approximate one image with Gaussian, rectangle, or paint-like splats locally in a WebGPU browser." />
+    <meta name="theme-color" content="#f5f7fb" />
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; worker-src 'self' blob:; connect-src 'self' blob:; img-src 'self' file: data: blob:; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
     <link rel="icon" href="data:," />
     <title>Image2SplatPaint</title>
@@ -27,8 +29,12 @@
           </div>
           <div id="dropZone" class="drop-zone" data-testid="drop-zone">
             <strong>Drop an image</strong>
-            <span>or choose a local file</span>
-            <input id="fileInput" data-testid="file-input" type="file" accept="image/*" />
+            <span>or</span>
+            <label class="drop-zone-file-button">
+              <span>Choose image file</span>
+              <input id="fileInput" class="drop-zone-file-input" data-testid="file-input" type="file" accept="image/*" />
+            </label>
+            <small class="drop-zone-privacy">Loaded images stay in this browser; the app does not upload them.</small>
           </div>
         </div>
         <div class="progress">
@@ -44,15 +50,15 @@
             <span>L1 loss</span>
             <strong id="lossText" data-testid="loss-text">-</strong>
           </div>
-          <div>
-            <span>SSIM global</span>
-            <strong id="ssimText" data-testid="ssim-text">-</strong>
+          <div title="Global SSIM / local-region SSIM 10th percentile">
+            <span>SSIM global / local p10</span>
+            <strong id="ssimSummaryText" data-testid="ssim-summary-text"><output id="ssimText" data-testid="ssim-text">-</output> / <output id="regionalSsimText" data-testid="regional-ssim-text">-</output></strong>
           </div>
-          <div>
-            <span>SSIM local p10</span>
-            <strong id="regionalSsimText" data-testid="regional-ssim-text">-</strong>
+          <div title="RGB PSNR in sRGB signal values (0-1), reported in decibels">
+            <span>PSNR RGB</span>
+            <strong id="psnrText" data-testid="psnr-text">-</strong>
           </div>
-          <div title="Training image size / original image size">
+          <div title="Current cached image size">
             <span>image size</span>
             <strong id="imageSizeText" data-testid="image-size-text">-</strong>
           </div>
@@ -64,8 +70,8 @@
             <span>speed / elapsed</span>
             <strong id="trainingTimingText" data-testid="training-timing-text">- / -</strong>
           </div>
-          <div title="Estimated active bytes / total capacity of this app's live WebGPU training buffers. This is not system-wide, free, or total device VRAM.">
-            <span>VRAM active / reserved</span>
+          <div title="Tracked persistent app-created GPU buffers: live content / allocated capacity. Transient command-local buffers and textures, browser or driver allocations, and system VRAM are excluded.">
+            <span>GPU active / reserved</span>
             <strong id="gpuMemoryText" data-testid="gpu-memory-text">0 / 0 MB</strong>
           </div>
           <div>
@@ -83,12 +89,12 @@
           <p>Paint one image with splats.</p>
         </div>
 
-        <nav class="log-tabs" data-testid="log-tabs" role="tablist" aria-label="Workspace">
+        <nav id="logTabs" class="log-tabs" data-testid="log-tabs" role="tablist" aria-label="Workspace">
           <button id="trainingLogTab" class="active" data-testid="training-log-tab" type="button" role="tab" aria-controls="trainingLogPanel" aria-selected="true">Train</button>
           <button id="splatsTab" data-testid="splats-tab" type="button" role="tab" aria-controls="splatsPanel" aria-selected="false">Splats</button>
           <button id="exportTab" data-testid="export-tab" type="button" role="tab" aria-controls="exportPanel" aria-selected="false">Export</button>
           <button id="eventLogTab" data-testid="event-log-tab" type="button" role="tab" aria-controls="eventLogPanel" aria-selected="false">Log</button>
-          <button id="tiltTab" data-testid="tilt-tab" type="button" role="tab" aria-controls="tiltPanel" aria-selected="false">Tilt</button>
+          <button id="tiltTab" data-testid="tilt-tab" type="button" role="tab" aria-controls="tiltPanel" aria-selected="false" disabled aria-disabled="true">Tilt</button>
         </nav>
 
         <div class="tab-viewport">
@@ -111,16 +117,22 @@
               </div>
 
               <div class="actions">
-                <button id="startButton" data-testid="start-button" type="button">Train</button>
+                <button id="startButton" data-testid="start-button" type="button" disabled>Train</button>
                 <button id="pauseButton" data-testid="pause-button" type="button" disabled>Pause</button>
                 <button id="stopButton" data-testid="stop-button" type="button" disabled>Stop</button>
                 <button id="resetButton" data-testid="reset-button" type="button" disabled>Reset</button>
+              </div>
+              <div id="webGpuNotice" class="webgpu-notice" data-testid="webgpu-notice" role="status" aria-live="polite" hidden>
+                <span id="webGpuNoticeText">WebGPU is unavailable. Training is disabled.</span>
+                <button id="retryWebGpuButton" data-testid="retry-webgpu" type="button">Retry WebGPU</button>
               </div>
               <div class="training-grid">
                 <label class="field-wide">
                   Algorithm
                   <select id="algorithmSelect" data-testid="algorithm-select">
                     <option value="planar-gaussian" selected>Planar Gaussian</option>
+                    <option value="rectangle-splats">Rectangle Splats</option>
+                    <option value="layered-opaque-brush">Layered Opaque Brush</option>
                     <option value="gs-virtual-camera-sampling">GS Virtual Camera Sampling</option>
                   </select>
                 </label>
@@ -153,28 +165,55 @@
               <details class="lr-panel" data-testid="lr-panel">
                 <summary>Learning rates</summary>
                 <div class="lr-body">
-                  <label class="inline-option">
-                    <input id="tileCullingToggle" data-testid="tile-culling-toggle" type="checkbox" checked />
-                    Tile/subtile culling
-                  </label>
-                  <label class="inline-option" title="Learn a bounded micro-depth for front-to-back ordering and PLY export. Requires tile/subtile culling.">
-                    <input id="trainLayerOrder" data-testid="train-layer-order" type="checkbox" checked />
-                    Train layer order
-                  </label>
-                  <div class="experimental-performance-options" aria-label="Experimental GPU performance">
-                    <strong>Experimental GPU performance</strong>
-                    <label class="inline-option" title="Submit multiple iterations together, avoid animation-frame waits, and reuse the current full-resolution render for intermediate metrics. Applied at the next Train start.">
-                      <input id="adaptiveGpuThroughput" data-testid="adaptive-gpu-throughput" type="checkbox" />
-                      Adaptive GPU throughput
+                  <section class="lr-section" aria-labelledby="trainingFeedbackHeading">
+                    <strong id="trainingFeedbackHeading" class="lr-section-heading">Training feedback</strong>
+                    <label class="inline-option field-wide" title="Runs read-only full-image L1, global and local SSIM, and PSNR evaluations at a bounded interval. This may reduce training speed. Final metrics are always calculated. Applied at the next Train start.">
+                      <input id="liveQualityMetrics" data-testid="live-quality-metrics" type="checkbox" />
+                      Update quality metrics during training
                     </label>
-                    <label class="inline-option" title="Default off. Reduces tile support using opacity and the 1/255 render cutoff. Previously faster, but produced a small render-parity mismatch.">
-                      <input id="opacitySupportAggressive" data-testid="opacity-support-aggressive" type="checkbox" />
-                      Opacity-aware support (aggressive)
-                    </label>
-                  </div>
-                  <div class="lr-grid">
-                    <label title="Moves this percentage of the initial grid centers toward multiscale image structure on WebGPU before iteration 1. The splat count and shape stay unchanged.">Adaptive placement (%)<input id="adaptiveGridInitializationFraction" data-testid="adaptive-grid-initialization-fraction" type="number" min="0" max="50" step="1" value="25" /></label>
-                    <label title="Optimize layer-order micro-depth every N iterations. 1 updates every iteration.">Layer update interval<input id="layerUpdateInterval" data-testid="layer-update-interval" type="number" min="1" max="3000" step="1" value="500" /></label>
+                  </section>
+                  <section class="lr-section" aria-labelledby="layerVisibilityHeading">
+                    <strong id="layerVisibilityHeading" class="lr-section-heading">Layer and visibility</strong>
+                    <div class="layer-toggle-grid">
+                      <label class="inline-option">
+                        <input id="tileCullingToggle" data-testid="tile-culling-toggle" type="checkbox" checked />
+                        Tile/subtile culling
+                      </label>
+                      <label class="inline-option" title="Learn a bounded micro-depth for front-to-back ordering and PLY export. Requires tile/subtile culling.">
+                        <input id="trainLayerOrder" data-testid="train-layer-order" type="checkbox" checked />
+                        Train layer order
+                      </label>
+                      <label class="inline-option" title="Group ordered splats by layer using exact standard-alpha accumulation. This remains compatible with ordinary PLY viewers.">
+                        <input id="layerAwareAccumulation" data-testid="layer-aware-accumulation" type="checkbox" checked />
+                        Layer-aware accumulation
+                      </label>
+                      <label class="inline-option" title="Every configured interval during P2 and P3, compact low-contribution splats from the rear half of the learned layer order. P2 removes up to 2.5% per event and P3 uses a 1% detail-safe cap. The final iteration is excluded so coverage can recover.">
+                        <input id="pruneLowContributionDeepSplats" data-testid="prune-low-contribution-deep-splats" type="checkbox" checked />
+                        Prune low-contribution deep splats
+                      </label>
+                      <label class="inline-option" title="Quantize learned layer order and reduce overlapping splats assigned to the same layer. Applied at the next Train start.">
+                        <input id="discreteLayers" data-testid="discrete-layers" type="checkbox" checked />
+                        Discrete layers
+                      </label>
+                      <label class="inline-option" title="During P2 and P3, recolor a small set of low-visibility splats whose hidden RGB harms the 0.25x render. Geometry, opacity, and splat count stay unchanged.">
+                        <input id="hiddenRgbRecolor" data-testid="hidden-rgb-recolor" type="checkbox" />
+                        Hidden RGB recolor
+                      </label>
+                    </div>
+                    <div class="lr-grid">
+                      <label title="Optimize layer-order micro-depth every N iterations. 1 updates every iteration.">Layer update interval<input id="layerUpdateInterval" data-testid="layer-update-interval" type="number" min="1" max="3000" step="1" value="500" /></label>
+                      <label title="Iteration interval for low-contribution deep-splat pruning during P2 and P3.">Deep prune interval<input id="deepPruneInterval" data-testid="deep-prune-interval" type="number" min="100" max="5000" step="100" value="500" /></label>
+                      <label title="Number of discrete layers used by the overlap-aware layer assignment.">Layer count<input id="discreteLayerCount" data-testid="discrete-layer-count" type="number" min="2" max="32" step="1" value="32" /></label>
+                      <label title="Maximum number of adjacent layers a splat may move during the final overlap-aware assignment. Set 0 to disable overlap reassignment.">Layer move radius<input id="discreteLayerMoveRadius" data-testid="discrete-layer-move-radius" type="number" min="0" max="32" step="1" value="0" /></label>
+                      <label title="Iteration interval for Hidden RGB recolor during P2 and P3.">Recolor interval<input id="hiddenRgbRecolorInterval" data-testid="hidden-rgb-recolor-interval" type="number" min="100" max="5000" step="100" value="500" /></label>
+                      <label title="Maximum percentage of splats recolored at each event.">Recolor target (%)<input id="hiddenRgbRecolorFraction" data-testid="hidden-rgb-recolor-fraction" type="number" min="0.1" max="5" step="0.1" value="1" /></label>
+                      <label title="How far selected colors move toward the footprint-weighted teacher color.">Recolor strength (%)<input id="hiddenRgbRecolorStrength" data-testid="hidden-rgb-recolor-strength" type="number" min="1" max="100" step="1" value="50" /></label>
+                    </div>
+                  </section>
+
+                  <section class="lr-section" aria-labelledby="optimizerHeading">
+                    <strong id="optimizerHeading" class="lr-section-heading">Optimizer</strong>
+                    <div class="lr-grid">
                     <label>Position<input id="positionLearningRate" data-testid="position-learning-rate" type="number" min="0" max="1" step="0.000001" value="0.00016" /></label>
                     <label>Color<input id="colorLearningRate" data-testid="color-learning-rate" type="number" min="0" max="1" step="0.0001" value="0.0025" /></label>
                     <label>Opacity<input id="opacityLearningRate" data-testid="opacity-learning-rate" type="number" min="0" max="1" step="0.001" value="0.05" /></label>
@@ -185,6 +224,13 @@
                     <label>Max anisotropy<input id="maxAnisotropy" data-testid="max-anisotropy" type="number" min="1" max="32" step="0.1" value="8" /></label>
                     <label title="Caps each trained planar Gaussian axis in image-normalized coordinates. Prevents hidden frame-sized splats from becoming visible after camera tilt.">Max planar scale<input id="maxPlanarScale" data-testid="max-planar-scale" type="number" min="0.02" max="2" step="0.01" value="0.1" /></label>
                     <label title="Gaussian footprint kept inside the image. 0 keeps only the splat center inside.">Edge containment σ<input id="boundarySigma" data-testid="boundary-sigma" type="number" min="0" max="4" step="0.1" value="0" /></label>
+                    </div>
+                  </section>
+
+                  <section class="lr-section" aria-labelledby="growthDetailHeading">
+                    <strong id="growthDetailHeading" class="lr-section-heading">Growth and detail</strong>
+                    <div class="lr-grid">
+                    <label title="Moves this percentage of the initial grid centers toward multiscale image structure on WebGPU before iteration 1. The splat count and shape stay unchanged.">Adaptive placement (%)<input id="adaptiveGridInitializationFraction" data-testid="adaptive-grid-initialization-fraction" type="number" min="0" max="50" step="1" value="25" /></label>
                     <label>Detail coherence<input id="detailCoherence" data-testid="detail-coherence" type="number" min="0" max="1" step="0.05" value="0.80" /></label>
                     <label title="P1 only. New or relocated splats cannot shrink below this fraction of the initial grid-cell scale.">P1 base scale floor<input id="p1BaseScaleFloorRatio" data-testid="p1-base-scale-floor" type="number" min="0" max="1" step="0.01" value="0.50" /></label>
                     <label title="P2 only. New or relocated splats cannot shrink below this fraction of the initial grid-cell scale.">P2 base scale floor<input id="p2BaseScaleFloorRatio" data-testid="p2-base-scale-floor" type="number" min="0" max="1" step="0.01" value="0.35" /></label>
@@ -198,15 +244,89 @@
                     <label title="Share of growth capacity assigned during P2. P1, P2, and P3 shares are normalized to 100% at Train start.">P2 growth share %<input id="stageGrowthP2" data-testid="stage-growth-p2" type="number" min="0" max="100" step="0.01" value="51.85" /></label>
                     <label title="Share of growth capacity assigned during P3. P1, P2, and P3 shares are normalized to 100% at Train start.">P3 growth share %<input id="stageGrowthP3" data-testid="stage-growth-p3" type="number" min="0" max="100" step="0.01" value="30" /></label>
                     <label>Splat growth interval<input id="densifyInterval" data-testid="densify-interval" type="number" min="1" max="1000" step="1" value="100" /></label>
-                    <label>Growth per event %<input id="growthPercentage" data-testid="growth-percentage" type="number" min="0.1" max="100" step="0.1" value="15" /></label>
+                    <label>Growth per event %<input id="growthPercentage" data-testid="growth-percentage" type="number" min="0.1" max="100" step="0.1" value="35" /></label>
                     <label>Growth signal threshold<input id="growthSignalThreshold" data-testid="growth-signal-threshold" type="number" min="0" max="1000" step="0.00001" value="0.0003" /></label>
-                  </div>
+                    </div>
+                  </section>
+
+                  <section class="lr-section experimental-performance-options" aria-labelledby="experimentalGpuHeading">
+                    <strong id="experimentalGpuHeading" class="lr-section-heading">Experimental GPU performance</strong>
+                    <label class="inline-option" title="Submit multiple iterations together, avoid animation-frame waits, and reuse the current full-resolution render for intermediate metrics. Applied at the next Train start.">
+                      <input id="adaptiveGpuThroughput" data-testid="adaptive-gpu-throughput" type="checkbox" />
+                      Adaptive GPU throughput
+                    </label>
+                    <label class="inline-option" title="Default off. Reduces tile support using opacity and the 1/255 render cutoff. Previously faster, but produced a small render-parity mismatch.">
+                      <input id="opacitySupportAggressive" data-testid="opacity-support-aggressive" type="checkbox" />
+                      Opacity-aware support (aggressive)
+                    </label>
+                  </section>
                 </div>
               </details>
 
+              <section class="rectangle-paint-panel settings-section" data-testid="rectangle-paint-panel">
+                <details class="opaque-paint-settings" data-testid="opaque-paint-settings">
+                  <summary>Rectangle Splats settings</summary>
+                  <div class="opaque-paint-body">
+                    <section class="lr-section" aria-labelledby="paintAppearanceHeading">
+                      <strong id="paintAppearanceHeading" class="lr-section-heading">Paint appearance</strong>
+                      <div class="lr-grid">
+                        <label class="field-wide" title="Minimum learned opacity for Rectangle Splats. Training may raise individual splats above this floor. Applied at the next Train start.">
+                          Minimum paint opacity
+                          <input id="opaquePaintOpacity" data-testid="opaque-paint-opacity" type="number" min="0.05" max="1" step="0.005" value="0.995" />
+                        </label>
+                        <div class="rectangle-edge-ratio-row field-wide" role="group" aria-labelledby="rectangleEdgeRatioHeading">
+                          <span id="rectangleEdgeRatioHeading" class="rectangle-edge-ratio-heading">Edge / long edge</span>
+                          <label title="Minimum parallel-edge width divided by the splat long edge. Applied at the next Train start.">
+                            Min
+                            <input id="rectangleTopRatio" data-testid="rectangle-top-ratio" type="number" min="0" max="1" step="0.05" value="1" />
+                          </label>
+                          <label title="Maximum parallel-edge width divided by the splat long edge. Must be at least the minimum. 1 preserves the current full-width edge. Applied at the next Train start.">
+                            Max
+                            <input id="rectangleTopRatioMax" data-testid="rectangle-top-ratio-max" type="number" min="0" max="1" step="0.05" value="1" />
+                          </label>
+                        </div>
+                        <label class="inline-option field-wide" title="Keeps the initial footprint area stable as the top edge narrows. Ratio 1 is unchanged.">
+                          <input id="rectanglePreserveArea" data-testid="rectangle-preserve-area" type="checkbox" checked />
+                          Preserve footprint area
+                        </label>
+                        <label class="inline-option field-wide" title="Points the narrow edge toward the stronger side of the local image structure. The choice is deterministic and applies at the next Train start.">
+                          <input id="rectangleEdgeDirectedTaper" data-testid="rectangle-edge-directed-taper" type="checkbox" checked />
+                          Edge-directed taper
+                        </label>
+                        <label class="inline-option field-wide" title="Keeps flat-region splats untapered at the maximum width while edge and detail splats use the selected minimum-to-maximum taper. Applied at the next Train start.">
+                          <input id="rectangleStructureAwareRatio" data-testid="rectangle-structure-aware-ratio" type="checkbox" />
+                          Structure-aware ratio
+                        </label>
+                        <label class="inline-option field-wide" title="Uses a harder edge on the narrow side and a softer edge on the wide side, with the same alpha kernel in Train, Preview, and PNG.">
+                          <input id="rectangleAsymmetricSoftness" data-testid="rectangle-asymmetric-softness" type="checkbox" />
+                          Asymmetric edge softness
+                        </label>
+                      </div>
+                    </section>
+                  </div>
+                </details>
+              </section>
+
+              <section id="opaquePaintPanel" class="opaque-paint-panel settings-section" data-testid="opaque-paint-panel">
+                <details class="opaque-paint-settings" data-testid="layered-opaque-brush-settings">
+                  <summary id="opaquePaintSummary">Layered Opaque Brush settings</summary>
+                  <div class="opaque-paint-body">
+                    <section class="lr-section" aria-labelledby="brushPaintAppearanceHeading">
+                      <strong id="brushPaintAppearanceHeading" class="lr-section-heading">Paint appearance</strong>
+                      <div class="lr-grid">
+                        <label class="field-wide" title="Fixed opacity for Layered Opaque Brush paint splats. This is independent from Rectangle Splats minimum opacity and is applied at the next Train start.">
+                          Fixed paint opacity
+                          <input id="layeredBrushOpacity" data-testid="layered-brush-opacity" type="number" min="0.05" max="1" step="0.005" value="0.995" />
+                        </label>
+                      </div>
+                    </section>
+                  </div>
+                </details>
+              </section>
+
               <section class="virtual-camera-panel settings-section" data-testid="virtual-camera-panel">
                 <details class="virtual-camera-settings" data-testid="virtual-camera-settings">
-                  <summary>GS Virtual Camera Sampling settings</summary>
+                  <summary>GS Virtual Camera Sampling</summary>
                   <div class="virtual-camera-body">
                     <label class="inline-option field-wide" title="Experimental. Learns a small bounded depth offset only during virtual-camera training while preserving layer-order depth.">
                       <input id="virtualBoundedDepth" data-testid="virtual-bounded-depth" type="checkbox" checked />
@@ -236,7 +356,6 @@
                       <option value="auto-probe">Auto by GPU memory</option>
                     </select>
                   </label>
-                  <button id="retryWebGpuButton" data-testid="retry-webgpu" type="button" hidden>Reinitialize WebGPU</button>
                   <div class="budget-grid">
                     <div><span>limit</span><strong id="gpuLimitText" data-testid="gpu-limit">checking</strong></div>
                     <div><span>estimate</span><strong id="memoryEstimateText" data-testid="memory-estimate">-</strong></div>
@@ -331,12 +450,13 @@
                   <input id="splatSmallFirstOrder" data-testid="splat-small-first-order" type="checkbox" />
                   Prefer small splats on equal opacity
                 </label>
-                <label class="alpha-background-row">Alpha background <input id="splatAlphaBackground" data-testid="splat-alpha-background" type="color" value="#000000" /></label>
+                <label class="alpha-background-row">Alpha background <input id="splatAlphaBackground" data-testid="splat-alpha-background" type="color" value="#787878" /></label>
                 <div class="splat-shape-row">
                   <span>Splat shape</span>
                   <div class="splat-shape-options" role="group" aria-label="Splat preview shape">
                     <button id="splatShapeGaussian" class="active" data-testid="splat-shape-gaussian" type="button" aria-pressed="true">Gaussian</button>
                     <button id="splatShapeRectangle" data-testid="splat-shape-rectangle" type="button" aria-pressed="false">Rectangle</button>
+                    <button id="splatShapeOpaqueBrush" data-testid="splat-shape-opaque-brush" type="button" aria-pressed="false">Layered Opaque Brush</button>
                   </div>
                 </div>
                 <label class="adjustment-row" title="Multiplies each splat opacity. At 10x every splat opacity saturates, so its center blocks lower layers under standard alpha compositing.">Opacity <output id="splatOpacityValue">1.00x</output><input id="splatOpacity" data-testid="splat-opacity" type="range" min="0" max="10" step="0.01" value="1" /></label>

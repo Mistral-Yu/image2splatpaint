@@ -3,7 +3,12 @@ const SH_C0 = 0.28209479177387814;
 const MB = 1024 * 1024;
 const GB = 1024 * MB;
 const MAX_INPUT_FILE_BYTES = 128 * MB;
-const MAX_INPUT_DECODED_PIXELS = 64_000_000;
+// Keep the cached source independent from the smaller training resolution.
+// Large originals are decoded once, reduced to this long side, then the
+// original decoder surface is released before any WebGPU work begins.
+const INPUT_CACHE_MAX_SIDE = 4096;
+const MAX_INPUT_DECODED_PIXELS = 400_000_000;
+const MAX_IMAGE_HEADER_PROBE_BYTES = 4 * MB;
 const APP_SCRIPT_URL = document.currentScript?.src || new URL("./app.js", location.href).href;
 const SAMPLE_IMAGE_URL = new URL("../assets/source-images/generated-geometric-sample.jpg", APP_SCRIPT_URL).href;
 const EMBEDDED_SAMPLE_IMAGE_URL = globalThis.__IMAGE2SPLATPAINT_SAMPLE_JPEG || "";
@@ -62,7 +67,11 @@ const EXPERIMENTAL_REFINE_EVERY = 50;
 const EXPERIMENTAL_ADC_INTERVAL_FOR_7000 = 3000;
 const DENSIFY_WARMUP_FRACTION = 0.1;
 const DENSIFY_WARMUP_MAX_STEPS = 700;
-const DEFAULT_TRAIN_SYNC_INTERVAL = 8;
+// Product training keeps GPU work queued and only waits at bounded health or
+// structural checkpoints. Full-image quality evaluation is final-only.
+const DEFAULT_TRAIN_SYNC_INTERVAL = 64;
+const HIGH_SPLAT_SYNC_THRESHOLD = 65536;
+const VERY_HIGH_SPLAT_SYNC_THRESHOLD = 262144;
 const REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE = 8;
 const PREFERRED_STORAGE_BUFFERS_PER_SHADER_STAGE = 9;
 const DEFAULT_MAX_METRIC_INTERVAL = 100;
@@ -108,12 +117,37 @@ const DEFAULT_VIRTUAL_CAMERA_REGULARIZATION_RAMP_STEPS = 200;
 const DEFAULT_VIRTUAL_CAMERA_MID_ANGLE_DEGREES = 2;
 const DEFAULT_VIRTUAL_CAMERA_FULL_ANGLE_DEGREES = 5;
 const VIRTUAL_CAMERA_GOLDEN_ANGLE_RADIANS = Math.PI * (3 - Math.sqrt(5));
-const TRAIN_CONFIG_FLOATS = 84;
+// Keep the shared config buffer 16-byte aligned. Slot 88 carries the paint
+// opacity value and slot 90 distinguishes Rectangle's minimum from Oil's
+// fixed opacity. Slots 92-95 are reserved to keep the existing buffer layout.
+// Slots 96 and 98 carry Rectangle's minimum and maximum parallel-edge width
+// ratios. Slot 97 carries Rectangle shape flags.
+const TRAIN_CONFIG_FLOATS = 100;
 const TRAIN_CONFIG_BYTES = TRAIN_CONFIG_FLOATS * 4;
 const MAX_TRAIN_BATCH_SIZE = 16;
 const TRAIN_BATCH_CONFIG_BYTES = TRAIN_CONFIG_BYTES * MAX_TRAIN_BATCH_SIZE;
 const ALPHA_STATE_BYTES_PER_PIXEL = 16;
 const LAYER_TRAIN_INTERVAL = 500;
+const DEFAULT_DISCRETE_LAYER_COUNT = 32;
+const DEFAULT_DISCRETE_LAYER_MOVE_RADIUS = 0;
+const DEFAULT_DEEP_PRUNE_INTERVAL = 500;
+const MIN_DEEP_PRUNE_INTERVAL = 100;
+const MAX_DEEP_PRUNE_INTERVAL = 5000;
+const DEFAULT_HIDDEN_RGB_RECOLOR_INTERVAL = 500;
+const MIN_HIDDEN_RGB_RECOLOR_INTERVAL = 100;
+const MAX_HIDDEN_RGB_RECOLOR_INTERVAL = 5000;
+const DEFAULT_HIDDEN_RGB_RECOLOR_FRACTION = 0.01;
+const MIN_HIDDEN_RGB_RECOLOR_FRACTION = 0.001;
+const MAX_HIDDEN_RGB_RECOLOR_FRACTION = 0.05;
+const DEFAULT_HIDDEN_RGB_RECOLOR_STRENGTH = 0.5;
+const MIN_DISCRETE_LAYER_COUNT = 2;
+const MAX_DISCRETE_LAYER_COUNT = 32;
+const DEEP_PRUNE_FRACTION = 0.5;
+const DEEP_PRUNE_MAX_FRACTION = 0.025;
+const DEEP_PRUNE_P3_FRACTION = 0.01;
+const DEEP_PRUNE_EXPERIMENT_MAX_FRACTION = 0.1;
+const DEEP_PRUNE_EXPERIMENT_MAX_DEPTH_FRACTION = 0.75;
+const DEEP_PRUNE_MIN_SPLATS = 256;
 const EXACT_GRADIENT_STRIDE = 16;
 const OVERLAP_METRIC_STRIDE = 19;
 const TILE_SIZE = 16;
@@ -122,23 +156,62 @@ const TILE_INDEX_INITIAL_HEADROOM = 1.5;
 const TILE_INDEX_GROWTH_HEADROOM = 1.25;
 const TILE_OFFSET_OVERFLOW_BIT = 0x80000000;
 const TILE_OFFSET_VALUE_MASK = 0x7fffffff;
-const DEFAULT_GROWTH_FRACTION = 0.15;
+const DEFAULT_GROWTH_FRACTION = 0.35;
 const DEFAULT_GROWTH_SIGNAL_THRESHOLD = 0.0003;
 const DEFAULT_STAGE_GROWTH_SHARES = Object.freeze({ p1: 18.15, p2: 51.85, p3: 30 });
-const METRIC_TILE_STRIDE = 33;
+const METRIC_TILE_STRIDE = 34;
+const PSNR_MSE_FLOOR = 1e-12;
 // Final-only virtual-camera readback. Keep this separate from the training
 // metric layout so front-only training retains its established fast path.
-const VIRTUAL_CAMERA_METRIC_TILE_STRIDE = 15;
+const VIRTUAL_CAMERA_METRIC_TILE_STRIDE = 16;
 const PHASE45_REGION_GRID = 8;
 const PHASE45_REGION_COUNT = PHASE45_REGION_GRID * PHASE45_REGION_GRID;
 const PHASE45_REGION_STRIDE = 24;
 const HIGH_ITERATION_CONFIRM = 50000;
 const PERFORMANCE_PROFILE_QUERY_CAPACITY = 32;
 const EXACT_BACKWARD_TELEMETRY_BYTES = 96;
+const SEGMENTED_EXACT_BACKWARD_MAX_BYTES = 64 * MB;
+const FIXED_POINT_EXACT_GRADIENT_SCALE = 8192;
+const FIXED_POINT_EXACT_GRADIENT_CONTROL_BYTES = 16;
 const PRODUCT_NAME = "Image2SplatPaint";
 const PRODUCT_FORMAT = "image2splatpaint-web";
 const PLANAR_GAUSSIAN_ALGORITHM_ID = "planar-gaussian";
+const RECTANGLE_SPLATS_ALGORITHM_ID = "rectangle-splats";
+const LAYERED_OPAQUE_BRUSH_ALGORITHM_ID = "layered-opaque-brush";
 const GS_VIRTUAL_CAMERA_ALGORITHM_ID = "gs-virtual-camera-sampling";
+const RECTANGLE_KERNEL_EXTENT = 1.5;
+const RECTANGLE_EDGE_SOFTNESS = 0.15;
+const DEFAULT_RECTANGLE_TOP_RATIO = 1;
+const DEFAULT_RECTANGLE_TOP_RATIO_MAX = 1;
+const MIN_RECTANGLE_TOP_RATIO = 0;
+const MAX_RECTANGLE_TOP_RATIO = 1;
+const DEFAULT_RECTANGLE_PRESERVE_AREA = true;
+const DEFAULT_RECTANGLE_EDGE_DIRECTED_TAPER = true;
+const DEFAULT_RECTANGLE_STRUCTURE_AWARE_RATIO = false;
+const DEFAULT_RECTANGLE_ASYMMETRIC_SOFTNESS = false;
+const RECTANGLE_FLAG_PRESERVE_AREA = 1;
+const RECTANGLE_FLAG_STRUCTURE_AWARE_RATIO = 2;
+const RECTANGLE_FLAG_ASYMMETRIC_SOFTNESS = 4;
+const RECTANGLE_FLAG_EDGE_DIRECTED_TAPER = 8;
+const RECTANGLE_STRUCTURE_MIN_COHERENCE = 0.2;
+const RECTANGLE_STRUCTURE_MIN_ENERGY = 0.00012;
+const LAYERED_OPAQUE_BRUSH_KERNEL_EXTENT = 1.5;
+const LAYERED_OPAQUE_BRUSH_EDGE_SOFTNESS = 0.18;
+const LAYERED_OPAQUE_BRUSH_TIP_WIDTH = 0.18;
+const ILLUSTRATIVE_OIL_DETAIL_THRESHOLD = 0.58;
+const ILLUSTRATIVE_OIL_RIBBON_ANISOTROPY = 2.15;
+const LAYERED_OPAQUE_BRUSH_OPACITY = 0.995;
+const MIN_OPAQUE_PAINT_OPACITY = 0.05;
+const MAX_OPAQUE_PAINT_OPACITY = 1;
+const LAYERED_OPAQUE_BRUSH_LAYER_COUNT = 8;
+const LAYERED_OPAQUE_BRUSH_LAYER_MOVE_RADIUS = 1;
+const LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL = 250;
+const LAYERED_OPAQUE_BRUSH_DEEP_FRACTION = 0.75;
+const LAYERED_OPAQUE_BRUSH_P2_PRUNE_FRACTION = 0.05;
+const LAYERED_OPAQUE_BRUSH_P3_PRUNE_FRACTION = 0.025;
+const LAYERED_OPAQUE_BRUSH_FINAL_PRUNE_FRACTION = 0.10;
+const MAX_FINAL_DIAGNOSTIC_SAMPLES = 16384;
+const MAX_THIN_LINE_DIAGNOSTIC_SAMPLES = 8192;
 const ALGORITHM_REGISTRY = Object.freeze({
   [PLANAR_GAUSSIAN_ALGORITHM_ID]: Object.freeze({
     id: PLANAR_GAUSSIAN_ALGORITHM_ID,
@@ -148,6 +221,51 @@ const ALGORITHM_REGISTRY = Object.freeze({
     train: trainPlanarGaussian,
     exports: Object.freeze(["png", "ply"]),
     capabilities: Object.freeze({ render: true, metrics: true, png: true, ply: true, tilt: false, virtualCameras: false }),
+  }),
+  [RECTANGLE_SPLATS_ALGORITHM_ID]: Object.freeze({
+    id: RECTANGLE_SPLATS_ALGORITHM_ID,
+    label: "Rectangle Splats",
+    backend: "custom-webgpu",
+    initialize: initRectangles,
+    train: trainRectangleSplats,
+    exports: Object.freeze(["png"]),
+    capabilities: Object.freeze({
+      render: true,
+      metrics: true,
+      png: true,
+      ply: false,
+      tilt: false,
+      virtualCameras: false,
+      kernelShape: "rectangle",
+      opaqueLayeredPaint: true,
+      minimumOpacity: true,
+      variableTopWidth: true,
+      requiresLayerOrder: true,
+      layerCount: LAYERED_OPAQUE_BRUSH_LAYER_COUNT,
+      hiddenSplatPruning: true,
+    }),
+  }),
+  [LAYERED_OPAQUE_BRUSH_ALGORITHM_ID]: Object.freeze({
+    id: LAYERED_OPAQUE_BRUSH_ALGORITHM_ID,
+    label: "Layered Opaque Brush",
+    backend: "custom-webgpu",
+    initialize: initLayeredOpaqueBrush,
+    train: trainLayeredOpaqueBrush,
+    exports: Object.freeze(["png"]),
+    capabilities: Object.freeze({
+      render: true,
+      metrics: true,
+      png: true,
+      ply: false,
+      tilt: false,
+      virtualCameras: false,
+      kernelShape: "opaque-brush",
+      opaqueLayeredPaint: true,
+      fixedOpacity: LAYERED_OPAQUE_BRUSH_OPACITY,
+      requiresLayerOrder: true,
+      layerCount: LAYERED_OPAQUE_BRUSH_LAYER_COUNT,
+      hiddenSplatPruning: true,
+    }),
   }),
   [GS_VIRTUAL_CAMERA_ALGORITHM_ID]: Object.freeze({
     id: GS_VIRTUAL_CAMERA_ALGORITHM_ID,
@@ -187,6 +305,32 @@ const QA_RUNTIME_ENABLED =
   location.hostname === "127.0.0.1" ||
   location.hostname === "[::1]";
 
+function liveQualityMetricsEnabled() {
+  return Boolean(document.querySelector("#liveQualityMetrics")?.checked);
+}
+
+function qaPeriodicTrainingEvaluationEnabled() {
+  if (!QA_RUNTIME_ENABLED) return false;
+  const query = new URLSearchParams(globalThis.location?.search || "");
+  return query.get("periodic-metrics") === "1" || query.get("cdp-check") === "1";
+}
+
+function periodicTrainingEvaluationEnabled() {
+  return liveQualityMetricsEnabled() || qaPeriodicTrainingEvaluationEnabled();
+}
+
+function finalRenderAuditEnabled() {
+  if (!QA_RUNTIME_ENABLED) return false;
+  const query = new URLSearchParams(globalThis.location?.search || "");
+  return query.get("final-render-audit") === "1" || query.get("cdp-check") === "1";
+}
+
+function previewInvariantHashEnabled() {
+  if (!QA_RUNTIME_ENABLED) return false;
+  const query = new URLSearchParams(globalThis.location?.search || "");
+  return query.get("preview-hash") === "1";
+}
+
 function selectedAlgorithm() {
   const id = document.querySelector("#algorithmSelect")?.value || PLANAR_GAUSSIAN_ALGORITHM_ID;
   const algorithm = ALGORITHM_REGISTRY[id];
@@ -194,12 +338,169 @@ function selectedAlgorithm() {
   return algorithm;
 }
 
-function algorithmSupportsExport(formatKey) {
-  return selectedAlgorithm().exports.includes(formatKey);
+function stageAwareGrowthDefaultForAlgorithm(algorithm = selectedAlgorithm()) {
+  void algorithm;
+  return true;
+}
+
+function trainedResultAlgorithm() {
+  if (!state.params || !state.metrics?.algorithm) return null;
+  return ALGORITHM_REGISTRY[state.metrics.algorithm] || null;
+}
+
+function displayedResultAlgorithm() {
+  return trainedResultAlgorithm() || selectedAlgorithm();
+}
+
+function algorithmSupportsExport(formatKey, algorithm = displayedResultAlgorithm()) {
+  if (!algorithm?.exports.includes(formatKey)) return false;
+  // The selector configures the next run. Never let changing it reinterpret an
+  // existing analytic paint result as a Gaussian PLY.
+  if (formatKey === "ply" && state.params) {
+    return normalizedKernelShape(state.params.kernelShape) === "gaussian";
+  }
+  return true;
 }
 
 function algorithmUsesVirtualCameras(algorithm = selectedAlgorithm()) {
   return Boolean(algorithm.capabilities.virtualCameras);
+}
+
+function algorithmUsesRectangleKernel(algorithm = selectedAlgorithm()) {
+  return algorithm.capabilities.kernelShape === "rectangle";
+}
+
+function algorithmUsesLayeredOpaqueBrush(algorithm = selectedAlgorithm()) {
+  return algorithm.capabilities.kernelShape === "opaque-brush";
+}
+
+function algorithmUsesOpaqueLayeredPaint(algorithm = selectedAlgorithm()) {
+  return Boolean(algorithm.capabilities.opaqueLayeredPaint);
+}
+
+function algorithmUsesPaintKernel(algorithm = selectedAlgorithm()) {
+  return algorithmUsesRectangleKernel(algorithm) || algorithmUsesLayeredOpaqueBrush(algorithm);
+}
+
+function normalizedKernelShape(value) {
+  return ["rectangle", "opaque-brush"].includes(value) ? value : "gaussian";
+}
+
+function configurePaintKernel(config, params = state.params) {
+  const shape = normalizedKernelShape(params?.kernelShape);
+  config[40] = shape === "opaque-brush"
+    ? 4
+    : shape === "rectangle" ? 1 : 0;
+  config[41] = shape === "opaque-brush"
+    ? LAYERED_OPAQUE_BRUSH_EDGE_SOFTNESS
+    : RECTANGLE_EDGE_SOFTNESS;
+  config[85] = params?.opaqueLayered ? 1 : 0;
+  config[88] = clampNumber(
+    params?.fixedOpacity,
+    MIN_OPAQUE_PAINT_OPACITY,
+    MAX_OPAQUE_PAINT_OPACITY,
+    LAYERED_OPAQUE_BRUSH_OPACITY,
+  );
+  // Reserved paint slots stay zero so the compact Brush core keeps the shared
+  // 100-float optimizer layout used by the other algorithms.
+  config[86] = 0;
+  config[87] = 0;
+  config[89] = 0;
+  // Rectangle learns opacity above this floor; Illustrative Oil stays fixed.
+  config[90] = params?.minimumOpacityEnabled ? 1 : 0;
+  config[91] = 0;
+  config[92] = 0;
+  config[93] = 0;
+  config[94] = 0;
+  config[95] = 0;
+  config[96] = clampNumber(
+    params?.rectangleTopRatio,
+    MIN_RECTANGLE_TOP_RATIO,
+    MAX_RECTANGLE_TOP_RATIO,
+    DEFAULT_RECTANGLE_TOP_RATIO,
+  );
+  config[97] = rectangleShapeFlags(params);
+  config[98] = clampNumber(
+    params?.rectangleTopRatioMax,
+    config[96],
+    MAX_RECTANGLE_TOP_RATIO,
+    DEFAULT_RECTANGLE_TOP_RATIO_MAX,
+  );
+  return config;
+}
+
+function selectedOpaquePaintOpacity() {
+  return clampNumber(
+    document.querySelector("#opaquePaintOpacity")?.value,
+    MIN_OPAQUE_PAINT_OPACITY,
+    MAX_OPAQUE_PAINT_OPACITY,
+    LAYERED_OPAQUE_BRUSH_OPACITY,
+  );
+}
+
+function selectedLayeredBrushOpacity() {
+  return clampNumber(
+    document.querySelector("#layeredBrushOpacity")?.value,
+    MIN_OPAQUE_PAINT_OPACITY,
+    MAX_OPAQUE_PAINT_OPACITY,
+    LAYERED_OPAQUE_BRUSH_OPACITY,
+  );
+}
+
+function selectedRectangleTopRatio() {
+  return clampNumber(
+    document.querySelector("#rectangleTopRatio")?.value,
+    MIN_RECTANGLE_TOP_RATIO,
+    MAX_RECTANGLE_TOP_RATIO,
+    DEFAULT_RECTANGLE_TOP_RATIO,
+  );
+}
+
+function selectedRectangleTopRatioMax(minimum = selectedRectangleTopRatio()) {
+  return clampNumber(
+    document.querySelector("#rectangleTopRatioMax")?.value,
+    minimum,
+    MAX_RECTANGLE_TOP_RATIO,
+    DEFAULT_RECTANGLE_TOP_RATIO_MAX,
+  );
+}
+
+function selectedRectangleShapeSettings(params = null) {
+  const fromParams = (key, fallback) =>
+    typeof params?.[key] === "boolean"
+      ? params[key]
+      : Boolean(document.querySelector(`#${key}`)?.checked ?? fallback);
+  return {
+    preserveArea: fromParams("rectanglePreserveArea", DEFAULT_RECTANGLE_PRESERVE_AREA),
+    edgeDirectedTaper: fromParams(
+      "rectangleEdgeDirectedTaper",
+      DEFAULT_RECTANGLE_EDGE_DIRECTED_TAPER,
+    ),
+    structureAwareRatio: fromParams(
+      "rectangleStructureAwareRatio",
+      DEFAULT_RECTANGLE_STRUCTURE_AWARE_RATIO,
+    ),
+    asymmetricSoftness: fromParams(
+      "rectangleAsymmetricSoftness",
+      DEFAULT_RECTANGLE_ASYMMETRIC_SOFTNESS,
+    ),
+  };
+}
+
+function rectangleShapeFlags(params = null) {
+  const settings = selectedRectangleShapeSettings(params);
+  return (
+    (settings.preserveArea ? RECTANGLE_FLAG_PRESERVE_AREA : 0) +
+    (settings.structureAwareRatio ? RECTANGLE_FLAG_STRUCTURE_AWARE_RATIO : 0) +
+    (settings.asymmetricSoftness ? RECTANGLE_FLAG_ASYMMETRIC_SOFTNESS : 0) +
+    (settings.edgeDirectedTaper ? RECTANGLE_FLAG_EDGE_DIRECTED_TAPER : 0)
+  );
+}
+
+function trainedSplatShape(params = state.params) {
+  const shape = normalizedKernelShape(params?.kernelShape || selectedAlgorithm().capabilities.kernelShape);
+  if (shape === "rectangle") return "box";
+  return shape;
 }
 
 function planarTiltRotation(pitchRadians, yawRadians) {
@@ -642,6 +943,177 @@ fn virtual_camera_depth(center: vec2<f32>, packedTag: f32, rawDepth: f32) -> f32
 }
 `;
 
+const RECTANGLE_TRAPEZOID_WGSL = `
+struct RectangleTrapezoidSample {
+  kernel: f32,
+  gradient: vec2<f32>,
+};
+
+fn rectangle_flag_enabled(flags: f32, bit: u32) -> bool {
+  return (u32(round(flags)) & bit) != 0u;
+}
+
+fn rectangle_effective_width_ratios(
+  minimumRatioInput: f32,
+  maximumRatioInput: f32,
+  packedTag: f32,
+  flags: f32
+) -> vec2<f32> {
+  let minimumRatio = clamp(minimumRatioInput, 0.0, 1.0);
+  let maximumRatio = clamp(max(maximumRatioInput, minimumRatio), 0.0, 1.0);
+  let flatStructure = floor(packedTag) < 1.5;
+  return select(
+    vec2<f32>(minimumRatio, maximumRatio),
+    vec2<f32>(maximumRatio),
+    rectangle_flag_enabled(flags, ${RECTANGLE_FLAG_STRUCTURE_AWARE_RATIO}u) &&
+      flatStructure
+  );
+}
+
+fn rectangle_area_compensation(widthRatios: vec2<f32>, flags: f32) -> f32 {
+  return select(
+    1.0,
+    sqrt(2.0 / max(widthRatios.x + widthRatios.y, 0.0001)),
+    rectangle_flag_enabled(flags, ${RECTANGLE_FLAG_PRESERVE_AREA}u)
+  );
+}
+
+fn rectangle_trapezoid_kernel_sample(
+  normalized: vec2<f32>,
+  featherInput: f32,
+  minimumRatioInput: f32,
+  maximumRatioInput: f32,
+  asymmetricSoftness: bool
+) -> RectangleTrapezoidSample {
+  let feather = clamp(featherInput, 0.01, 0.49);
+  let minimumRatio = clamp(minimumRatioInput, 0.0, 1.0);
+  let maximumRatio = clamp(max(maximumRatioInput, minimumRatio), 0.0, 1.0);
+  // Local -Y is the minimum-width edge and local +Y is the maximum-width
+  // edge. Setting max to 1 recovers the previous n-to-1 footprint exactly.
+  let verticalProgress = clamp(normalized.y * 0.5 + 0.5, 0.0, 1.0);
+  let halfWidth = max(0.0001, mix(minimumRatio, maximumRatio, verticalProgress));
+  let axisCoordinate = vec2<f32>(
+    abs(normalized.x) / halfWidth,
+    abs(normalized.y)
+  );
+  let horizontalRawT =
+    (axisCoordinate.x - (1.0 - feather)) / (2.0 * feather);
+  let horizontalT = clamp(horizontalRawT, 0.0, 1.0);
+  let horizontalAxis =
+    1.0 - horizontalT * horizontalT * (3.0 - 2.0 * horizontalT);
+  let dHorizontalAxisDu =
+    -6.0 * horizontalT * (1.0 - horizontalT) / (2.0 * feather);
+  let verticalFeather = select(
+    feather,
+    mix(feather * 0.70, feather * 1.25, verticalProgress),
+    asymmetricSoftness
+  );
+  let verticalRawT =
+    (axisCoordinate.y - (1.0 - verticalFeather)) /
+    (2.0 * verticalFeather);
+  let verticalT = clamp(verticalRawT, 0.0, 1.0);
+  let verticalAxis =
+    1.0 - verticalT * verticalT * (3.0 - 2.0 * verticalT);
+  let dVerticalFeatherDy = select(
+    0.0,
+    0.275 * feather,
+    asymmetricSoftness && normalized.y > -1.0 && normalized.y < 1.0
+  );
+  let verticalNumerator = axisCoordinate.y - 1.0 + verticalFeather;
+  let verticalDenominator = 2.0 * verticalFeather;
+  let dVerticalNumeratorDy = sign(normalized.y) + dVerticalFeatherDy;
+  let dVerticalDenominatorDy = 2.0 * dVerticalFeatherDy;
+  let dVerticalTDy = select(
+    0.0,
+    (
+      dVerticalNumeratorDy * verticalDenominator -
+      verticalNumerator * dVerticalDenominatorDy
+    ) / max(verticalDenominator * verticalDenominator, 0.00000001),
+    verticalRawT > 0.0 && verticalRawT < 1.0
+  );
+  let dVerticalAxisDy =
+    -6.0 * verticalT * (1.0 - verticalT) * dVerticalTDy;
+  let dHalfWidthDy = select(
+    0.0,
+    0.5 * (maximumRatio - minimumRatio),
+    normalized.y > -1.0 && normalized.y < 1.0
+  );
+  let dHorizontalDy =
+    -abs(normalized.x) * dHalfWidthDy / max(halfWidth * halfWidth, 0.00000001);
+  let gradient = vec2<f32>(
+    dHorizontalAxisDu * sign(normalized.x) * verticalAxis / halfWidth,
+    horizontalAxis * dVerticalAxisDy +
+      dHorizontalAxisDu * verticalAxis * dHorizontalDy
+  );
+  return RectangleTrapezoidSample(horizontalAxis * verticalAxis, gradient);
+}
+`;
+
+const ILLUSTRATIVE_OIL_WGSL = `
+struct OilKernelSample {
+  kernel: f32,
+  gradient: vec2<f32>,
+};
+
+fn illustrative_oil_family(scale: vec2<f32>, packedTag: f32) -> f32 {
+  let minor = max(0.0001, min(scale.x, scale.y));
+  let anisotropy = max(scale.x, scale.y) / minor;
+  if (floor(packedTag) >= 2.0) { return 2.0; }
+  return select(0.0, 1.0, anisotropy >= ${ILLUSTRATIVE_OIL_RIBBON_ANISOTROPY});
+}
+
+fn illustrative_oil_kernel_sample(
+  normalized: vec2<f32>,
+  majorIsX: bool,
+  feather: f32,
+  family: f32
+) -> OilKernelSample {
+  let longitudinal = select(normalized.y, normalized.x, majorIsX);
+  let transverse = select(normalized.x, normalized.y, majorIsX);
+  // One connected contour per family. Local structure chooses the family;
+  // there are no repeated lobes, grooves, random shape switches, or jaggedness.
+  let isRibbon = family >= 0.5 && family < 1.5;
+  let isAccent = family >= 1.5;
+  let lengthScale = select(select(0.90, 1.00, isRibbon), 0.74, isAccent);
+  let widthBase = select(select(0.94, 0.82, isRibbon), 0.68, isAccent);
+  let shoulder = select(select(0.10, 0.17, isRibbon), 0.26, isAccent);
+  let widthBias = select(select(0.02, -0.025, isRibbon), -0.08, isAccent);
+  let bendAmount = select(select(0.025, 0.055, isRibbon), 0.035, isAccent);
+  let u = longitudinal / lengthScale;
+  let u2 = u * u;
+  let bend = bendAmount * u * (1.0 - u2);
+  let bendGradient = bendAmount * (1.0 - 3.0 * u2);
+  let bentTransverse = transverse - bend;
+  let baseWidth = widthBase * (1.0 - shoulder * u2 + widthBias * u);
+  let baseWidthGradient = widthBase * (-2.0 * shoulder * u + widthBias);
+  let rawWidth = baseWidth;
+  let rawWidthGradient = baseWidthGradient;
+  let width = max(0.30, rawWidth);
+  let widthGradient = select(0.0, rawWidthGradient, rawWidth > 0.30);
+  let v = bentTransverse / width;
+  let v2 = v * v;
+  let q = u2 * u2 + v2 * v2;
+  let denominator = max(0.0001, 2.0 * feather);
+  let t = clamp((q - (1.0 - feather)) / denominator, 0.0, 1.0);
+  let baseKernel = 1.0 - t * t * (3.0 - 2.0 * t);
+  if (baseKernel <= 0.00000001) {
+    return OilKernelSample(0.0, vec2<f32>(0.0));
+  }
+  let dKernelDq = -6.0 * t * (1.0 - t) / denominator;
+  let dVdU = -bendGradient / width - v * widthGradient / width;
+  let dQdU = 4.0 * u * u2 + 4.0 * v * v2 * dVdU;
+  let dQdLongitudinal = dQdU / lengthScale;
+  let dQdTransverse = 4.0 * v * v2 / width;
+  let gradientLongTrans = vec2<f32>(
+    dKernelDq * dQdLongitudinal,
+    dKernelDq * dQdTransverse
+  );
+  let gradient = select(gradientLongTrans.yx, gradientLongTrans, majorIsX);
+  return OilKernelSample(baseKernel, gradient);
+}
+
+`;
+
 function qaOverrides(name) {
   return QA_RUNTIME_ENABLED && globalThis[name] && typeof globalThis[name] === "object"
     ? globalThis[name]
@@ -757,7 +1229,65 @@ function residualDestinationOracleRequested() {
 
 function hiddenRgbAttributionRequested() {
   const query = new URLSearchParams(globalThis.location?.search || "");
-  return QA_RUNTIME_ENABLED && query.get("qa") === "1" && query.get("hidden-rgb-attribution") === "1";
+  return QA_RUNTIME_ENABLED && query.get("qa") === "1" && (
+    query.get("hidden-rgb-attribution") === "1" || layerEfficiencyVariants().diagnostics
+  );
+}
+
+function layerEfficiencyVariants() {
+  const overrides = qaOverrides("__image2SplatLayerEfficiency");
+  const query = new URLSearchParams(globalThis.location?.search || "");
+  const qa = QA_RUNTIME_ENABLED && query.get("qa") === "1";
+  const requestedPruneSelectionMode = String(overrides.deepPruneSelectionMode || "depth");
+  const deepPruneSelectionMode = ["depth", "depth-color", "color"].includes(requestedPruneSelectionMode)
+    ? requestedPruneSelectionMode
+    : "depth";
+  const enabled = (name, queryName, fallback = false) => {
+    if (typeof overrides[name] === "boolean") return overrides[name];
+    if (qa && query.has(queryName)) return query.get(queryName) !== "0";
+    return fallback;
+  };
+  return {
+    diagnostics: enabled("diagnostics", "layer-efficiency-diagnostics"),
+    deepRelocation: enabled("deepRelocation", "deep-layer-relocation"),
+    deepFraction: Math.max(
+      0.05,
+      Math.min(DEEP_PRUNE_EXPERIMENT_MAX_DEPTH_FRACTION, Number(overrides.deepFraction) || DEEP_PRUNE_FRACTION),
+    ),
+    influenceThreshold: Math.max(0.05, Math.min(1.5, Number(overrides.influenceThreshold) || 0.45)),
+    deepPruneP2Fraction: Math.max(
+      0,
+      Math.min(
+        DEEP_PRUNE_EXPERIMENT_MAX_FRACTION,
+        Number.isFinite(Number(overrides.deepPruneP2Fraction))
+          ? Number(overrides.deepPruneP2Fraction)
+          : DEEP_PRUNE_MAX_FRACTION,
+      ),
+    ),
+    deepPruneP3Fraction: Math.max(
+      0,
+      Math.min(
+        DEEP_PRUNE_EXPERIMENT_MAX_FRACTION,
+        Number.isFinite(Number(overrides.deepPruneP3Fraction))
+          ? Number(overrides.deepPruneP3Fraction)
+          : DEEP_PRUNE_P3_FRACTION,
+      ),
+    ),
+    deepPruneAlphaGamma: Math.max(
+      0.25,
+      Math.min(
+        4,
+        Number.isFinite(Number(overrides.deepPruneAlphaGamma))
+          ? Number(overrides.deepPruneAlphaGamma)
+          : 1,
+      ),
+    ),
+    deepPruneSelectionMode,
+  };
+}
+
+function layerEfficiencyDiagnosticsRequested() {
+  return layerEfficiencyVariants().diagnostics;
 }
 
 function overlapDiagnosticsBindingPlan(maxStorageBuffersPerShaderStage, attributionRequested) {
@@ -825,8 +1355,16 @@ function performanceVariants() {
   const exactTileQuery = query.get("exact-tile-intersection");
   const subgroupQuery = query.get("subgroup-backward");
   const bindGroupCacheQuery = query.get("bind-group-cache");
+  const paintShapeCullingQuery = query.get("paint-shape-culling");
+  const virtualExactCullingQuery = query.get("virtual-exact-culling");
   const opacitySupportQuery = query.get("opacity-support");
   const adaptiveThroughputQuery = query.get("adaptive-gpu-throughput");
+  const gpuBatchQuery = query.get("gpu-batch");
+  const asyncPresentationQuery = query.get("async-presentation");
+  const metricReuseQuery = query.get("metric-render-reuse");
+  const segmentedBackwardQuery = query.get("segmented-backward");
+  const fixedPointGradientQuery = query.get("fixed-point-gradient");
+  const inverseScaleQuery = query.get("inverse-scale-optimization");
   const opacitySupportMode = overrides.opacityAwareSupportMode === "aggressive"
     ? "aggressive"
     : QA_RUNTIME_ENABLED && query.has("opacity-support")
@@ -839,6 +1377,21 @@ function performanceVariants() {
     : QA_RUNTIME_ENABLED && query.has("adaptive-gpu-throughput")
       ? adaptiveThroughputQuery !== "0"
       : Boolean(document.querySelector("#adaptiveGpuThroughput")?.checked);
+  const adaptiveGpuBatch = typeof overrides.adaptiveGpuBatch === "boolean"
+    ? overrides.adaptiveGpuBatch
+    : QA_RUNTIME_ENABLED && query.has("gpu-batch")
+      ? gpuBatchQuery !== "0"
+      : false;
+  const asyncPresentation = typeof overrides.asyncPresentation === "boolean"
+    ? overrides.asyncPresentation
+    : QA_RUNTIME_ENABLED && query.has("async-presentation")
+      ? asyncPresentationQuery !== "0"
+      : adaptiveGpuThroughput;
+  const metricTileReuse = typeof overrides.metricTileReuse === "boolean"
+    ? overrides.metricTileReuse
+    : QA_RUNTIME_ENABLED && query.has("metric-render-reuse")
+      ? metricReuseQuery !== "0"
+      : adaptiveGpuThroughput;
   return {
     tileCooperativeRenderer: overrides.tileCooperativeRenderer === true,
     quadExactBackward: typeof overrides.quadExactBackward === "boolean"
@@ -858,12 +1411,40 @@ function performanceVariants() {
         : true,
     bindGroupCache: typeof overrides.bindGroupCache === "boolean"
       ? overrides.bindGroupCache
-      : QA_RUNTIME_ENABLED && query.has("bind-group-cache") && bindGroupCacheQuery === "1",
+      : QA_RUNTIME_ENABLED && query.has("bind-group-cache")
+        ? bindGroupCacheQuery !== "0"
+        : true,
+    shapeAwarePaintCulling: typeof overrides.shapeAwarePaintCulling === "boolean"
+      ? overrides.shapeAwarePaintCulling
+      : QA_RUNTIME_ENABLED && query.has("paint-shape-culling")
+        ? paintShapeCullingQuery !== "0"
+        : true,
+    projectedVirtualExactCulling: typeof overrides.projectedVirtualExactCulling === "boolean"
+      ? overrides.projectedVirtualExactCulling
+      : QA_RUNTIME_ENABLED && query.has("virtual-exact-culling")
+        ? virtualExactCullingQuery !== "0"
+        : true,
+    segmentedExactBackward: typeof overrides.segmentedExactBackward === "boolean"
+      ? overrides.segmentedExactBackward
+      : QA_RUNTIME_ENABLED && query.has("segmented-backward")
+        ? segmentedBackwardQuery !== "0"
+        : false,
+    fixedPointExactGradient: typeof overrides.fixedPointExactGradient === "boolean"
+      ? overrides.fixedPointExactGradient
+      : QA_RUNTIME_ENABLED && query.has("fixed-point-gradient")
+        ? fixedPointGradientQuery !== "0"
+        : false,
+    inverseScaleOptimization: typeof overrides.inverseScaleOptimization === "boolean"
+      ? overrides.inverseScaleOptimization
+      : QA_RUNTIME_ENABLED && query.has("inverse-scale-optimization")
+        ? inverseScaleQuery !== "0"
+        : false,
     opacityAwareSupportMode: opacitySupportMode,
     adaptiveGpuThroughput,
-    gpuSchedulingMode: adaptiveGpuThroughput ? "adaptive" : "compatible",
-    asyncPresentation: adaptiveGpuThroughput,
-    metricTileReuse: adaptiveGpuThroughput,
+    adaptiveGpuBatch,
+    gpuSchedulingMode: adaptiveGpuBatch ? "adaptive" : "compatible",
+    asyncPresentation,
+    metricTileReuse,
   };
 }
 
@@ -1372,7 +1953,7 @@ function phase40Variants() {
     return fallback;
   };
   const localColorAnchor = enabled("localColorAnchor", true, "phase40Anchor");
-  const alphaLoss = enabled("alphaLoss", true, "phase40Alpha");
+  const alphaLoss = !algorithmUsesLayeredOpaqueBrush() && enabled("alphaLoss", true, "phase40Alpha");
   const alphaLossInput = Number(document.querySelector("#alphaLossWeight")?.value);
   return {
     localColorAnchor,
@@ -1418,6 +1999,115 @@ function phase46Variants() {
     stageAwareRate: enabled("stageAwareRate", false),
     freezeFraction: Math.max(0, Math.min(1, finite("freezeFraction", 1))),
   };
+}
+
+function discreteLayerSettings() {
+  const opaqueLayered = algorithmUsesOpaqueLayeredPaint();
+  const layeredBrush = algorithmUsesLayeredOpaqueBrush();
+  const requested = Boolean(document.querySelector("#discreteLayers")?.checked);
+  const accumulationRequested = Boolean(document.querySelector("#layerAwareAccumulation")?.checked);
+  const deepPruneRequested = Boolean(document.querySelector("#pruneLowContributionDeepSplats")?.checked);
+  const rawCount = Number(document.querySelector("#discreteLayerCount")?.value);
+  const rawMoveRadius = Number(document.querySelector("#discreteLayerMoveRadius")?.value);
+  const rawPruneInterval = Number(document.querySelector("#deepPruneInterval")?.value);
+  const count = opaqueLayered
+    ? LAYERED_OPAQUE_BRUSH_LAYER_COUNT
+    : Math.max(
+      MIN_DISCRETE_LAYER_COUNT,
+      Math.min(MAX_DISCRETE_LAYER_COUNT, Math.round(Number.isFinite(rawCount) ? rawCount : DEFAULT_DISCRETE_LAYER_COUNT)),
+    );
+  return {
+    enabled: (opaqueLayered || requested) && Boolean(document.querySelector("#trainLayerOrder")?.checked) && !algorithmUsesVirtualCameras(),
+    accumulationEnabled: (opaqueLayered || accumulationRequested) && Boolean(document.querySelector("#trainLayerOrder")?.checked) && !algorithmUsesVirtualCameras(),
+    deepPruneEnabled:
+      (opaqueLayered || deepPruneRequested) &&
+      Boolean(document.querySelector("#trainLayerOrder")?.checked) &&
+      !algorithmUsesVirtualCameras(),
+    deepPruneInterval: opaqueLayered
+      ? LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL
+      : Math.max(
+        MIN_DEEP_PRUNE_INTERVAL,
+        Math.min(
+          MAX_DEEP_PRUNE_INTERVAL,
+          Math.round(Number.isFinite(rawPruneInterval) ? rawPruneInterval : DEFAULT_DEEP_PRUNE_INTERVAL),
+        ),
+      ),
+    finalDeepPrune: opaqueLayered,
+    count,
+    moveRadius: layeredBrush
+      ? Math.max(
+        LAYERED_OPAQUE_BRUSH_LAYER_MOVE_RADIUS,
+        Math.min(count - 1, Math.round(
+          Number.isFinite(rawMoveRadius) ? rawMoveRadius : LAYERED_OPAQUE_BRUSH_LAYER_MOVE_RADIUS,
+        )),
+      )
+      : Math.max(0, Math.min(count - 1, Math.round(
+        Number.isFinite(rawMoveRadius) ? rawMoveRadius : DEFAULT_DISCRETE_LAYER_MOVE_RADIUS,
+      ))),
+  };
+}
+
+function hiddenRgbRecolorSettings() {
+  const requested = Boolean(document.querySelector("#hiddenRgbRecolor")?.checked);
+  const rawInterval = Number(document.querySelector("#hiddenRgbRecolorInterval")?.value);
+  const rawFractionPercent = Number(document.querySelector("#hiddenRgbRecolorFraction")?.value);
+  const rawStrengthPercent = Number(document.querySelector("#hiddenRgbRecolorStrength")?.value);
+  const availableStorageBuffers = Math.max(
+    0,
+    Math.floor(Number(
+      state.webgpu?.renderer?.device?.limits?.maxStorageBuffersPerShaderStage ??
+      state.webgpu?.limits?.maxStorageBuffersPerShaderStage,
+    ) || 0),
+  );
+  const supported =
+    availableStorageBuffers >= 9 &&
+    !algorithmUsesVirtualCameras() &&
+    !algorithmUsesPaintKernel();
+  return {
+    requested,
+    supported,
+    enabled: requested && supported,
+    availableStorageBuffers,
+    interval: Math.max(
+      MIN_HIDDEN_RGB_RECOLOR_INTERVAL,
+      Math.min(
+        MAX_HIDDEN_RGB_RECOLOR_INTERVAL,
+        Math.round(Number.isFinite(rawInterval) ? rawInterval : DEFAULT_HIDDEN_RGB_RECOLOR_INTERVAL),
+      ),
+    ),
+    fraction: Math.max(
+      MIN_HIDDEN_RGB_RECOLOR_FRACTION,
+      Math.min(
+        MAX_HIDDEN_RGB_RECOLOR_FRACTION,
+        (Number.isFinite(rawFractionPercent) ? rawFractionPercent : DEFAULT_HIDDEN_RGB_RECOLOR_FRACTION * 100) / 100,
+      ),
+    ),
+    strength: Math.max(
+      0.01,
+      Math.min(
+        1,
+        (Number.isFinite(rawStrengthPercent) ? rawStrengthPercent : DEFAULT_HIDDEN_RGB_RECOLOR_STRENGTH * 100) / 100,
+      ),
+    ),
+  };
+}
+
+function hiddenRgbRecolorDue(step, steps, settings = hiddenRgbRecolorSettings()) {
+  return Boolean(
+    settings.enabled &&
+    step > experimentalCoarseSteps(steps) &&
+    step < steps &&
+    step % settings.interval === 0
+  );
+}
+
+function quantizeLayerOrder(order, layerCount) {
+  const count = Math.max(MIN_DISCRETE_LAYER_COUNT, Math.min(MAX_DISCRETE_LAYER_COUNT, Math.round(layerCount)));
+  const normalized = Math.max(0, Math.min(1 - Number.EPSILON, order));
+  const scaled = normalized * count;
+  const layer = Math.min(count - 1, Math.floor(scaled));
+  const inLayerOrder = scaled - layer;
+  return (layer + inLayerOrder * 0.999999) / count;
 }
 
 function layerOptimizationSettings(step, steps, stage, variants = phase46Variants()) {
@@ -1496,8 +2186,19 @@ const els = {
   algorithmSelect: document.querySelector("#algorithmSelect"),
   stepCount: document.querySelector("#stepCount"),
   previewRefresh: document.querySelector("#previewRefresh"),
+  liveQualityMetrics: document.querySelector("#liveQualityMetrics"),
   tileCullingToggle: document.querySelector("#tileCullingToggle"),
   trainLayerOrder: document.querySelector("#trainLayerOrder"),
+  layerAwareAccumulation: document.querySelector("#layerAwareAccumulation"),
+  pruneLowContributionDeepSplats: document.querySelector("#pruneLowContributionDeepSplats"),
+  deepPruneInterval: document.querySelector("#deepPruneInterval"),
+  hiddenRgbRecolor: document.querySelector("#hiddenRgbRecolor"),
+  hiddenRgbRecolorInterval: document.querySelector("#hiddenRgbRecolorInterval"),
+  hiddenRgbRecolorFraction: document.querySelector("#hiddenRgbRecolorFraction"),
+  hiddenRgbRecolorStrength: document.querySelector("#hiddenRgbRecolorStrength"),
+  discreteLayers: document.querySelector("#discreteLayers"),
+  discreteLayerCount: document.querySelector("#discreteLayerCount"),
+  discreteLayerMoveRadius: document.querySelector("#discreteLayerMoveRadius"),
   layerUpdateInterval: document.querySelector("#layerUpdateInterval"),
   p1BaseScaleFloorRatio: document.querySelector("#p1BaseScaleFloorRatio"),
   p2BaseScaleFloorRatio: document.querySelector("#p2BaseScaleFloorRatio"),
@@ -1505,6 +2206,16 @@ const els = {
   colorLearningRate: document.querySelector("#colorLearningRate"),
   opacityLearningRate: document.querySelector("#opacityLearningRate"),
   alphaLossWeight: document.querySelector("#alphaLossWeight"),
+  opaquePaintPanel: document.querySelector("#opaquePaintPanel"),
+  opaquePaintSummary: document.querySelector("#opaquePaintSummary"),
+  opaquePaintOpacity: document.querySelector("#opaquePaintOpacity"),
+  layeredBrushOpacity: document.querySelector("#layeredBrushOpacity"),
+  rectangleTopRatio: document.querySelector("#rectangleTopRatio"),
+  rectangleTopRatioMax: document.querySelector("#rectangleTopRatioMax"),
+  rectanglePreserveArea: document.querySelector("#rectanglePreserveArea"),
+  rectangleEdgeDirectedTaper: document.querySelector("#rectangleEdgeDirectedTaper"),
+  rectangleStructureAwareRatio: document.querySelector("#rectangleStructureAwareRatio"),
+  rectangleAsymmetricSoftness: document.querySelector("#rectangleAsymmetricSoftness"),
   opacitySupportAggressive: document.querySelector("#opacitySupportAggressive"),
   adaptiveGpuThroughput: document.querySelector("#adaptiveGpuThroughput"),
   virtualBoundedDepth: document.querySelector("#virtualBoundedDepth"),
@@ -1558,6 +2269,7 @@ const els = {
   splatText: document.querySelector("#splatText"),
   imageSizeText: document.querySelector("#imageSizeText"),
   lossText: document.querySelector("#lossText"),
+  psnrText: document.querySelector("#psnrText"),
   ssimText: document.querySelector("#ssimText"),
   regionalSsimText: document.querySelector("#regionalSsimText"),
   coverageText: document.querySelector("#coverageText"),
@@ -1565,9 +2277,12 @@ const els = {
   gpuMemoryText: document.querySelector("#gpuMemoryText"),
   boundaryText: document.querySelector("#boundaryText"),
   backendText: document.querySelector("#backendText"),
+  webGpuNotice: document.querySelector("#webGpuNotice"),
+  webGpuNoticeText: document.querySelector("#webGpuNoticeText"),
   statusText: document.querySelector("#statusText"),
   log: document.querySelector("#log"),
   clearLogButton: document.querySelector("#clearLogButton"),
+  logTabs: document.querySelector("#logTabs"),
   trainingLogTab: document.querySelector("#trainingLogTab"),
   eventLogTab: document.querySelector("#eventLogTab"),
   splatsTab: document.querySelector("#splatsTab"),
@@ -1608,6 +2323,7 @@ const els = {
   splatSmallFirstOrder: document.querySelector("#splatSmallFirstOrder"),
   splatShapeGaussian: document.querySelector("#splatShapeGaussian"),
   splatShapeRectangle: document.querySelector("#splatShapeRectangle"),
+  splatShapeOpaqueBrush: document.querySelector("#splatShapeOpaqueBrush"),
   splatOpacity: document.querySelector("#splatOpacity"),
   splatOpacityValue: document.querySelector("#splatOpacityValue"),
   splatKernelFalloff: document.querySelector("#splatKernelFalloff"),
@@ -1629,6 +2345,8 @@ const state = {
   metrics: null,
   running: false,
   startPending: false,
+  trainingGeneration: 0,
+  trainingRun: null,
   sampleLoading: false,
   paused: false,
   stopRequested: false,
@@ -1642,7 +2360,6 @@ const state = {
   webgpu: { supported: false, renderer: null, reason: "checking", limits: null, adapterInfo: null },
   recommendation: null,
   safety: { mode: "on", lastStopReason: "", lastStopEstimateMB: "", lastStopBudgetMB: "", lastRecommended: "" },
-  lastPreview: null,
   lastDownload: "",
   lastGpuLoss: null,
   lastInputMode: "",
@@ -1654,7 +2371,11 @@ const state = {
   splatAdjustmentVersion: 0,
   splatAdjustmentFrame: 0,
   splatAdjustmentValidationTimer: 0,
-  splatAdjustmentChain: Promise.resolve(),
+  splatAdjustmentProcessing: false,
+  splatAdjustmentRenderedVersion: 0,
+  splatAdjustmentValidationVersion: 0,
+  splatAdjustmentEpoch: 0,
+  splatAdjustmentStats: { requests: 0, renders: 0, staleDropped: 0, yields: 0, lastMs: 0 },
   splatPreviewShape: "gaussian",
   runtimeSettingsRevision: 0,
   previewGeneration: 0,
@@ -1663,9 +2384,19 @@ const state = {
   previewAppliedAlphaBackground: "",
   previewRefreshPending: false,
   previewRefreshPromise: Promise.resolve(false),
+  webGpuRecoveryGeneration: 0,
+  webGpuRecoveryPending: false,
+  webGpuRecoveryAttempts: 0,
   previewMode: "original",
   previewPadding: { x: 0, y: 0, width: 0, height: 0, bytes: 0 },
-  gpuMemory: { activeBytes: 0, reservedBytes: 0 },
+  gpuMemory: {
+    activeBytes: 0,
+    reservedBytes: 0,
+    trainingActiveBytes: 0,
+    trainingReservedBytes: 0,
+    resultActiveBytes: 0,
+    resultReservedBytes: 0,
+  },
   capacityProbe: { status: "manual", requested: 0, selected: 0, attempts: [], fastPath: true },
   canvasView: { mode: "fit", scale: 1, panX: 0, panY: 0, pointerId: null, lastX: 0, lastY: 0 },
   canvasPointers: new Map(),
@@ -1696,6 +2427,72 @@ const state = {
 };
 
 const previewCtx = els.previewCanvas.getContext("2d", { willReadFrequently: true });
+
+function beginTrainingRun() {
+  const run = {
+    generation: ++state.trainingGeneration,
+    renderer: state.webgpu.renderer,
+    image: state.image,
+    params: null,
+    metrics: null,
+    cancelled: false,
+  };
+  state.trainingRun = run;
+  return run;
+}
+
+function updateTrainingRunOwnership(run, { image, params, metrics } = {}) {
+  if (!run || state.trainingRun !== run) return;
+  if (image !== undefined) run.image = image;
+  if (params !== undefined) run.params = params;
+  if (metrics !== undefined) run.metrics = metrics;
+}
+
+function ownsTrainingRun(run) {
+  return Boolean(
+    run &&
+    !run.cancelled &&
+    state.trainingRun === run &&
+    state.trainingGeneration === run.generation &&
+    state.webgpu.renderer === run.renderer &&
+    state.image === run.image &&
+    (!run.params || state.params === run.params) &&
+    (!run.metrics || state.metrics === run.metrics) &&
+    !run.renderer?.deviceLost,
+  );
+}
+
+function trainingRunCancelledError() {
+  const error = new Error("Training run was cancelled because its WebGPU lifecycle changed.");
+  error.trainingRunCancelled = true;
+  return error;
+}
+
+function assertTrainingRun(run) {
+  if (run && !ownsTrainingRun(run)) throw trainingRunCancelledError();
+}
+
+async function awaitTrainingRun(run, promise) {
+  assertTrainingRun(run);
+  const value = await promise;
+  assertTrainingRun(run);
+  return value;
+}
+
+function invalidateTrainingRun(reason = "lifecycle change") {
+  const run = state.trainingRun;
+  if (!run) return false;
+  run.cancelled = true;
+  state.trainingRun = null;
+  state.trainingGeneration += 1;
+  state.startPending = false;
+  log(`training lifecycle invalidated: ${reason}`);
+  return true;
+}
+
+function trainingLifecycleInputLocked() {
+  return state.running || state.startPending || state.webGpuRecoveryPending;
+}
 
 function log(message) {
   els.log.textContent = `${new Date().toLocaleTimeString()}  ${message}\n${els.log.textContent}`.slice(0, 4000);
@@ -1774,11 +2571,35 @@ function setTrainingMessage(message, kind = "info") {
   if (status && els.statusText.textContent !== status) setStatus(status);
 }
 
+function webGpuUnavailableMessage(reason = "") {
+  const detail = String(reason || "").toLowerCase();
+  if (detail.includes("navigator.gpu")) {
+    return "WebGPU is unavailable in this browser. Training requires a current desktop browser with WebGPU enabled.";
+  }
+  if (detail.includes("adapter unavailable")) {
+    return "No compatible WebGPU adapter was found. Check browser WebGPU support and the active GPU, then retry.";
+  }
+  return "WebGPU could not be initialized. Training is disabled, but image preview remains available.";
+}
+
 function syncDisplayedSsimMetrics() {
+  const psnr = state.metrics?.final_psnr;
   const global = state.metrics?.final_global_ssim;
   const localP10 = state.metrics?.final_regional_ssim?.p10;
-  if (Number.isFinite(global)) els.ssimText.textContent = global.toFixed(6);
-  if (Number.isFinite(localP10)) els.regionalSsimText.textContent = localP10.toFixed(6);
+  if (Number.isFinite(psnr)) els.psnrText.textContent = `${psnr.toFixed(2)} dB`;
+  if (Number.isFinite(global)) els.ssimText.textContent = global.toFixed(4);
+  if (Number.isFinite(localP10)) els.regionalSsimText.textContent = localP10.toFixed(4);
+}
+
+function resetEvaluationStatusForNewTraining() {
+  state.metrics = null;
+  state.lastGpuLoss = null;
+  els.lossText.textContent = "-";
+  els.psnrText.textContent = "-";
+  els.ssimText.textContent = "-";
+  els.regionalSsimText.textContent = "-";
+  els.boundaryText.textContent = "-";
+  els.coverageText.textContent = "- / -";
 }
 
 function publishState() {
@@ -1790,9 +2611,11 @@ function publishState() {
   data.productName = PRODUCT_NAME;
   data.algorithm = selectedAlgorithm().id;
   data.algorithmLabel = selectedAlgorithm().label;
+  data.resultAlgorithm = trainedResultAlgorithm()?.id || "";
   data.backend = els.backendText.textContent;
   data.running = String(state.running);
   data.startPending = String(state.startPending);
+  data.trainingGeneration = String(state.trainingGeneration);
   data.sampleLoading = String(state.sampleLoading);
   data.paused = String(state.paused);
   data.runtimeSettingsRevision = String(state.runtimeSettingsRevision);
@@ -1812,8 +2635,11 @@ function publishState() {
   data.previewRequestedRevision = String(state.previewRequestedRevision);
   data.previewAppliedRevision = String(state.previewAppliedRevision);
   data.previewAppliedAlphaBackground = state.previewAppliedAlphaBackground;
+  data.webGpuRecoveryPending = String(state.webGpuRecoveryPending);
+  data.webGpuRecoveryAttempts = String(state.webGpuRecoveryAttempts);
+  data.postTrainingGpuRecoveries = String(state.metrics?.post_training_gpu_recoveries || 0);
   data.splatParameterEffectsEnabled = String(Boolean(els.splatParameterEffects?.checked));
-  data.splatPreviewShape = els.splatParameterEffects?.checked ? state.splatPreviewShape : "gaussian";
+  data.splatPreviewShape = els.splatParameterEffects?.checked ? state.splatPreviewShape : trainedSplatShape();
   data.previewPaddingX = String(state.previewPadding.x);
   data.previewPaddingY = String(state.previewPadding.y);
   data.previewCanvasWidth = String(state.previewPadding.width || els.gpuCanvas.width);
@@ -1829,10 +2655,14 @@ function publishState() {
   els.splatsTab.setAttribute("aria-disabled", String(resultTabsLocked));
   els.exportTab.setAttribute("aria-disabled", String(resultTabsLocked));
   data.resultTabsLocked = String(resultTabsLocked);
-  els.startButton.disabled = state.running || state.startPending || !state.image || !state.webgpu.supported;
-  els.sampleButton.disabled = state.running || state.sampleLoading;
-  els.resetButton.disabled = state.running || state.previewRefreshPending || !state.image;
-  els.clearImageButton.disabled = state.running || state.previewRefreshPending || !state.image;
+  const lifecycleLocked = state.running || state.startPending || state.webGpuRecoveryPending;
+  els.startButton.disabled = lifecycleLocked || !state.image || !state.webgpu.supported;
+  els.sampleButton.disabled = lifecycleLocked || state.sampleLoading;
+  els.loadImageButton.disabled = lifecycleLocked;
+  els.pathButton.disabled = lifecycleLocked;
+  els.fileInput.disabled = lifecycleLocked;
+  els.resetButton.disabled = lifecycleLocked || state.previewRefreshPending || !state.image;
+  els.clearImageButton.disabled = lifecycleLocked || state.previewRefreshPending || !state.image;
   const outsidePreviewReady = Boolean(
     state.image &&
     state.params &&
@@ -1843,14 +2673,20 @@ function publishState() {
   // are coalesced by the preview revision loop and do not change parameters.
   els.outsidePreviewToggle.disabled = !outsidePreviewReady;
   els.pauseButton.disabled = !state.running;
-  els.retryWebGpuButton.disabled = state.running || state.webgpu.supported;
-  els.retryWebGpuButton.hidden = state.webgpu.supported;
+  const webGpuChecking = state.webgpu.reason === "checking";
+  const webGpuUnavailable = !state.webgpu.supported && !webGpuChecking && !state.webGpuRecoveryPending;
+  els.webGpuNotice.hidden = !webGpuUnavailable;
+  if (webGpuUnavailable) {
+    els.webGpuNoticeText.textContent = webGpuUnavailableMessage(state.webgpu.reason);
+  }
+  els.retryWebGpuButton.disabled = lifecycleLocked || state.webgpu.supported;
   els.pauseButton.textContent = state.paused ? "Resume" : "Pause";
   data.resetEnabled = String(!els.resetButton.disabled);
   data.clearImageEnabled = String(!els.clearImageButton.disabled);
   data.pauseEnabled = String(!els.pauseButton.disabled);
   data.step = els.stepText.textContent;
   data.loss = els.lossText.textContent;
+  data.psnr = els.psnrText.textContent;
   data.ssim = els.ssimText.textContent;
   data.regionalSsimP10 = els.regionalSsimText.textContent;
   data.imageSize = els.imageSizeText.textContent;
@@ -1868,6 +2704,18 @@ function publishState() {
   data.gpuReservedBytes = String(state.gpuMemory.reservedBytes);
   data.gpuActiveMb = bytesToMB(state.gpuMemory.activeBytes).toFixed(1);
   data.gpuReservedMb = bytesToMB(state.gpuMemory.reservedBytes).toFixed(1);
+  data.gpuTrainingActiveBytes = String(state.gpuMemory.trainingActiveBytes);
+  data.gpuTrainingReservedBytes = String(state.gpuMemory.trainingReservedBytes);
+  data.gpuResultActiveBytes = String(state.gpuMemory.resultActiveBytes);
+  data.gpuResultReservedBytes = String(state.gpuMemory.resultReservedBytes);
+  data.gpuMemoryScope = "tracked-persistent-app-buffers";
+  data.gpuTransientResourcesIncluded = "false";
+  const resultRenderMemory =
+    state.webgpu.renderer?.resultRenderMemorySnapshot?.() || { activeBytes: 0, reservedBytes: 0 };
+  data.resultRenderCacheBytes = String(resultRenderMemory.activeBytes || 0);
+  data.resultRenderCacheMb = bytesToMB(resultRenderMemory.activeBytes || 0).toFixed(1);
+  data.resultRenderCacheSource = state.metrics?.result_render_cache?.source || "";
+  data.resultRenderCacheOrder = state.metrics?.result_render_cache?.order_mode || "";
   data.splatBytes = state.params ? String(state.params.count * ROW_BYTES) : "0";
   data.lastDownload = state.lastDownload;
   data.lastGpuLoss = state.lastGpuLoss === null ? "" : String(state.lastGpuLoss);
@@ -1894,15 +2742,38 @@ function publishState() {
   data.initializationMode = state.metrics?.initialization || "image-rgb-grid";
   data.adaptiveGridInitializationFraction = String(adaptiveGridInitializationVariants().fraction * 100);
   data.previewRefreshInput = els.previewRefresh.value;
+  data.liveQualityMetricsInput = String(Boolean(els.liveQualityMetrics.checked));
   data.blendMode = "standard-alpha";
   data.gpuDensifyEnabled = "true";
   data.tileCullingEnabled = String(Boolean(els.tileCullingToggle?.checked));
   data.trainLayerOrderInput = String(Boolean(els.trainLayerOrder?.checked));
+  data.layerAwareAccumulationInput = String(Boolean(els.layerAwareAccumulation?.checked));
+  data.pruneLowContributionDeepSplatsInput = String(Boolean(els.pruneLowContributionDeepSplats?.checked));
+  data.deepPruneIntervalInput = els.deepPruneInterval?.value || String(DEFAULT_DEEP_PRUNE_INTERVAL);
+  data.hiddenRgbRecolorInput = String(Boolean(els.hiddenRgbRecolor?.checked));
+  data.hiddenRgbRecolorSupported = String(hiddenRgbRecolorSettings().supported);
+  data.hiddenRgbRecolorIntervalInput = els.hiddenRgbRecolorInterval?.value || String(DEFAULT_HIDDEN_RGB_RECOLOR_INTERVAL);
+  data.hiddenRgbRecolorFractionInput = els.hiddenRgbRecolorFraction?.value || String(DEFAULT_HIDDEN_RGB_RECOLOR_FRACTION * 100);
+  data.hiddenRgbRecolorStrengthInput = els.hiddenRgbRecolorStrength?.value || String(DEFAULT_HIDDEN_RGB_RECOLOR_STRENGTH * 100);
+  data.discreteLayersInput = String(Boolean(els.discreteLayers?.checked));
+  data.discreteLayerCountInput = els.discreteLayerCount?.value || String(DEFAULT_DISCRETE_LAYER_COUNT);
+  data.discreteLayerMoveRadiusInput = els.discreteLayerMoveRadius?.value || String(DEFAULT_DISCRETE_LAYER_MOVE_RADIUS);
   data.layerUpdateIntervalInput = els.layerUpdateInterval.value;
   data.positionLearningRateInput = els.positionLearningRate.value;
   data.colorLearningRateInput = els.colorLearningRate.value;
   data.opacityLearningRateInput = els.opacityLearningRate.value;
   data.alphaLossWeightInput = els.alphaLossWeight.value;
+  data.opaquePaintOpacityInput = String(selectedOpaquePaintOpacity());
+  data.rectangleMinimumPaintOpacityInput = String(selectedOpaquePaintOpacity());
+  data.layeredBrushOpacityInput = String(selectedLayeredBrushOpacity());
+  data.rectangleTopRatioInput = String(selectedRectangleTopRatio());
+  data.rectangleTopRatioMaxInput =
+    String(selectedRectangleTopRatioMax(selectedRectangleTopRatio()));
+  const rectangleShape = selectedRectangleShapeSettings();
+  data.rectanglePreserveAreaInput = String(rectangleShape.preserveArea);
+  data.rectangleEdgeDirectedTaperInput = String(rectangleShape.edgeDirectedTaper);
+  data.rectangleStructureAwareRatioInput = String(rectangleShape.structureAwareRatio);
+  data.rectangleAsymmetricSoftnessInput = String(rectangleShape.asymmetricSoftness);
   data.opacityAwareSupportInput = performanceVariants().opacityAwareSupportMode;
   data.adaptiveGpuThroughputInput = String(Boolean(els.adaptiveGpuThroughput.checked));
   data.virtualCameraSamplingInput = String(algorithmUsesVirtualCameras());
@@ -1919,9 +2790,11 @@ function publishState() {
   data.virtualCameraFrontSteps = String(state.metrics?.virtual_camera_sampling?.front_steps ?? 0);
   data.virtualCameraVirtualSteps = String(state.metrics?.virtual_camera_sampling?.virtual_steps ?? 0);
   data.virtualCameraEvaluationCount = String(state.metrics?.virtual_camera_evaluation?.virtual_views?.camera_count ?? 0);
+  data.virtualCameraVirtualPsnr = String(state.metrics?.virtual_camera_evaluation?.virtual_views?.rgb_psnr_macro ?? "");
   data.virtualCameraVirtualSsim = String(state.metrics?.virtual_camera_evaluation?.virtual_views?.rgb_ssim_macro ?? "");
   data.virtualCameraVirtualSsimP10 = String(state.metrics?.virtual_camera_evaluation?.virtual_views?.rgb_ssim_p10 ?? "");
   data.virtualCameraAllViewSsim = String(state.metrics?.virtual_camera_evaluation?.all_views?.rgb_ssim_macro ?? "");
+  data.virtualCameraAllViewPsnr = String(state.metrics?.virtual_camera_evaluation?.all_views?.rgb_psnr_macro ?? "");
   data.virtualCameraAllViewSsimP10 = String(state.metrics?.virtual_camera_evaluation?.all_views?.rgb_ssim_p10 ?? "");
   const virtualEvaluation = state.metrics?.virtual_camera_evaluation;
   data.virtualCameraEvaluationSummary = virtualEvaluation
@@ -1945,6 +2818,9 @@ function publishState() {
   data.renderParityAlphaMax = String(state.metrics?.render_surface_parity?.alpha_max_abs ?? "");
   data.renderParityPremultipliedMax = String(state.metrics?.render_surface_parity?.premultiplied_max_abs ?? "");
   data.renderParityMismatchPixels = String(state.metrics?.render_surface_parity?.premultiplied_mismatch_pixels ?? "");
+  data.layerAwareParityPremultipliedMax = String(
+    state.metrics?.layer_aware_render_parity?.premultiplied_max_abs ?? "",
+  );
   data.renderParityMaximumPixel = state.metrics?.render_surface_parity?.maximum_pixel
     ? JSON.stringify(state.metrics.render_surface_parity.maximum_pixel)
     : "";
@@ -2018,6 +2894,12 @@ function publishState() {
     data.lastExportRoundTripNonfinite = String(lastExport?.round_trip?.nonfinite?.length ?? (lastExport?.round_trip?.all_finite ? 0 : ""));
     data.initialL1 = String(state.metrics.initial_l1);
     data.finalL1 = String(state.metrics.final_l1);
+    data.initialRgbMse = String(state.metrics.initial_rgb_mse ?? "");
+    data.finalRgbMse = String(state.metrics.final_rgb_mse ?? "");
+    data.initialPsnr = String(state.metrics.initial_psnr ?? "");
+    data.finalPsnr = String(state.metrics.final_psnr ?? "");
+    data.psnrUnit = state.metrics.quality_metric_contract?.psnr_unit || "dB";
+    data.psnrSignalSpace = state.metrics.quality_metric_contract?.signal_space || "sRGB signal values";
     data.finalGlobalSsim = String(state.metrics.final_global_ssim ?? "");
     data.finalWindowedSsim = String(state.metrics.final_windowed_ssim ?? state.metrics.final_ssim ?? "");
     data.finalLocalP10 = String(state.metrics.final_regional_ssim?.p10 ?? "");
@@ -2025,6 +2907,14 @@ function publishState() {
     data.finalAlphaSsim = String(state.metrics.final_alpha_ssim ?? "");
     data.trainingElapsedMs = String(lastPerformance?.elapsed_ms ?? "");
     data.trainingIterationsPerSecond = String(lastPerformance?.iterations_per_second ?? "");
+    data.trainingEvaluationMode = state.metrics.training_evaluation?.mode || "";
+    data.trainingEvaluationSource = state.metrics.training_evaluation?.source || "";
+    data.trainingPeriodicEvaluations = String(
+      state.metrics.training_evaluation?.periodic_full_image_evaluations ?? 0,
+    );
+    data.trainingResidualRefreshes = String(state.metrics.training_residual_map?.refresh_count ?? 0);
+    data.trainingResidualCpuReadbacks = String(state.metrics.training_residual_map?.cpu_readbacks ?? 0);
+    data.finalParameterHash = String(state.metrics.final_parameter_hash ?? "");
     data.stepsDone = String(state.metrics.steps_done);
     data.stepsRequested = String(state.metrics.steps_requested);
     data.stopped = String(state.metrics.stopped);
@@ -2084,6 +2974,7 @@ function publishState() {
     data.freeSplats = String(state.metrics.tile_counters?.free_count ?? "");
     data.ssimTrend = state.metrics.ssim_trend || "";
     data.globalSsimTrend = state.metrics.global_ssim_trend || "";
+    data.psnrTrend = state.metrics.psnr_trend || "";
     data.initialSsim = String(state.metrics.initial_ssim);
     data.finalSsim = String(state.metrics.final_ssim);
     data.initialGlobalSsim = String(state.metrics.initial_global_ssim);
@@ -2155,6 +3046,12 @@ function publishState() {
     data.lastExportRoundTripNonfinite = "";
     data.initialL1 = "";
     data.finalL1 = "";
+    data.trainingEvaluationMode = "";
+    data.trainingEvaluationSource = "";
+    data.trainingPeriodicEvaluations = "";
+    data.trainingResidualRefreshes = "";
+    data.trainingResidualCpuReadbacks = "";
+    data.finalParameterHash = "";
     data.stepsDone = "";
     data.stepsRequested = "";
     data.stopped = "";
@@ -2234,8 +3131,8 @@ function publishState() {
   updateExportPanel();
 }
 
-function resizedSize(width, height, longSide) {
-  const safeLongSide = clampNumber(longSide, LIMITS.trainSizeMin, LIMITS.trainSizeMax, DEFAULT_MAX_SIDE);
+function resizedSize(width, height, longSide, maximumLongSide = LIMITS.trainSizeMax) {
+  const safeLongSide = clampNumber(longSide, 1, maximumLongSide, Math.min(DEFAULT_MAX_SIDE, maximumLongSide));
   const scale = Math.min(1, safeLongSide / Math.max(width, height));
   return [Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale))];
 }
@@ -2332,9 +3229,26 @@ function formatMB(bytes) {
 }
 
 function updateGpuMemoryStatus() {
-  const snapshot = state.webgpu.renderer?.trainingMemorySnapshot?.() || { activeBytes: 0, reservedBytes: 0 };
-  state.gpuMemory.activeBytes = Math.max(0, Math.round(snapshot.activeBytes || 0));
-  state.gpuMemory.reservedBytes = Math.max(state.gpuMemory.activeBytes, Math.round(snapshot.reservedBytes || 0));
+  const training = state.webgpu.renderer?.trainingMemorySnapshot?.() || { activeBytes: 0, reservedBytes: 0 };
+  const result = state.webgpu.renderer?.resultRenderMemorySnapshot?.() || { activeBytes: 0, reservedBytes: 0 };
+  state.gpuMemory.trainingActiveBytes = Math.max(0, Math.round(training.activeBytes || 0));
+  state.gpuMemory.trainingReservedBytes = Math.max(
+    state.gpuMemory.trainingActiveBytes,
+    Math.round(training.reservedBytes || 0),
+  );
+  state.gpuMemory.resultActiveBytes = Math.max(0, Math.round(result.activeBytes || 0));
+  state.gpuMemory.resultReservedBytes = Math.max(
+    state.gpuMemory.resultActiveBytes,
+    Math.round(result.reservedBytes || 0),
+  );
+  state.gpuMemory.activeBytes = Math.max(
+    0,
+    state.gpuMemory.trainingActiveBytes + state.gpuMemory.resultActiveBytes,
+  );
+  state.gpuMemory.reservedBytes = Math.max(
+    state.gpuMemory.activeBytes,
+    state.gpuMemory.trainingReservedBytes + state.gpuMemory.resultReservedBytes,
+  );
   const activeMB = bytesToMB(state.gpuMemory.activeBytes);
   const reservedMB = bytesToMB(state.gpuMemory.reservedBytes);
   const digits = Math.max(activeMB, reservedMB) < 10 ? 1 : 0;
@@ -2472,11 +3386,20 @@ function trainingBufferDescriptors(
   const tileCount = Math.ceil(image.width / TILE_SIZE) * Math.ceil(image.height / TILE_SIZE);
   const ssimTileCount = Math.ceil(image.width / 8) * Math.ceil(image.height / 8);
   const variants = phase33Variants();
-  const stages = Object.hasOwn(prepared, "coarseImage")
-    ? prepared
-    : makeCurriculumImages(image, variants);
-  const coarseImage = stages.coarseImage || null;
-  const midImage = stages.midImage || null;
+  const preparedStages = Object.hasOwn(prepared, "coarseImage");
+  const stageDimensions = preparedStages
+    ? null
+    : curriculumStageDimensions(image.width, image.height, variants);
+  const coarseImage = preparedStages ? prepared.coarseImage || null : null;
+  const midImage = preparedStages ? prepared.midImage || null : null;
+  const stageRgbBytes = (stageImage, dimensions) => stageImage?.rgb?.byteLength ||
+    (dimensions ? dimensions.width * dimensions.height * 3 * 4 : 0);
+  const stageAlphaBytes = (stageImage, dimensions) => stageImage?.alpha?.byteLength ||
+    (dimensions ? dimensions.width * dimensions.height * 4 : 0);
+  const coarseRgbBytes = stageRgbBytes(coarseImage, stageDimensions?.coarse);
+  const midRgbBytes = stageRgbBytes(midImage, stageDimensions?.mid);
+  const coarseAlphaBytes = stageAlphaBytes(coarseImage, stageDimensions?.coarse);
+  const midAlphaBytes = stageAlphaBytes(midImage, stageDimensions?.mid);
   const optimizerStride = 96;
   const profileEnabled = Boolean(state.webgpu.renderer?.performanceProfile?.timestampQuery);
   const descriptors = [];
@@ -2487,11 +3410,11 @@ function trainingBufferDescriptors(
   add("batch-config", TRAIN_BATCH_CONFIG_BYTES);
   add("present-config", 16);
   add("target-rgb", image.rgb.byteLength, true);
-  add("coarse-target-rgb", coarseImage?.rgb.byteLength || 0, true);
-  add("mid-target-rgb", midImage?.rgb.byteLength || 0, true);
+  add("coarse-target-rgb", coarseRgbBytes, true);
+  add("mid-target-rgb", midRgbBytes, true);
   add("target-alpha", image.alpha?.byteLength || image.width * image.height * 4, true);
-  add("coarse-target-alpha", coarseImage?.alpha.byteLength || 0, true);
-  add("mid-target-alpha", midImage?.alpha.byteLength || 0, true);
+  add("coarse-target-alpha", coarseAlphaBytes, true);
+  add("mid-target-alpha", midAlphaBytes, true);
   add("error-map", image.width * image.height * 4, true);
   add("stats", capacity * 2 * 4 * 4, true);
   add("density-control", (
@@ -2523,7 +3446,63 @@ function trainingBufferDescriptors(
     add("profile-resolve", PERFORMANCE_PROFILE_QUERY_CAPACITY * 8);
     add("profile-readback", PERFORMANCE_PROFILE_QUERY_CAPACITY * 8);
   }
-  return { descriptors, tilePlan, coarseImage, midImage };
+  const segmentedPartialBytes = tilePlan.capacity * EXACT_GRADIENT_STRIDE * 4;
+  const segmentedAuxiliaryBytes =
+    capacity * 4 +
+    (capacity + 1) * 4 +
+    capacity * 4 +
+    tilePlan.capacity * 4;
+  const baseReservedBytes = descriptors.reduce((sum, item) => sum + item.size, 0);
+  const segmentedRequested = performanceVariants().segmentedExactBackward;
+  const segmentedSupported =
+    segmentedRequested &&
+    Number(device?.limits?.maxStorageBuffersPerShaderStage || 8) >= 9 &&
+    segmentedPartialBytes <= SEGMENTED_EXACT_BACKWARD_MAX_BYTES &&
+    baseReservedBytes + segmentedPartialBytes + segmentedAuxiliaryBytes <= memoryBudgetBytes() * 0.9;
+  const fixedPointRequested = performanceVariants().fixedPointExactGradient;
+  const fixedPointSupported = fixedPointRequested && !segmentedSupported;
+  if (segmentedSupported) {
+    add("segmented-partial-gradient", segmentedPartialBytes, true);
+    add("segmented-reference-counts", capacity * 4, true);
+    add("segmented-reference-offsets", (capacity + 1) * 4, true);
+    add("segmented-reference-cursors", capacity * 4, true);
+    add("segmented-references", tilePlan.capacity * 4, true);
+  }
+  if (fixedPointSupported) {
+    add("fixed-point-gradient-control", FIXED_POINT_EXACT_GRADIENT_CONTROL_BYTES, true);
+    add("fixed-point-gradient-readback", FIXED_POINT_EXACT_GRADIENT_CONTROL_BYTES);
+  }
+  return {
+    descriptors,
+    tilePlan,
+    coarseImage,
+    midImage,
+    segmentedExactBackward: {
+      requested: segmentedRequested,
+      enabled: segmentedSupported,
+      partialBytes: segmentedSupported ? segmentedPartialBytes : 0,
+      auxiliaryBytes: segmentedSupported ? segmentedAuxiliaryBytes : 0,
+      reason: !segmentedRequested
+        ? "not-requested"
+        : Number(device?.limits?.maxStorageBuffersPerShaderStage || 8) < 9
+          ? "requires-9-storage-buffers"
+          : segmentedPartialBytes > SEGMENTED_EXACT_BACKWARD_MAX_BYTES
+            ? "partial-buffer-cap"
+            : baseReservedBytes + segmentedPartialBytes + segmentedAuxiliaryBytes > memoryBudgetBytes() * 0.9
+              ? "training-memory-budget"
+              : "enabled",
+    },
+    fixedPointExactGradient: {
+      requested: fixedPointRequested,
+      enabled: fixedPointSupported,
+      scale: FIXED_POINT_EXACT_GRADIENT_SCALE,
+      reason: !fixedPointRequested
+        ? "not-requested"
+        : segmentedSupported
+          ? "mutually-exclusive-with-segmented-backward"
+          : "enabled",
+    },
+  };
 }
 
 function trainingAllocationPlan(
@@ -2552,6 +3531,8 @@ function trainingAllocationPlan(
     maxBuffer,
     withinBufferLimits: largestStorageBytes <= maxStorage && largestBufferBytes <= maxBuffer,
     withinBudget: reservedBytes <= memoryBudgetBytes() * 0.9,
+    segmentedExactBackward: descriptorPlan.segmentedExactBackward,
+    fixedPointExactGradient: descriptorPlan.fixedPointExactGradient,
   };
 }
 
@@ -2579,6 +3560,13 @@ function trainStateAllocatedDescriptors(trainState) {
     ["alpha-state", trainState.alphaStateBuffer],
     ["loss-gradient", trainState.lossGradientBuffer],
     ["exact-gradient", trainState.exactGradientBuffer],
+    ["fixed-point-gradient-control", trainState.fixedPointGradientControlBuffer],
+    ["fixed-point-gradient-readback", trainState.fixedPointGradientReadbackBuffer],
+    ["segmented-partial-gradient", trainState.segmentedPartialGradientBuffer],
+    ["segmented-reference-counts", trainState.segmentedReferenceCountsBuffer],
+    ["segmented-reference-offsets", trainState.segmentedReferenceOffsetsBuffer],
+    ["segmented-reference-cursors", trainState.segmentedReferenceCursorsBuffer],
+    ["segmented-references", trainState.segmentedReferencesBuffer],
     ["ssim-tiles", trainState.ssimTileBuffer],
     ["optimizer-state", trainState.optimizerStateBuffer],
     ["xy-depth", trainState.xyBuffers?.[0]],
@@ -2794,9 +3782,9 @@ function updateImageSizeStatus() {
     els.imageSizeText.textContent = "-";
     return;
   }
-  const originalWidth = state.image.originalWidth || state.image.width;
-  const originalHeight = state.image.originalHeight || state.image.height;
-  els.imageSizeText.textContent = `${state.image.width}x${state.image.height} / ${originalWidth}x${originalHeight}`;
+  const cacheWidth = state.image.cacheWidth || state.image.width;
+  const cacheHeight = state.image.cacheHeight || state.image.height;
+  els.imageSizeText.textContent = `${cacheWidth}x${cacheHeight}`;
 }
 
 function computeRecommendation() {
@@ -2949,7 +3937,9 @@ function resizeLoadedImageToMaxSide(maxSide) {
     alpha[p] = imageData.data[i + 3] / 255;
   }
 
+  cancelCompletedResultGpuRecovery();
   state.webgpu.renderer?.disposeTrainState();
+  state.webgpu.renderer?.disposeResultRenderState();
   state.image = {
     ...state.image,
     width,
@@ -2967,6 +3957,7 @@ function resizeLoadedImageToMaxSide(maxSide) {
   els.stepText.textContent = "0 / 0";
   els.splatText.textContent = "-";
   els.lossText.textContent = "-";
+  els.psnrText.textContent = "-";
   els.ssimText.textContent = "-";
   els.regionalSsimText.textContent = "-";
   els.boundaryText.textContent = "-";
@@ -2988,9 +3979,10 @@ function resizeLoadedImageToMaxSide(maxSide) {
 }
 
 async function loadFile(file) {
-  if (state.running) {
+  if (state.running || state.startPending || state.webGpuRecoveryPending) {
     throw new Error("Stop training before loading another image.");
   }
+  invalidateTrainingRun("image load");
   destroyTiltViewer({ restoreCanvas: true });
   if (!file?.type?.startsWith("image/")) {
     throw new Error("Choose an image file.");
@@ -3001,20 +3993,27 @@ async function loadFile(file) {
   const loadGeneration = state.imageLoadGeneration + 1;
   state.imageLoadGeneration = loadGeneration;
   state.webgpu.renderer?.disposeTrainState();
-  const bitmap = await decodeImageFile(file);
+  const decoded = await decodeImageFile(file);
   try {
     if (loadGeneration !== state.imageLoadGeneration) return false;
-    if (bitmap.width * bitmap.height > MAX_INPUT_DECODED_PIXELS) {
+    const originalWidth = decoded.originalWidth || decoded.width;
+    const originalHeight = decoded.originalHeight || decoded.height;
+    if (originalWidth * originalHeight > MAX_INPUT_DECODED_PIXELS) {
       throw new Error(`Decoded image is too large (maximum ${MAX_INPUT_DECODED_PIXELS.toLocaleString()} pixels).`);
     }
     els.trainSize.value = String(clampNumber(els.trainSize.value, LIMITS.trainSizeMin, LIMITS.trainSizeMax, DEFAULT_MAX_SIDE));
-    const [width, height] = resizedSize(bitmap.width, bitmap.height, LIMITS.trainSizeMax);
-    const loadScale = Math.max(width / bitmap.width, height / bitmap.height);
+    const [width, height] = resizedSize(
+      decoded.width,
+      decoded.height,
+      INPUT_CACHE_MAX_SIDE,
+      INPUT_CACHE_MAX_SIDE,
+    );
+    const loadScale = Math.max(width / originalWidth, height / originalHeight);
     const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    ctx.drawImage(bitmap, 0, 0, width, height);
+    ctx.drawImage(decoded.source, 0, 0, width, height);
     const imageData = ctx.getImageData(0, 0, width, height);
     const rgb = new Float32Array(width * height * 3);
     const alpha = new Float32Array(width * height);
@@ -3024,14 +4023,21 @@ async function loadFile(file) {
       rgb[j + 2] = imageData.data[i + 2] / 255;
       alpha[p] = imageData.data[i + 3] / 255;
     }
+    cancelCompletedResultGpuRecovery();
+    state.webgpu.renderer?.disposeResultRenderState();
     state.image?.sourceBitmap?.close?.();
     state.image = {
       fileName: file.name,
       width,
       height,
-      originalWidth: bitmap.width,
-      originalHeight: bitmap.height,
-      resizeMode: "source-cap",
+      originalWidth,
+      originalHeight,
+      cacheWidth: width,
+      cacheHeight: height,
+      inputCacheMaxSide: INPUT_CACHE_MAX_SIDE,
+      inputCacheResized: width !== originalWidth || height !== originalHeight,
+      inputDecodeMode: decoded.mode,
+      resizeMode: "input-cache",
       resizeScale: loadScale,
       rgb,
       alpha,
@@ -3046,6 +4052,7 @@ async function loadFile(file) {
     els.stepText.textContent = "0 / 0";
     els.splatText.textContent = "-";
     els.lossText.textContent = "-";
+    els.psnrText.textContent = "-";
     els.ssimText.textContent = "-";
     els.regionalSsimText.textContent = "-";
     els.boundaryText.textContent = "-";
@@ -3062,19 +4069,241 @@ async function loadFile(file) {
     updateDownloads(false);
     updateMemoryRecommendation();
     updateVirtualCameraCoverageEstimate();
+    syncAlgorithmRequirements();
     setStatus("image loaded");
-    setTrainingMessage(`Loaded ${file.name} (${width} x ${height}).`, "success");
-    log(`loaded ${file.name} ${width}x${height} from ${bitmap.width}x${bitmap.height} scale=${loadScale.toFixed(3)} sRGB; training resize deferred`);
+    const cacheNote = state.image.inputCacheResized
+      ? ` Cached at ${width} x ${height}; Max image side is applied separately when Train starts.`
+      : "";
+    setTrainingMessage(`Loaded ${file.name} (${originalWidth} x ${originalHeight}).${cacheNote}`, "success");
+    log(`loaded ${file.name}; input cache=${width}x${height} source=${originalWidth}x${originalHeight} scale=${loadScale.toFixed(3)} decode=${decoded.mode} sRGB; training resize deferred`);
     return true;
   } finally {
-    bitmap.close?.();
+    decoded.close?.();
   }
 }
 
+function asciiAt(bytes, offset, text) {
+  if (offset < 0 || offset + text.length > bytes.length) return false;
+  for (let index = 0; index < text.length; index += 1) {
+    if (bytes[offset + index] !== text.charCodeAt(index)) return false;
+  }
+  return true;
+}
+
+function parsedImageSize(width, height, format) {
+  const w = Math.round(Number(width) || 0);
+  const h = Math.round(Number(height) || 0);
+  return w > 0 && h > 0 ? { width: w, height: h, format } : null;
+}
+
+function parseTiffDimensions(bytes) {
+  if (bytes.length < 16) return null;
+  const little = asciiAt(bytes, 0, "II");
+  const big = asciiAt(bytes, 0, "MM");
+  if (!little && !big) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const uint16 = (offset) => offset + 2 <= bytes.length ? view.getUint16(offset, little) : 0;
+  const uint32 = (offset) => offset + 4 <= bytes.length ? view.getUint32(offset, little) : 0;
+  if (uint16(2) !== 42) return null;
+  const ifd = uint32(4);
+  if (ifd <= 0 || ifd + 2 > bytes.length) return null;
+  const entries = Math.min(uint16(ifd), Math.floor((bytes.length - ifd - 2) / 12));
+  let width = 0;
+  let height = 0;
+  for (let entry = 0; entry < entries; entry += 1) {
+    const offset = ifd + 2 + entry * 12;
+    const tag = uint16(offset);
+    if (tag !== 256 && tag !== 257) continue;
+    const type = uint16(offset + 2);
+    const count = uint32(offset + 4);
+    if (count !== 1) continue;
+    const value = type === 3 ? uint16(offset + 8) : type === 4 ? uint32(offset + 8) : 0;
+    if (tag === 256) width = value;
+    else height = value;
+    if (width && height) return parsedImageSize(width, height, "tiff");
+  }
+  return null;
+}
+
+function parseImageDimensions(bytes, mimeType = "") {
+  if (bytes.length >= 24 &&
+      bytes[0] === 0x89 && asciiAt(bytes, 1, "PNG\r\n\u001a\n")) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return parsedImageSize(view.getUint32(16), view.getUint32(20), "png");
+  }
+  if (bytes.length >= 10 && (asciiAt(bytes, 0, "GIF87a") || asciiAt(bytes, 0, "GIF89a"))) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return parsedImageSize(view.getUint16(6, true), view.getUint16(8, true), "gif");
+  }
+  if (bytes.length >= 30 && asciiAt(bytes, 0, "RIFF") && asciiAt(bytes, 8, "WEBP")) {
+    if (asciiAt(bytes, 12, "VP8X")) {
+      const width = 1 + bytes[24] + (bytes[25] << 8) + (bytes[26] << 16);
+      const height = 1 + bytes[27] + (bytes[28] << 8) + (bytes[29] << 16);
+      return parsedImageSize(width, height, "webp-vp8x");
+    }
+    if (asciiAt(bytes, 12, "VP8 ") && bytes.length >= 30 && bytes[23] === 0x9d && bytes[24] === 0x01 && bytes[25] === 0x2a) {
+      const width = (bytes[26] | (bytes[27] << 8)) & 0x3fff;
+      const height = (bytes[28] | (bytes[29] << 8)) & 0x3fff;
+      return parsedImageSize(width, height, "webp-vp8");
+    }
+    if (asciiAt(bytes, 12, "VP8L") && bytes.length >= 25 && bytes[20] === 0x2f) {
+      const width = 1 + bytes[21] + ((bytes[22] & 0x3f) << 8);
+      const height = 1 + (bytes[22] >> 6) + (bytes[23] << 2) + ((bytes[24] & 0x0f) << 10);
+      return parsedImageSize(width, height, "webp-vp8l");
+    }
+  }
+  if (bytes.length >= 26 && asciiAt(bytes, 0, "BM")) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return parsedImageSize(
+      Math.abs(view.getInt32(18, true)),
+      Math.abs(view.getInt32(22, true)),
+      "bmp",
+    );
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+    const startOfFrame = new Set([
+      0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7,
+      0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf,
+    ]);
+    const segmentsWithoutPayload = new Set([0x00, 0x01, 0xd8, 0xd9]);
+    for (let marker = 0xd0; marker <= 0xd7; marker += 1) {
+      segmentsWithoutPayload.add(marker);
+    }
+    let offset = 2;
+    const maxOffset = bytes.length - 1;
+    while (offset < maxOffset) {
+      if (bytes[offset] !== 0xff) {
+        offset += 1;
+        continue;
+      }
+      while (offset < maxOffset && bytes[offset] === 0xff) {
+        offset += 1;
+      }
+      if (offset >= maxOffset) break;
+
+      const markerCode = bytes[offset];
+      if (markerCode === 0xda) return null;
+      if (startOfFrame.has(markerCode)) {
+        if (offset + 7 >= bytes.length) return null;
+        const frameLength = (bytes[offset + 1] << 8) | bytes[offset + 2];
+        if (frameLength < 8 || offset + 1 + frameLength > bytes.length) return null;
+        const height = (bytes[offset + 4] << 8) | bytes[offset + 5];
+        const width = (bytes[offset + 6] << 8) | bytes[offset + 7];
+        return parsedImageSize(width, height, "jpeg");
+      }
+
+      if (segmentsWithoutPayload.has(markerCode)) {
+        offset += 1;
+        continue;
+      }
+
+      if (offset + 2 >= bytes.length) return null;
+      const segmentLength = (bytes[offset + 1] << 8) | bytes[offset + 2];
+      if (segmentLength < 2) return null;
+      const nextOffset = offset + 1 + segmentLength;
+      if (nextOffset > bytes.length) return null;
+      offset = nextOffset;
+    }
+  }
+  const tiff = parseTiffDimensions(bytes);
+  if (tiff) return tiff;
+  if (/avif|heic|heif/i.test(mimeType) || asciiAt(bytes, 4, "ftyp")) {
+    for (let offset = 4; offset + 16 <= bytes.length; offset += 1) {
+      if (!asciiAt(bytes, offset, "ispe")) continue;
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      const width = view.getUint32(offset + 8);
+      const height = view.getUint32(offset + 12);
+      const parsed = parsedImageSize(width, height, "isobmff-ispe");
+      if (parsed) return parsed;
+    }
+  }
+  return null;
+}
+
+async function probeImageDimensions(file) {
+  const bytes = new Uint8Array(
+    await file.slice(0, Math.min(file.size, MAX_IMAGE_HEADER_PROBE_BYTES)).arrayBuffer(),
+  );
+  return parseImageDimensions(bytes, file.type);
+}
+
 async function decodeImageFile(file) {
+  const probed = await probeImageDimensions(file).catch(() => null);
+  if (probed && probed.width * probed.height > MAX_INPUT_DECODED_PIXELS) {
+    throw new Error(`Decoded image is too large (maximum ${MAX_INPUT_DECODED_PIXELS.toLocaleString()} pixels).`);
+  }
+  const originalWidth = probed?.width || 0;
+  const originalHeight = probed?.height || 0;
+  const [desiredWidth, desiredHeight] = probed
+    ? resizedSize(originalWidth, originalHeight, INPUT_CACHE_MAX_SIDE, INPUT_CACHE_MAX_SIDE)
+    : [0, 0];
+  const needsBoundedDecode = Boolean(
+    probed && (desiredWidth !== originalWidth || desiredHeight !== originalHeight),
+  );
+
+  if (needsBoundedDecode && typeof ImageDecoder === "function") {
+    let decoder = null;
+    let frame = null;
+    try {
+      const type = file.type === "image/jpg" ? "image/jpeg" : file.type;
+      if (type && await ImageDecoder.isTypeSupported(type)) {
+        const data = await file.arrayBuffer();
+        decoder = new ImageDecoder({
+          type,
+          data,
+          desiredWidth,
+          desiredHeight,
+          preferAnimation: false,
+          transfer: [data],
+        });
+        const result = await decoder.decode({ frameIndex: 0, completeFramesOnly: true });
+        frame = result.image;
+        const width = frame.displayWidth || frame.codedWidth;
+        const height = frame.displayHeight || frame.codedHeight;
+        if (width > 0 && height > 0) {
+          return {
+            source: frame,
+            width,
+            height,
+            originalWidth,
+            originalHeight,
+            mode: width <= desiredWidth && height <= desiredHeight
+              ? "webcodecs-bounded"
+              : "webcodecs-best-effort",
+            close() {
+              frame?.close();
+              decoder?.close();
+              frame = null;
+              decoder = null;
+            },
+          };
+        }
+      }
+    } catch (error) {
+      log(`ImageDecoder bounded decode failed; using ImageBitmap: ${error.message}`);
+    }
+    frame?.close();
+    decoder?.close();
+  }
+
   if (typeof createImageBitmap === "function") {
     try {
-      return await createImageBitmap(file);
+      const bitmap = needsBoundedDecode
+        ? await createImageBitmap(file, {
+          resizeWidth: desiredWidth,
+          resizeHeight: desiredHeight,
+          resizeQuality: "high",
+        })
+        : await createImageBitmap(file);
+      return {
+        source: bitmap,
+        width: bitmap.width,
+        height: bitmap.height,
+        originalWidth: originalWidth || bitmap.width,
+        originalHeight: originalHeight || bitmap.height,
+        mode: needsBoundedDecode ? "imagebitmap-bounded" : "imagebitmap",
+        close: () => bitmap.close?.(),
+      };
     } catch (error) {
       log(`createImageBitmap decode failed; using Canvas image decode: ${error.message}`);
     }
@@ -3082,13 +4311,30 @@ async function decodeImageFile(file) {
   const url = URL.createObjectURL(file);
   try {
     const image = await loadImageElement(url);
+    if (image.naturalWidth * image.naturalHeight > MAX_INPUT_DECODED_PIXELS) {
+      throw new Error(`Decoded image is too large (maximum ${MAX_INPUT_DECODED_PIXELS.toLocaleString()} pixels).`);
+    }
+    const [width, height] = resizedSize(
+      image.naturalWidth,
+      image.naturalHeight,
+      INPUT_CACHE_MAX_SIDE,
+      INPUT_CACHE_MAX_SIDE,
+    );
     const canvas = document.createElement("canvas");
-    canvas.width = image.naturalWidth;
-    canvas.height = image.naturalHeight;
+    canvas.width = width;
+    canvas.height = height;
     const context = canvas.getContext("2d");
     if (!context) throw new Error("2D canvas is unavailable for image decode.");
-    context.drawImage(image, 0, 0);
-    return canvas;
+    context.drawImage(image, 0, 0, width, height);
+    return {
+      source: canvas,
+      width,
+      height,
+      originalWidth: image.naturalWidth,
+      originalHeight: image.naturalHeight,
+      mode: "html-image-canvas",
+      close() {},
+    };
   } finally {
     URL.revokeObjectURL(url);
   }
@@ -3274,7 +4520,24 @@ function zoomCanvasAt(clientX, clientY, deltaY) {
 
 function drawRgbToCanvas(rgb, width, height) {
   previewCtx.putImageData(rgbToImageData(rgb, width, height), 0, 0);
-  state.lastPreview = { rgb: new Float32Array(rgb), width, height };
+}
+
+function drawOriginalToCanvas() {
+  if (!state.image) return false;
+  const { width, height, sourceBitmap } = state.image;
+  if (els.previewCanvas.width !== width) els.previewCanvas.width = width;
+  if (els.previewCanvas.height !== height) els.previewCanvas.height = height;
+  previewCtx.clearRect(0, 0, width, height);
+  if (sourceBitmap) {
+    // Reuse the bounded source cache instead of converting the full Float32
+    // image back to ImageData on every Original/Splats tab switch.
+    previewCtx.imageSmoothingEnabled = true;
+    previewCtx.imageSmoothingQuality = "high";
+    previewCtx.drawImage(sourceBitmap, 0, 0, width, height);
+  } else {
+    drawRgbToCanvas(state.image.rgb, width, height);
+  }
+  return true;
 }
 
 function updatePreviewModeControls() {
@@ -3297,7 +4560,7 @@ function setPreviewMode(mode) {
   if (mode === "original") {
     if (!state.image) return false;
     state.previewMode = "original";
-    drawRgbToCanvas(state.image.rgb, state.image.width, state.image.height);
+    drawOriginalToCanvas();
     showCanvas("preview");
   } else if (mode === "splats") {
     if (!state.params) return false;
@@ -3328,32 +4591,64 @@ function rgbToImageData(rgb, width, height, alpha = null) {
   return imageData;
 }
 
+function resizeFloatImageBilinear(image, width, height) {
+  const sourceWidth = Math.max(1, Math.round(image.width));
+  const sourceHeight = Math.max(1, Math.round(image.height));
+  const targetWidth = Math.max(1, Math.round(width));
+  const targetHeight = Math.max(1, Math.round(height));
+  if (sourceWidth === targetWidth && sourceHeight === targetHeight) {
+    return {
+      width: targetWidth,
+      height: targetHeight,
+      rgb: image.rgb,
+      alpha: image.alpha || null,
+    };
+  }
+  const rgb = new Float32Array(targetWidth * targetHeight * 3);
+  const alpha = new Float32Array(targetWidth * targetHeight);
+  const scaleX = sourceWidth / targetWidth;
+  const scaleY = sourceHeight / targetHeight;
+  for (let y = 0; y < targetHeight; y += 1) {
+    const sourceY = Math.max(0, Math.min(sourceHeight - 1, (y + 0.5) * scaleY - 0.5));
+    const y0 = Math.floor(sourceY);
+    const y1 = Math.min(sourceHeight - 1, y0 + 1);
+    const fy = sourceY - y0;
+    for (let x = 0; x < targetWidth; x += 1) {
+      const sourceX = Math.max(0, Math.min(sourceWidth - 1, (x + 0.5) * scaleX - 0.5));
+      const x0 = Math.floor(sourceX);
+      const x1 = Math.min(sourceWidth - 1, x0 + 1);
+      const fx = sourceX - x0;
+      const p00 = y0 * sourceWidth + x0;
+      const p10 = y0 * sourceWidth + x1;
+      const p01 = y1 * sourceWidth + x0;
+      const p11 = y1 * sourceWidth + x1;
+      const target = y * targetWidth + x;
+      for (let channel = 0; channel < 3; channel += 1) {
+        const top =
+          image.rgb[p00 * 3 + channel] * (1 - fx) +
+          image.rgb[p10 * 3 + channel] * fx;
+        const bottom =
+          image.rgb[p01 * 3 + channel] * (1 - fx) +
+          image.rgb[p11 * 3 + channel] * fx;
+        rgb[target * 3 + channel] = top * (1 - fy) + bottom * fy;
+      }
+      const a00 = image.alpha?.[p00] ?? 1;
+      const a10 = image.alpha?.[p10] ?? 1;
+      const a01 = image.alpha?.[p01] ?? 1;
+      const a11 = image.alpha?.[p11] ?? 1;
+      alpha[target] =
+        (a00 * (1 - fx) + a10 * fx) * (1 - fy) +
+        (a01 * (1 - fx) + a11 * fx) * fy;
+    }
+  }
+  return { width: targetWidth, height: targetHeight, rgb, alpha };
+}
+
 function makeCoarseTrainingImage(image, maxSide) {
   const currentSide = Math.max(image.width, image.height);
   if (currentSide <= maxSide) return null;
   const [width, height] = resizedSize(image.width, image.height, maxSide);
-  const source = document.createElement("canvas");
-  source.width = image.width;
-  source.height = image.height;
-  source.getContext("2d").putImageData(rgbToImageData(image.rgb, image.width, image.height, image.alpha), 0, 0);
-
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(source, 0, 0, width, height);
-  const pixels = ctx.getImageData(0, 0, width, height).data;
-  const rgb = new Float32Array(width * height * 3);
-  const alpha = new Float32Array(width * height);
-  for (let i = 0, j = 0, p = 0; i < pixels.length; i += 4, j += 3, p += 1) {
-    rgb[j] = pixels[i] / 255;
-    rgb[j + 1] = pixels[i + 1] / 255;
-    rgb[j + 2] = pixels[i + 2] / 255;
-    alpha[p] = pixels[i + 3] / 255;
-  }
-  return { width, height, rgb, alpha };
+  return resizeFloatImageBilinear(image, width, height);
 }
 
 function curriculumCoarseMaxSide(fullSide, variants = phase33Variants()) {
@@ -3494,6 +4789,241 @@ function initialSplatShape(image, layout, index) {
     sy: Math.sqrt(Math.max(MIN_SPLAT_SCALE ** 2, 0.5 * (trace - delta))),
     theta: 0.5 * Math.atan2(2 * covarianceXY, covarianceX - covarianceY),
   };
+}
+
+function adaptiveBspImportanceGrid(image, count) {
+  const longSide = Math.max(1, image.width, image.height);
+  const targetLongSide = Math.min(
+    longSide,
+    Math.max(64, Math.min(384, Math.ceil(Math.sqrt(Math.max(1, count)) * 2))),
+  );
+  const width = Math.max(1, Math.round(image.width * targetLongSide / longSide));
+  const height = Math.max(1, Math.round(image.height * targetLongSide / longSide));
+  const luma = new Float32Array(width * height);
+  const color = new Float32Array(width * height * 3);
+  for (let y = 0; y < height; y += 1) {
+    const sourceY = Math.min(image.height - 1, Math.round((y + 0.5) * image.height / height - 0.5));
+    for (let x = 0; x < width; x += 1) {
+      const sourceX = Math.min(image.width - 1, Math.round((x + 0.5) * image.width / width - 0.5));
+      const source = (sourceY * image.width + sourceX) * 3;
+      const destination = (y * width + x) * 3;
+      const r = image.rgb[source];
+      const g = image.rgb[source + 1];
+      const b = image.rgb[source + 2];
+      color[destination] = r;
+      color[destination + 1] = g;
+      color[destination + 2] = b;
+      luma[y * width + x] = r * 0.299 + g * 0.587 + b * 0.114;
+    }
+  }
+  const importance = new Float32Array(width * height);
+  let detailMaximum = 1e-6;
+  for (let y = 0; y < height; y += 1) {
+    const ym = Math.max(0, y - 1);
+    const yp = Math.min(height - 1, y + 1);
+    for (let x = 0; x < width; x += 1) {
+      const xm = Math.max(0, x - 1);
+      const xp = Math.min(width - 1, x + 1);
+      const center = y * width + x;
+      const gx = 0.5 * (luma[y * width + xp] - luma[y * width + xm]);
+      const gy = 0.5 * (luma[yp * width + x] - luma[ym * width + x]);
+      const laplacian = Math.abs(
+        luma[y * width + xm] +
+        luma[y * width + xp] +
+        luma[ym * width + x] +
+        luma[yp * width + x] -
+        4 * luma[center],
+      );
+      let colorDifference = 0;
+      const colorCenter = center * 3;
+      for (const neighbor of [y * width + xm, y * width + xp, ym * width + x, yp * width + x]) {
+        const offset = neighbor * 3;
+        colorDifference += Math.hypot(
+          color[colorCenter] - color[offset],
+          color[colorCenter + 1] - color[offset + 1],
+          color[colorCenter + 2] - color[offset + 2],
+        );
+      }
+      const detail = 0.5 * Math.hypot(gx, gy) + 0.3 * laplacian + 0.05 * colorDifference;
+      importance[center] = detail;
+      detailMaximum = Math.max(detailMaximum, detail);
+    }
+  }
+  for (let i = 0; i < importance.length; i += 1) {
+    const normalized = Math.min(1, importance[i] / detailMaximum);
+    importance[i] = 0.12 + 0.88 * Math.sqrt(normalized);
+  }
+  return { width, height, importance };
+}
+
+function adaptiveBspIntegral(grid, valueAt) {
+  const stride = grid.width + 1;
+  const values = new Float64Array(stride * (grid.height + 1));
+  for (let y = 0; y < grid.height; y += 1) {
+    let row = 0;
+    for (let x = 0; x < grid.width; x += 1) {
+      row += valueAt(x, y, grid.importance[y * grid.width + x]);
+      values[(y + 1) * stride + x + 1] = values[y * stride + x + 1] + row;
+    }
+  }
+  return { values, stride };
+}
+
+function adaptiveBspSum(integral, x0, y0, x1, y1) {
+  const { values, stride } = integral;
+  return values[y1 * stride + x1] -
+    values[y0 * stride + x1] -
+    values[y1 * stride + x0] +
+    values[y0 * stride + x0];
+}
+
+function adaptiveBspRegions(image, count) {
+  const grid = adaptiveBspImportanceGrid(image, count);
+  const massIntegral = adaptiveBspIntegral(grid, (_x, _y, importance) => importance);
+  const xIntegral = adaptiveBspIntegral(grid, (x, _y, importance) => importance * (x + 0.5));
+  const yIntegral = adaptiveBspIntegral(grid, (_x, y, importance) => importance * (y + 0.5));
+  const x2Integral = adaptiveBspIntegral(grid, (x, _y, importance) => importance * (x + 0.5) ** 2);
+  const y2Integral = adaptiveBspIntegral(grid, (_x, y, importance) => importance * (y + 0.5) ** 2);
+  let serial = 0;
+  const describe = (x0, y0, x1, y1) => {
+    const mass = Math.max(1e-8, adaptiveBspSum(massIntegral, x0, y0, x1, y1));
+    const meanX = adaptiveBspSum(xIntegral, x0, y0, x1, y1) / mass;
+    const meanY = adaptiveBspSum(yIntegral, x0, y0, x1, y1) / mass;
+    const varianceX = Math.max(0, adaptiveBspSum(x2Integral, x0, y0, x1, y1) / mass - meanX ** 2);
+    const varianceY = Math.max(0, adaptiveBspSum(y2Integral, x0, y0, x1, y1) / mass - meanY ** 2);
+    const splittable = x1 - x0 > 1 || y1 - y0 > 1;
+    return {
+      x0, y0, x1, y1, mass, meanX, meanY, varianceX, varianceY,
+      serial: serial += 1,
+      priority: splittable ? mass * Math.sqrt((x1 - x0) * (y1 - y0)) : -Infinity,
+    };
+  };
+  const heap = [];
+  const push = (region) => {
+    heap.push(region);
+    let index = heap.length - 1;
+    while (index > 0) {
+      const parent = Math.floor((index - 1) / 2);
+      if (heap[parent].priority >= region.priority) break;
+      heap[index] = heap[parent];
+      index = parent;
+    }
+    heap[index] = region;
+  };
+  const pop = () => {
+    const root = heap[0];
+    const tail = heap.pop();
+    if (heap.length && tail) {
+      let index = 0;
+      while (true) {
+        const left = index * 2 + 1;
+        const right = left + 1;
+        if (left >= heap.length) break;
+        const child = right < heap.length && heap[right].priority > heap[left].priority ? right : left;
+        if (heap[child].priority <= tail.priority) break;
+        heap[index] = heap[child];
+        index = child;
+      }
+      heap[index] = tail;
+    }
+    return root;
+  };
+  push(describe(0, 0, grid.width, grid.height));
+  while (heap.length < count) {
+    const region = pop();
+    if (!region || !Number.isFinite(region.priority)) {
+      if (region) push(region);
+      break;
+    }
+    const width = region.x1 - region.x0;
+    const height = region.y1 - region.y0;
+    const splitX = width > 1 && (height <= 1 || region.varianceX / Math.max(1, width ** 2) >= region.varianceY / Math.max(1, height ** 2));
+    const start = splitX ? region.x0 : region.y0;
+    const end = splitX ? region.x1 : region.y1;
+    const targetMass = region.mass * 0.5;
+    let cut = start + 1;
+    let bestDifference = Infinity;
+    for (let candidate = start + 1; candidate < end; candidate += 1) {
+      const partialMass = splitX
+        ? adaptiveBspSum(massIntegral, region.x0, region.y0, candidate, region.y1)
+        : adaptiveBspSum(massIntegral, region.x0, region.y0, region.x1, candidate);
+      const difference = Math.abs(partialMass - targetMass);
+      if (difference < bestDifference) {
+        bestDifference = difference;
+        cut = candidate;
+      }
+    }
+    if (splitX) {
+      push(describe(region.x0, region.y0, cut, region.y1));
+      push(describe(cut, region.y0, region.x1, region.y1));
+    } else {
+      push(describe(region.x0, region.y0, region.x1, cut));
+      push(describe(region.x0, cut, region.x1, region.y1));
+    }
+  }
+  const regions = heap.sort((a, b) => a.meanY - b.meanY || a.meanX - b.meanX || a.serial - b.serial);
+  return { grid, regions };
+}
+
+function applyAdaptiveBspPaintInitialization(image, params, kernelShape) {
+  const { grid, regions } = adaptiveBspRegions(image, params.count);
+  const extent = kernelShape === "rectangle" ? RECTANGLE_KERNEL_EXTENT : LAYERED_OPAQUE_BRUSH_KERNEL_EXTENT;
+  let regionAreaTotal = 0;
+  for (let i = 0; i < params.count; i += 1) {
+    const region = regions[i % Math.max(1, regions.length)] || {
+      x0: 0, y0: 0, x1: grid.width, y1: grid.height,
+      meanX: grid.width * 0.5, meanY: grid.height * 0.5,
+    };
+    const x = -1 + 2 * region.meanX / grid.width;
+    const y = -1 + 2 * region.meanY / grid.height;
+    const regionWidth = 2 * (region.x1 - region.x0) / grid.width;
+    const regionHeight = 2 * (region.y1 - region.y0) / grid.height;
+    const structure = strokeStructureAt(image, x, y, params.theta[i]);
+    const theta = kernelShape === "rectangle"
+      ? rectangleDirectedTaperTheta(
+          image,
+          x,
+          y,
+          structure.theta,
+          params.rectangleEdgeDirectedTaper &&
+            params.rectangleTopRatio + 0.000001 < params.rectangleTopRatioMax,
+        )
+      : structure.theta;
+    const areaScale = Math.sqrt(Math.max(MIN_SPLAT_SCALE ** 2, regionWidth * regionHeight)) * 0.62 / extent;
+    const anisotropy = 1.25 + 3.25 * structure.coherence;
+    const stretch = Math.sqrt(anisotropy);
+    const constrained = constrainSplat(
+      x,
+      y,
+      areaScale * stretch,
+      areaScale / stretch,
+      theta,
+      params.boundarySigma,
+      Math.max(4, anisotropy),
+    );
+    params.xy[i * 2] = constrained.x;
+    params.xy[i * 2 + 1] = constrained.y;
+    params.scale[i * 2] = constrained.sx;
+    params.scale[i * 2 + 1] = constrained.sy;
+    params.theta[i] = theta;
+    if (kernelShape === "rectangle" && params.rectangleStructureAwareRatio) {
+      params.detailTags[i] =
+        structure.coherence >= RECTANGLE_STRUCTURE_MIN_COHERENCE &&
+        structure.energy >= RECTANGLE_STRUCTURE_MIN_ENERGY
+          ? 2
+          : 1;
+    }
+    regionAreaTotal += regionWidth * regionHeight;
+  }
+  params.initializationScheme = "image-importance-bsp";
+  params.initializationStats = {
+    map_width: grid.width,
+    map_height: grid.height,
+    unique_region_count: regions.length,
+    splat_count: params.count,
+    mean_region_area_ndc: regionAreaTotal / Math.max(1, regions.length),
+  };
+  return params;
 }
 
 function initialOrientationStats(params, image) {
@@ -3674,6 +5204,39 @@ function constrainSplat(
 function snapshotParams(params) {
   const anisotropyLimits = anisotropyLimitsForParams(params);
   return {
+    kernelShape: normalizedKernelShape(params.kernelShape),
+    rectangleTopRatio: clampNumber(
+      params.rectangleTopRatio,
+      MIN_RECTANGLE_TOP_RATIO,
+      MAX_RECTANGLE_TOP_RATIO,
+      DEFAULT_RECTANGLE_TOP_RATIO,
+    ),
+    rectangleTopRatioMax: clampNumber(
+      params.rectangleTopRatioMax,
+      params.rectangleTopRatio,
+      MAX_RECTANGLE_TOP_RATIO,
+      DEFAULT_RECTANGLE_TOP_RATIO_MAX,
+    ),
+    rectanglePreserveArea:
+      params.rectanglePreserveArea ?? DEFAULT_RECTANGLE_PRESERVE_AREA,
+    rectangleEdgeDirectedTaper:
+      params.rectangleEdgeDirectedTaper ?? DEFAULT_RECTANGLE_EDGE_DIRECTED_TAPER,
+    rectangleStructureAwareRatio:
+      params.rectangleStructureAwareRatio ?? DEFAULT_RECTANGLE_STRUCTURE_AWARE_RATIO,
+    rectangleAsymmetricSoftness:
+      params.rectangleAsymmetricSoftness ?? DEFAULT_RECTANGLE_ASYMMETRIC_SOFTNESS,
+    opaqueLayered: Boolean(params.opaqueLayered),
+    minimumOpacityEnabled: Boolean(params.minimumOpacityEnabled),
+    fixedOpacity: clampNumber(
+      params.fixedOpacity,
+      MIN_OPAQUE_PAINT_OPACITY,
+      MAX_OPAQUE_PAINT_OPACITY,
+      LAYERED_OPAQUE_BRUSH_OPACITY,
+    ),
+    illustrativeOilVersion: Math.max(0, Math.round(Number(params.illustrativeOilVersion) || 0)),
+    illustrativeOilFamilyStats: params.illustrativeOilFamilyStats
+      ? structuredClone(params.illustrativeOilFamilyStats)
+      : null,
     count: params.count,
     xy: new Float32Array(params.xy),
     scale: new Float32Array(params.scale),
@@ -3687,6 +5250,31 @@ function snapshotParams(params) {
     detailTags: params.detailTags ? new Float32Array(params.detailTags) : new Float32Array(params.count).fill(1),
     boundarySigma: Number.isFinite(params.boundarySigma) ? params.boundarySigma : selectedBoundarySigma(),
     layerOrderEnabled: Boolean(params.layerOrderEnabled),
+    layerAwareAccumulationEnabled: Boolean(params.layerAwareAccumulationEnabled),
+    pruneLowContributionDeepSplatsEnabled: Boolean(params.pruneLowContributionDeepSplatsEnabled),
+    deepPruneInterval: Math.max(
+      MIN_DEEP_PRUNE_INTERVAL,
+      Math.min(MAX_DEEP_PRUNE_INTERVAL, Math.round(params.deepPruneInterval || DEFAULT_DEEP_PRUNE_INTERVAL)),
+    ),
+    hiddenRgbRecolorEnabled: Boolean(params.hiddenRgbRecolorEnabled),
+    hiddenRgbRecolorInterval: Math.max(
+      MIN_HIDDEN_RGB_RECOLOR_INTERVAL,
+      Math.min(
+        MAX_HIDDEN_RGB_RECOLOR_INTERVAL,
+        Math.round(params.hiddenRgbRecolorInterval || DEFAULT_HIDDEN_RGB_RECOLOR_INTERVAL),
+      ),
+    ),
+    hiddenRgbRecolorFraction: Math.max(
+      MIN_HIDDEN_RGB_RECOLOR_FRACTION,
+      Math.min(MAX_HIDDEN_RGB_RECOLOR_FRACTION, params.hiddenRgbRecolorFraction || DEFAULT_HIDDEN_RGB_RECOLOR_FRACTION),
+    ),
+    hiddenRgbRecolorStrength: Math.max(
+      0.01,
+      Math.min(1, params.hiddenRgbRecolorStrength || DEFAULT_HIDDEN_RGB_RECOLOR_STRENGTH),
+    ),
+    discreteLayersEnabled: Boolean(params.discreteLayersEnabled),
+    discreteLayerCount: Math.max(MIN_DISCRETE_LAYER_COUNT, Math.min(MAX_DISCRETE_LAYER_COUNT, Math.round(params.discreteLayerCount || DEFAULT_DISCRETE_LAYER_COUNT))),
+    discreteLayerMoveRadius: Math.max(0, Math.round(params.discreteLayerMoveRadius ?? DEFAULT_DISCRETE_LAYER_MOVE_RADIUS)),
     maxAnisotropy: anisotropyLimits.detail,
     surfaceAnisotropy: anisotropyLimits.surface,
     rows: params.rows,
@@ -3854,6 +5442,7 @@ function distributionStats(values, binCount = 8, fixedRange = null) {
 function splatShapeStats(params, image) {
   const count = params?.count || 0;
   if (!count) return null;
+  const sampling = finalDiagnosticSampling(count);
   const maxSide = Math.max(image?.width || 1, image?.height || 1);
   const pixelScale = maxSide * 0.5 * RENDER_SIGMA;
   const values = [];
@@ -3900,14 +5489,16 @@ function splatShapeStats(params, image) {
     const boundaryAnchored =
       Math.abs(params.xy[i * 2]) >= 1 - edgeBandX ||
       Math.abs(params.xy[i * 2 + 1]) >= 1 - edgeBandY;
-    opacityValues.push(opacity);
-    sxValues.push(sx);
-    syValues.push(sy);
-    radiusValues.push(radiusPx);
-    anisotropyValues.push(ratio);
-    rotationValues.push(rotation);
+    if (i % sampling.stride === 0) {
+      opacityValues.push(opacity);
+      sxValues.push(sx);
+      syValues.push(sy);
+      radiusValues.push(radiusPx);
+      anisotropyValues.push(ratio);
+      rotationValues.push(rotation);
+      values.push(scale);
+    }
     if (boundaryAnchored) boundarySplatCount += 1;
-    values.push(scale);
     minScale = Math.min(minScale, scale);
     maxScale = Math.max(maxScale, scale);
     sumScale += scale;
@@ -3929,6 +5520,8 @@ function splatShapeStats(params, image) {
   const medianScale = values[Math.floor(values.length / 2)] || 0;
   return {
     count,
+    inspection_sample_count: values.length,
+    inspection_sample_stride: sampling.stride,
     min_scale: minScale,
     median_scale: medianScale,
     mean_scale: sumScale / count,
@@ -3984,7 +5577,7 @@ function renderSplatInspector() {
   ]) {
     control.disabled = disabled || !effectsEnabled;
   }
-  for (const control of [els.splatShapeGaussian, els.splatShapeRectangle]) {
+  for (const control of [els.splatShapeGaussian, els.splatShapeRectangle, els.splatShapeOpaqueBrush]) {
     control.disabled = disabled || !effectsEnabled;
   }
   els.splatAlphaBackground.disabled = disabled;
@@ -3998,7 +5591,7 @@ function renderSplatInspector() {
   els.splatAdjustStatus.textContent = !effectsEnabled
     ? "Effects off · trained Gaussian preview."
     : state.adjustingSplats
-      ? "Updating the GPU preview and rechecking coverage..."
+      ? "Updating the preview..."
       : adjustment
         ? `Live preview · revision ${state.metrics.params_revision}`
         : "Move a control to preview the result.";
@@ -4021,6 +5614,7 @@ function updateSplatShapeControls() {
   for (const [button, shape] of [
     [els.splatShapeGaussian, "gaussian"],
     [els.splatShapeRectangle, "rectangle"],
+    [els.splatShapeOpaqueBrush, "opaque-brush"],
   ]) {
     const active = state.splatPreviewShape === shape;
     button.classList.toggle("active", active);
@@ -4029,7 +5623,9 @@ function updateSplatShapeControls() {
 }
 
 function setSplatPreviewShape(shape) {
-  state.splatPreviewShape = shape === "rectangle" ? "rectangle" : "gaussian";
+  state.splatPreviewShape = shape === "opaque-brush"
+    ? "opaque-brush"
+    : normalizedKernelShape(shape);
   updateSplatShapeControls();
   refreshOutsidePreview().catch((error) => log(error.message));
   publishState();
@@ -4041,7 +5637,8 @@ function resetSplatAdjustmentControls() {
   els.splatScale.value = "1";
   els.splatAspectRatio.value = "1";
   els.splatSmallFirstOrder.checked = false;
-  state.splatPreviewShape = "gaussian";
+  const trainedShape = trainedSplatShape();
+  state.splatPreviewShape = trainedShape === "box" ? "rectangle" : trainedShape;
   updateSplatAdjustmentLabels();
   updateSplatShapeControls();
 }
@@ -4049,10 +5646,14 @@ function resetSplatAdjustmentControls() {
 function clearSplatAdjustmentBaseline() {
   window.clearTimeout(state.splatAdjustmentValidationTimer);
   if (state.splatAdjustmentFrame) window.cancelAnimationFrame(state.splatAdjustmentFrame);
+  state.splatAdjustmentEpoch += 1;
   state.splatBaseline = null;
   state.adjustingSplats = false;
   state.splatAdjustmentVersion = 0;
   state.splatAdjustmentFrame = 0;
+  state.splatAdjustmentRenderedVersion = 0;
+  state.splatAdjustmentValidationVersion = 0;
+  state.splatAdjustmentStats = { requests: 0, renders: 0, staleDropped: 0, yields: 0, lastMs: 0 };
   els.splatParameterEffects.checked = true;
   els.outsidePreviewToggle.checked = false;
   resetSplatAdjustmentControls();
@@ -4062,11 +5663,17 @@ function clearSplatAdjustmentBaseline() {
 
 function captureSplatAdjustmentBaseline() {
   if (!state.params || !state.metrics?.cpu_mirror_current) return;
-  state.splatBaseline = snapshotParams(state.params);
+  state.splatAdjustmentEpoch += 1;
+  // Final readback already owns an immutable CPU mirror. Live adjustments are
+  // shader uniforms, so a second full parameter clone is unnecessary.
+  state.splatBaseline = state.params;
   state.metrics.params_revision = 0;
   state.metrics.coverage_revision = 0;
   state.metrics.post_train_adjustments = null;
   state.splatAdjustmentVersion = 0;
+  state.splatAdjustmentRenderedVersion = 0;
+  state.splatAdjustmentValidationVersion = 0;
+  state.splatAdjustmentStats = { requests: 0, renders: 0, staleDropped: 0, yields: 0, lastMs: 0 };
   els.splatParameterEffects.checked = true;
   resetSplatAdjustmentControls();
   renderSplatInspector();
@@ -4080,15 +5687,25 @@ function scaleSplatLocalAspectRatio(sx, sy, aspectRatio) {
   };
 }
 
-function adjustedParamsFromBaseline() {
+async function adjustedParamsFromBaseline(version, epoch) {
   const baseline = state.splatBaseline;
   if (!baseline) throw new Error("Finish training before adjusting splats.");
-  const effectsEnabled = Boolean(els.splatParameterEffects?.checked);
-  const opacityMultiplier = effectsEnabled ? clampNumber(els.splatOpacity.value, 0, 10, 1) : 1;
-  const splatScaleMultiplier = effectsEnabled ? clampNumber(els.splatScale.value, 0, 5, 1) : 1;
-  const localAspectRatio = effectsEnabled ? clampNumber(els.splatAspectRatio.value, 0.1, 10, 1) : 1;
+  const values = currentSplatAdjustmentValues();
+  const { opacityMultiplier, splatScaleMultiplier, localAspectRatio } = values;
+  if (opacityMultiplier === 1 && splatScaleMultiplier === 1 && localAspectRatio === 1) {
+    return { params: baseline, values };
+  }
   const params = snapshotParams(baseline);
   for (let i = 0; i < params.count; i += 1) {
+    if (i > 0 && i % 8192 === 0) {
+      state.splatAdjustmentStats.yields += 1;
+      await nextFrame();
+      if (
+        epoch !== state.splatAdjustmentEpoch ||
+        baseline !== state.splatBaseline ||
+        version !== state.splatAdjustmentVersion
+      ) return null;
+    }
     const localScale = scaleSplatLocalAspectRatio(
       baseline.scale[i * 2] * splatScaleMultiplier,
       baseline.scale[i * 2 + 1] * splatScaleMultiplier,
@@ -4113,25 +5730,68 @@ function adjustedParamsFromBaseline() {
       : Math.min(0.999999, Math.max(1e-6, baseline.opacity[i] * opacityMultiplier));
   }
   assertFiniteParams(params, "post-training-adjustment");
+  return { params, values };
+}
+
+function captureSplatAdjustmentSnapshot() {
+  const baseline = state.splatBaseline;
   return {
-    params,
-    values: {
-      enabled: effectsEnabled,
-      opacityMultiplier,
-      kernelFalloff: effectsEnabled ? clampNumber(els.splatKernelFalloff.value, 0, 2, 1) : 1,
-      splatScaleMultiplier,
-      localAspectRatio,
-    },
+    baseline,
+    sourceParams: baseline || state.params,
+    epoch: state.splatAdjustmentEpoch,
+    version: state.splatAdjustmentVersion,
+  };
+}
+
+function splatAdjustmentSnapshotIsCurrent(snapshot) {
+  return Boolean(
+    snapshot &&
+    snapshot.epoch === state.splatAdjustmentEpoch &&
+    snapshot.version === state.splatAdjustmentVersion &&
+    snapshot.baseline === state.splatBaseline &&
+    snapshot.sourceParams === (state.splatBaseline || state.params),
+  );
+}
+
+async function materializeCurrentSplatAdjustmentSnapshot() {
+  const snapshot = captureSplatAdjustmentSnapshot();
+  if (!snapshot.sourceParams) return null;
+  const materialized = snapshot.baseline
+    ? await adjustedParamsFromBaseline(snapshot.version, snapshot.epoch)
+    : { params: snapshot.sourceParams };
+  if (!materialized?.params || !splatAdjustmentSnapshotIsCurrent(snapshot)) return null;
+  // Keep this detached from the optimizer and baseline. It is an ephemeral
+  // export/viewer payload, not a new trained parameter state.
+  return { ...materialized, snapshot };
+}
+
+function currentSplatAdjustmentValues() {
+  const enabled = Boolean(els.splatParameterEffects?.checked);
+  return {
+    enabled,
+    opacityMultiplier: enabled ? clampNumber(els.splatOpacity.value, 0, 10, 1) : 1,
+    kernelFalloff: enabled ? clampNumber(els.splatKernelFalloff.value, 0, 2, 1) : 1,
+    splatScaleMultiplier: enabled ? clampNumber(els.splatScale.value, 0, 5, 1) : 1,
+    localAspectRatio: enabled ? clampNumber(els.splatAspectRatio.value, 0.1, 10, 1) : 1,
   };
 }
 
 function splatAlphaRenderOptions() {
   const effectsEnabled = Boolean(els.splatParameterEffects?.checked);
+  const trainedShape = trainedSplatShape();
+  const adjustments = currentSplatAdjustmentValues();
   return {
-    alphaBackground: hexColorToRgb(els.splatAlphaBackground?.value, [0, 0, 0]),
+    alphaBackground: hexColorToRgb(els.splatAlphaBackground?.value, [120 / 255, 120 / 255, 120 / 255]),
     splatSmallFirstOrder: effectsEnabled && Boolean(els.splatSmallFirstOrder?.checked),
-    kernelFalloff: effectsEnabled ? clampNumber(els.splatKernelFalloff?.value, 0, 2, 1) : 1,
-    splatShape: effectsEnabled ? state.splatPreviewShape : "gaussian",
+    kernelFalloff: adjustments.kernelFalloff,
+    opacityMultiplier: adjustments.opacityMultiplier,
+    splatScaleMultiplier: adjustments.splatScaleMultiplier,
+    localAspectRatio: adjustments.localAspectRatio,
+    splatShape: effectsEnabled
+      ? state.splatPreviewShape === "rectangle" && trainedShape === "box"
+        ? "box"
+        : state.splatPreviewShape
+      : trainedShape,
   };
 }
 
@@ -4142,34 +5802,72 @@ function lockAdjustedExport() {
   updateExportPanel();
 }
 
-async function renderLiveSplatAdjustments(version) {
-  if (!state.splatBaseline || !state.image || !state.metrics || state.running || version !== state.splatAdjustmentVersion) return;
-  const adjusted = adjustedParamsFromBaseline();
-  state.params = adjusted.params;
+async function renderLiveSplatAdjustments(version, epoch) {
+  if (
+    epoch !== state.splatAdjustmentEpoch ||
+    !state.splatBaseline ||
+    !state.image ||
+    !state.metrics ||
+    state.running ||
+    version !== state.splatAdjustmentVersion
+  ) return;
+  const startedAt = performance.now();
+  const values = currentSplatAdjustmentValues();
+  if (epoch !== state.splatAdjustmentEpoch || version !== state.splatAdjustmentVersion) {
+    state.splatAdjustmentStats.staleDropped += 1;
+    return;
+  }
+  // Live adjustments are render uniforms over the immutable trained buffers.
+  // Materialize modified CPU arrays only for formats that require parameters.
+  state.params = state.splatBaseline;
   state.metrics.params_revision = (state.metrics.params_revision ?? 0) + 1;
-  state.metrics.post_train_adjustments = adjusted.values;
+  state.metrics.post_train_adjustments = values;
   lockAdjustedExport();
   state.previewMode = "splats";
   updatePreviewModeControls();
   await refreshOutsidePreview();
-  if (version !== state.splatAdjustmentVersion) return;
+  if (
+    epoch !== state.splatAdjustmentEpoch ||
+    version !== state.splatAdjustmentVersion
+  ) return;
+  state.splatAdjustmentRenderedVersion = version;
+  state.splatAdjustmentStats.renders += 1;
+  state.splatAdjustmentStats.lastMs = performance.now() - startedAt;
+  state.metrics.splat_adjustment_scheduler = { ...state.splatAdjustmentStats };
   renderSplatInspector();
   publishState();
 }
 
-async function validateLiveSplatAdjustments(version) {
-  if (!state.splatBaseline || !state.image || !state.metrics || state.running || version !== state.splatAdjustmentVersion) return;
+async function validateLiveSplatAdjustments(version, epoch) {
+  if (
+    epoch !== state.splatAdjustmentEpoch ||
+    !state.splatBaseline ||
+    !state.image ||
+    !state.metrics ||
+    state.running ||
+    version !== state.splatAdjustmentVersion
+  ) return;
   state.adjustingSplats = true;
   renderSplatInspector();
   try {
-    await state.webgpu.renderer.uploadTrainState(state.image, state.params, state.params.count);
-    await updatePreview(state.metrics.steps_done, true, { present: false });
-    if (version !== state.splatAdjustmentVersion) return;
-    state.metrics.post_adjustment_overlap_diagnostics = await state.webgpu.renderer.computeOverlapDiagnostics(state.image, state.params);
-    state.metrics.post_adjustment_overlap_revision = state.metrics.params_revision;
-    state.metrics.coverage_revision = state.metrics.params_revision;
+    // Splat controls are display/export adjustments. Re-uploading a complete
+    // optimizer state here caused large allocations to race tab-driven preview
+    // renders after training buffers had already been released. The live
+    // preview above is the validation surface; training metrics stay unchanged.
+    await nextFrame();
+    if (
+      epoch !== state.splatAdjustmentEpoch ||
+      version !== state.splatAdjustmentVersion ||
+      state.running
+    ) return;
+    state.metrics.post_adjustment_overlap_diagnostics = null;
+    state.metrics.post_adjustment_overlap_revision = null;
+    // These controls are display/export uniforms over the immutable trained
+    // parameters. Training coverage and quality stay valid; PNG export runs
+    // its own RGBA round-trip check for the adjusted display surface.
+    state.metrics.coverage_revision = state.metrics.params_revision ?? 0;
     updateDownloads(!state.metrics?.safety_stop);
-    state.exportMessage = "Ready to export.";
+    state.exportMessage = "Preview ready; training quality and coverage metrics are unchanged.";
     updateExportPanel();
   } catch (error) {
     updateDownloads(false);
@@ -4177,11 +5875,50 @@ async function validateLiveSplatAdjustments(version) {
     updateExportPanel();
     log(state.exportMessage);
   } finally {
-    state.webgpu.renderer?.disposeTrainState();
     state.adjustingSplats = false;
     renderSplatInspector();
     publishState();
-    await refreshOutsidePreview();
+  }
+}
+
+async function processSplatAdjustmentQueue() {
+  if (state.splatAdjustmentProcessing) return;
+  state.splatAdjustmentProcessing = true;
+  try {
+    while (state.splatBaseline && state.image && state.metrics && !state.running) {
+      const epoch = state.splatAdjustmentEpoch;
+      const version = state.splatAdjustmentVersion;
+      if (state.splatAdjustmentRenderedVersion !== version) {
+        await renderLiveSplatAdjustments(version, epoch);
+        if (
+          epoch !== state.splatAdjustmentEpoch ||
+          version !== state.splatAdjustmentVersion
+        ) continue;
+      }
+      if (state.splatAdjustmentValidationVersion === version) {
+        state.splatAdjustmentValidationVersion = 0;
+        await validateLiveSplatAdjustments(version, epoch);
+        if (
+          epoch !== state.splatAdjustmentEpoch ||
+          version !== state.splatAdjustmentVersion
+        ) continue;
+      }
+      break;
+    }
+  } catch (error) {
+    state.exportMessage = `Adjustment failed: ${error.message}`;
+    updateExportPanel();
+    log(state.exportMessage);
+  } finally {
+    state.splatAdjustmentProcessing = false;
+    if (
+      state.splatBaseline &&
+      !state.running &&
+      (state.splatAdjustmentRenderedVersion !== state.splatAdjustmentVersion ||
+        state.splatAdjustmentValidationVersion === state.splatAdjustmentVersion)
+    ) {
+      queueMicrotask(() => processSplatAdjustmentQueue());
+    }
   }
 }
 
@@ -4190,25 +5927,24 @@ function queueSplatAdjustments({ immediate = false } = {}) {
   if (!state.splatBaseline || !state.image || !state.metrics || state.running) return;
   const version = state.splatAdjustmentVersion + 1;
   state.splatAdjustmentVersion = version;
+  state.splatAdjustmentStats.requests += 1;
   window.clearTimeout(state.splatAdjustmentValidationTimer);
   const enqueuePreview = () => {
     state.splatAdjustmentFrame = 0;
-    state.splatAdjustmentChain = state.splatAdjustmentChain
-      .catch(() => {})
-      .then(() => renderLiveSplatAdjustments(state.splatAdjustmentVersion))
-      .catch((error) => {
-        state.exportMessage = `Adjustment failed: ${error.message}`;
-        updateExportPanel();
-        log(state.exportMessage);
-      });
+    processSplatAdjustmentQueue();
   };
-  if (immediate) enqueuePreview();
-  else if (!state.splatAdjustmentFrame) state.splatAdjustmentFrame = window.requestAnimationFrame(enqueuePreview);
+  if (immediate) {
+    if (state.splatAdjustmentFrame) window.cancelAnimationFrame(state.splatAdjustmentFrame);
+    state.splatAdjustmentFrame = 0;
+    enqueuePreview();
+  } else if (!state.splatAdjustmentFrame) {
+    state.splatAdjustmentFrame = window.requestAnimationFrame(enqueuePreview);
+  }
   state.splatAdjustmentValidationTimer = window.setTimeout(() => {
-    state.splatAdjustmentChain = state.splatAdjustmentChain
-      .catch(() => {})
-      .then(() => validateLiveSplatAdjustments(version));
-  }, 240);
+    if (version !== state.splatAdjustmentVersion) return;
+    state.splatAdjustmentValidationVersion = version;
+    processSplatAdjustmentQueue();
+  }, immediate ? 0 : 240);
 }
 
 function resetSplatAdjustments() {
@@ -4243,13 +5979,283 @@ function initGaussians(image, count) {
     theta[i] = shape.theta;
   }
   return {
+    kernelShape: "gaussian",
     xy, scale, rgb, opacity, theta, depthOrder, virtualDepth, detailTags, count,
     rows: layout.rows, cols: layout.cols, bg,
     boundarySigma,
     layerOrderEnabled: Boolean(els.trainLayerOrder?.checked),
+    discreteLayersEnabled: discreteLayerSettings().enabled,
+    discreteLayerCount: discreteLayerSettings().count,
     virtualDepthEnabled: false,
     virtualDepthThickness: DEFAULT_VIRTUAL_DEPTH_THICKNESS,
   };
+}
+
+function initRectangles(image, count) {
+  return initOpaqueLayeredPaint(image, count, "rectangle");
+}
+
+function strokeTensorAt(image, x, y, radius = 1) {
+  const sampleRadius = Math.max(1, Math.round(radius));
+  const dx = 2 * sampleRadius / Math.max(1, image.width - 1);
+  const dy = 2 * sampleRadius / Math.max(1, image.height - 1);
+  const sample = new Float32Array(3);
+  const lumaAt = (px, py) => {
+    sampleImageRgbBilinear(image, px, py, sample);
+    return sample[0] * 0.299 + sample[1] * 0.587 + sample[2] * 0.114;
+  };
+  let jxx = 0;
+  let jxy = 0;
+  let jyy = 0;
+  const derivativeScale = 0.5 / sampleRadius;
+  for (let oy = -1; oy <= 1; oy += 1) {
+    for (let ox = -1; ox <= 1; ox += 1) {
+      const px = x + ox * dx;
+      const py = y + oy * dy;
+      const gx = derivativeScale * (lumaAt(px + dx, py) - lumaAt(px - dx, py));
+      const gy = derivativeScale * (lumaAt(px, py + dy) - lumaAt(px, py - dy));
+      jxx += gx * gx;
+      jxy += gx * gy;
+      jyy += gy * gy;
+    }
+  }
+  return { jxx: jxx / 9, jxy: jxy / 9, jyy: jyy / 9 };
+}
+
+function strokeStructureFromTensor(tensor, image, fallbackTheta = 0) {
+  const { jxx, jxy, jyy } = tensor;
+  const dx = 2 / Math.max(1, image.width - 1);
+  const dy = 2 / Math.max(1, image.height - 1);
+  const trace = jxx + jyy;
+  if (!Number.isFinite(trace) || trace < 1e-10) {
+    return { theta: fallbackTheta, coherence: 0, energy: 0 };
+  }
+  const separation = Math.hypot(jxx - jyy, 2 * jxy);
+  const normalPixelTheta = 0.5 * Math.atan2(2 * jxy, jxx - jyy);
+  const tangentPixelX = -Math.sin(normalPixelTheta);
+  const tangentPixelY = Math.cos(normalPixelTheta);
+  return {
+    theta: Math.atan2(tangentPixelY * dy, tangentPixelX * dx),
+    coherence: Math.max(0, Math.min(1, separation / Math.max(trace, 1e-10))),
+    energy: trace,
+  };
+}
+
+function strokeStructureAt(image, x, y, fallbackTheta = 0) {
+  return strokeStructureFromTensor(strokeTensorAt(image, x, y, 1), image, fallbackTheta);
+}
+
+function rectangleDirectedTaperTheta(image, x, y, theta, enabled = true) {
+  if (!enabled) return theta;
+  const normalX = -Math.sin(theta);
+  const normalY = Math.cos(theta);
+  const offset = 4 / Math.max(1, Math.max(image.width, image.height) - 1);
+  const positive = strokeStructureAt(
+    image,
+    x + normalX * offset,
+    y + normalY * offset,
+    theta,
+  ).energy;
+  const negative = strokeStructureAt(
+    image,
+    x - normalX * offset,
+    y - normalY * offset,
+    theta,
+  ).energy;
+  // Local -Y is the narrow edge. A pi flip preserves the axial direction
+  // while putting that narrow edge on the stronger-detail side.
+  return positive > negative + 1e-10 ? theta + Math.PI : theta;
+}
+
+function oilStrokeStructureAt(image, x, y, fallbackTheta = 0) {
+  const fine = strokeTensorAt(image, x, y, 1);
+  const medium = strokeTensorAt(image, x, y, 3);
+  const coarse = strokeTensorAt(image, x, y, 7);
+  return strokeStructureFromTensor({
+    jxx: fine.jxx * 0.55 + medium.jxx * 0.30 + coarse.jxx * 0.15,
+    jxy: fine.jxy * 0.55 + medium.jxy * 0.30 + coarse.jxy * 0.15,
+    jyy: fine.jyy * 0.55 + medium.jyy * 0.30 + coarse.jyy * 0.15,
+  }, image, fallbackTheta);
+}
+
+function blendAxialAngle(from, to, amount) {
+  const t = Math.max(0, Math.min(1, amount));
+  const x = (1 - t) * Math.cos(2 * from) + t * Math.cos(2 * to);
+  const y = (1 - t) * Math.sin(2 * from) + t * Math.sin(2 * to);
+  return 0.5 * Math.atan2(y, x);
+}
+
+function oilStrokeHierarchy(structure, fallbackTheta) {
+  const detail = Math.max(0, Math.min(1, Math.sqrt(Math.max(0, structure.energy) / 0.0025)));
+  const directionWeight = Math.max(0, Math.min(1, (structure.coherence - 0.08) / 0.37));
+  return {
+    detail,
+    scaleMultiplier: 1.65 + (0.62 - 1.65) * detail,
+    anisotropy: 1.45 + 5.55 * structure.coherence * (0.70 + 0.30 * detail),
+    theta: blendAxialAngle(fallbackTheta, structure.theta, directionWeight * directionWeight * (3 - 2 * directionWeight)),
+  };
+}
+
+function illustrativeOilFamily(detail, anisotropy) {
+  if (detail >= ILLUSTRATIVE_OIL_DETAIL_THRESHOLD) return 2;
+  return anisotropy >= ILLUSTRATIVE_OIL_RIBBON_ANISOTROPY ? 1 : 0;
+}
+
+function gaussianBlurScalar(values, width, height, sigma) {
+  const boundedSigma = Math.max(0.6, Math.min(4, Number(sigma) || 1));
+  const radius = Math.max(1, Math.min(10, Math.ceil(boundedSigma * 3)));
+  const kernel = new Float32Array(radius * 2 + 1);
+  let kernelSum = 0;
+  for (let offset = -radius; offset <= radius; offset += 1) {
+    const value = Math.exp(-(offset * offset) / (2 * boundedSigma * boundedSigma));
+    kernel[offset + radius] = value;
+    kernelSum += value;
+  }
+  for (let index = 0; index < kernel.length; index += 1) kernel[index] /= kernelSum;
+  const horizontal = new Float32Array(values.length);
+  const result = new Float32Array(values.length);
+  for (let y = 0; y < height; y += 1) {
+    const row = y * width;
+    for (let x = 0; x < width; x += 1) {
+      let sum = 0;
+      for (let offset = -radius; offset <= radius; offset += 1) {
+        sum += values[row + Math.max(0, Math.min(width - 1, x + offset))] * kernel[offset + radius];
+      }
+      horizontal[row + x] = sum;
+    }
+  }
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      let sum = 0;
+      for (let offset = -radius; offset <= radius; offset += 1) {
+        const sampleY = Math.max(0, Math.min(height - 1, y + offset));
+        sum += horizontal[sampleY * width + x] * kernel[offset + radius];
+      }
+      result[y * width + x] = sum;
+    }
+  }
+  return result;
+}
+
+function initLayeredOpaqueBrush(image, count) {
+  return initOpaqueLayeredPaint(image, count, "opaque-brush");
+}
+
+function initOpaqueLayeredPaint(image, count, kernelShape) {
+  const params = initGaussians(image, count);
+  const seededTheta = params.theta.slice();
+  params.kernelShape = kernelShape;
+  params.rectangleTopRatio = kernelShape === "rectangle"
+    ? selectedRectangleTopRatio()
+    : DEFAULT_RECTANGLE_TOP_RATIO;
+  params.rectangleTopRatioMax = kernelShape === "rectangle"
+    ? selectedRectangleTopRatioMax(params.rectangleTopRatio)
+    : DEFAULT_RECTANGLE_TOP_RATIO_MAX;
+  const rectangleShape = selectedRectangleShapeSettings();
+  params.rectanglePreserveArea =
+    kernelShape === "rectangle" ? rectangleShape.preserveArea : DEFAULT_RECTANGLE_PRESERVE_AREA;
+  params.rectangleEdgeDirectedTaper =
+    kernelShape === "rectangle"
+      ? rectangleShape.edgeDirectedTaper
+      : DEFAULT_RECTANGLE_EDGE_DIRECTED_TAPER;
+  params.rectangleStructureAwareRatio =
+    kernelShape === "rectangle"
+      ? rectangleShape.structureAwareRatio
+      : DEFAULT_RECTANGLE_STRUCTURE_AWARE_RATIO;
+  params.rectangleAsymmetricSoftness =
+    kernelShape === "rectangle"
+      ? rectangleShape.asymmetricSoftness
+      : DEFAULT_RECTANGLE_ASYMMETRIC_SOFTNESS;
+  params.opaqueLayered = true;
+  params.minimumOpacityEnabled = kernelShape === "rectangle";
+  params.fixedOpacity = params.minimumOpacityEnabled
+    ? selectedOpaquePaintOpacity()
+    : selectedLayeredBrushOpacity();
+  params.boundarySigma = Math.min(
+    params.boundarySigma,
+    kernelShape === "rectangle" ? RECTANGLE_KERNEL_EXTENT : LAYERED_OPAQUE_BRUSH_KERNEL_EXTENT,
+  );
+  params.layerOrderEnabled = true;
+  params.layerAwareAccumulationEnabled = true;
+  params.discreteLayersEnabled = true;
+  params.discreteLayerCount = LAYERED_OPAQUE_BRUSH_LAYER_COUNT;
+  params.discreteLayerMoveRadius = kernelShape === "opaque-brush"
+    ? LAYERED_OPAQUE_BRUSH_LAYER_MOVE_RADIUS
+    : 0;
+  applyAdaptiveBspPaintInitialization(image, params, kernelShape);
+  const baseCount = params.count;
+  params.pruneLowContributionDeepSplatsEnabled = true;
+  params.deepPruneInterval = LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL;
+  params.opacity.fill(params.fixedOpacity);
+  const illustrativeOil = kernelShape === "opaque-brush";
+  params.illustrativeOilVersion = illustrativeOil ? 1 : 0;
+  const illustrativeOilFamilyCounts = [0, 0, 0];
+  for (let i = 0; i < baseCount; i += 1) {
+    const x = params.xy[i * 2];
+    const y = params.xy[i * 2 + 1];
+    const structure = illustrativeOil
+      ? oilStrokeStructureAt(image, x, y, seededTheta[i])
+      : strokeStructureAt(image, x, y, seededTheta[i]);
+    const areaScale = Math.sqrt(Math.max(MIN_SPLAT_SCALE ** 2, params.scale[i * 2] * params.scale[i * 2 + 1]));
+    const oilHierarchy = illustrativeOil
+      ? oilStrokeHierarchy(structure, seededTheta[i])
+      : null;
+    const anisotropy = oilHierarchy?.anisotropy ?? (1.35 + 2.65 * structure.coherence);
+    const stretch = Math.sqrt(anisotropy);
+    const scaleMultiplier = oilHierarchy?.scaleMultiplier ?? 1;
+    const theta = illustrativeOil
+      ? oilHierarchy.theta
+      : rectangleDirectedTaperTheta(
+          image,
+          x,
+          y,
+          structure.theta,
+          params.rectangleEdgeDirectedTaper &&
+            params.rectangleTopRatio + 0.000001 < params.rectangleTopRatioMax,
+        );
+    const nextSx = areaScale * scaleMultiplier * stretch;
+    const nextSy = areaScale * scaleMultiplier / stretch;
+    const constrained = constrainSplat(
+      x,
+      y,
+      nextSx,
+      nextSy,
+      theta,
+      params.boundarySigma,
+      Math.max(illustrativeOil ? 7 : 4, anisotropy),
+    );
+    params.xy[i * 2] = constrained.x;
+    params.xy[i * 2 + 1] = constrained.y;
+    params.scale[i * 2] = constrained.sx;
+    params.scale[i * 2 + 1] = constrained.sy;
+    params.theta[i] = theta;
+    if (illustrativeOil) {
+      const constrainedAnisotropy =
+        Math.max(constrained.sx, constrained.sy) / Math.max(MIN_SPLAT_SCALE, Math.min(constrained.sx, constrained.sy));
+      const family = illustrativeOilFamily(oilHierarchy.detail, constrainedAnisotropy);
+      params.detailTags[i] = family === 2 ? 2 : 1;
+      illustrativeOilFamilyCounts[family] += 1;
+    } else if (params.rectangleStructureAwareRatio) {
+      params.detailTags[i] =
+        structure.coherence >= RECTANGLE_STRUCTURE_MIN_COHERENCE &&
+        structure.energy >= RECTANGLE_STRUCTURE_MIN_ENERGY
+          ? 2
+          : 1;
+    }
+  }
+  params.illustrativeOilFamilyStats = illustrativeOil
+    ? {
+        version: 1,
+        selection: "deterministic-local-structure",
+        base_patch: illustrativeOilFamilyCounts[0],
+        directional_ribbon: illustrativeOilFamilyCounts[1],
+        edge_accent: illustrativeOilFamilyCounts[2],
+      }
+    : null;
+  for (let i = 0; i < baseCount; i += 1) {
+    footprintWeightedTargetColor(image, params, i, params.rgb.subarray(i * 3, i * 3 + 3));
+  }
+  return params;
 }
 
 function initialDepthOrder(count) {
@@ -4270,18 +6276,32 @@ function boundedVirtualDepth(params, index) {
   return thickness * Math.tanh(params.virtualDepth?.[index] || 0);
 }
 
+function finalDiagnosticSampling(count, limit = MAX_FINAL_DIAGNOSTIC_SAMPLES) {
+  const sourceCount = Math.max(0, Math.round(Number(count) || 0));
+  const sampleLimit = Math.max(1, Math.round(Number(limit) || 1));
+  const stride = Math.max(1, Math.ceil(sourceCount / sampleLimit));
+  return {
+    sourceCount,
+    stride,
+    sampleCount: sourceCount > 0 ? Math.ceil(sourceCount / stride) : 0,
+  };
+}
+
 function virtualDepthDistribution(params) {
   if (!params?.count) return null;
-  const raw = new Array(params.count);
-  const virtual = new Array(params.count);
-  const composite = new Array(params.count);
-  for (let index = 0; index < params.count; index += 1) {
-    raw[index] = Number(params.virtualDepth?.[index]) || 0;
-    virtual[index] = boundedVirtualDepth(params, index);
-    composite[index] = plyLayerDepth(index, params);
+  const sampling = finalDiagnosticSampling(params.count);
+  const raw = new Float32Array(sampling.sampleCount);
+  const virtual = new Float32Array(sampling.sampleCount);
+  const composite = new Float32Array(sampling.sampleCount);
+  let sampleIndex = 0;
+  for (let index = 0; index < params.count; index += sampling.stride) {
+    raw[sampleIndex] = Number(params.virtualDepth?.[index]) || 0;
+    virtual[sampleIndex] = boundedVirtualDepth(params, index);
+    composite[sampleIndex] = plyLayerDepth(index, params);
+    sampleIndex += 1;
   }
   const summarize = (values) => {
-    const sorted = [...values].sort((a, b) => a - b);
+    const sorted = values.slice().sort();
     const at = (fraction) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * fraction)))];
     return {
       minimum: sorted[0],
@@ -4295,6 +6315,9 @@ function virtualDepthDistribution(params) {
   return {
     enabled: Boolean(params.virtualDepthEnabled),
     thickness: Number(params.virtualDepthThickness) || DEFAULT_VIRTUAL_DEPTH_THICKNESS,
+    source_count: sampling.sourceCount,
+    sample_count: sampling.sampleCount,
+    sample_stride: sampling.stride,
     raw: summarize(raw),
     virtual_z: summarize(virtual),
     composite_z: summarize(composite),
@@ -4338,6 +6361,33 @@ function curriculumTrainingStage(step, steps, variants, coarseImage, midImage) {
   if (variants.coarseToFull && coarseImage && step <= coarseEnd) return "coarse";
   if (variants.threeStageCurriculum && midImage && step <= experimentalDensifySteps(steps)) return "mid";
   return "full";
+}
+
+function deepPruneStage(step, steps) {
+  if (step <= experimentalCoarseSteps(steps)) return "P1";
+  if (step <= experimentalDensifySteps(steps)) return "P2";
+  return "P3";
+}
+
+function deepPruneDue(step, steps, settings) {
+  if (!settings?.deepPruneEnabled) return false;
+  // A metric-display QA flag must not alter the learning event schedule.
+  const interval = Math.max(
+    MIN_DEEP_PRUNE_INTERVAL,
+    Math.min(MAX_DEEP_PRUNE_INTERVAL, Math.round(settings.deepPruneInterval || DEFAULT_DEEP_PRUNE_INTERVAL)),
+  );
+  return step > experimentalCoarseSteps(steps) && (
+    (step < steps && step % interval === 0) ||
+    (step === steps && settings.finalDeepPrune)
+  );
+}
+
+function illustrativeOilSurfaceRecoveryDue(step, steps, interval) {
+  const cadence = Math.max(2, Math.round(interval || LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL));
+  const offset = Math.floor(cadence / 2);
+  // Keep ownership moves away from deep-prune boundaries and leave a short
+  // settling window before the final result is presented.
+  return step > 0 && step < Math.max(1, steps - 16) && step % cadence === offset;
 }
 
 function performanceProfileSchedule(steps) {
@@ -4460,6 +6510,7 @@ function densityGpuConfig({ image, count, targetCount, step, steps, layout, maxA
   const phase38 = phase38Variants();
   const phase39 = phase39Variants();
   const phase45 = phase45Variants();
+  const layerEfficiency = layerEfficiencyVariants();
   const phase45DonorActive = phase45.donorEligibility && (!phase45.firstResetOnly || step <= schedule.resetInterval);
   const detail = selectedLearningRates();
   const trainState = state.webgpu.renderer?.trainState;
@@ -4477,9 +6528,8 @@ function densityGpuConfig({ image, count, targetCount, step, steps, layout, maxA
   );
   const baseScaleFloorRatio = stageBaseScaleFloorRatio(trainingStage, variants);
   const shaderStepLimit = mode === 3 ? schedule.densityHorizon : steps;
-  return {
-    schedule,
-    config: new Float32Array([
+  const config = new Float32Array(TRAIN_CONFIG_FLOATS);
+  config.set([
       image.width,
       image.height,
       count,
@@ -4542,8 +6592,13 @@ function densityGpuConfig({ image, count, targetCount, step, steps, layout, maxA
       phase39.mcmcRelocationEnabled ? 1 : 0,
       stageMinScale,
       baseScaleFloorRatio,
-    ]),
-  };
+      layerEfficiency.deepRelocation ? 1 : 0,
+      layerEfficiency.deepFraction,
+      layerEfficiency.influenceThreshold,
+      state.params?.opaqueLayered ? 1 : 0,
+    ], 0);
+  configurePaintKernel(config, state.params);
+  return { schedule, config };
 }
 
 function experimentalDensityPhase(step, steps) {
@@ -4674,10 +6729,53 @@ function growParamPlaceholders(params, targetCount) {
     detailTags[i] = params.detailTags?.[source] ?? 1;
   }
   return {
+    kernelShape: normalizedKernelShape(params.kernelShape),
+    rectangleTopRatio: clampNumber(
+      params.rectangleTopRatio,
+      MIN_RECTANGLE_TOP_RATIO,
+      MAX_RECTANGLE_TOP_RATIO,
+      DEFAULT_RECTANGLE_TOP_RATIO,
+    ),
+    rectangleTopRatioMax: clampNumber(
+      params.rectangleTopRatioMax,
+      params.rectangleTopRatio,
+      MAX_RECTANGLE_TOP_RATIO,
+      DEFAULT_RECTANGLE_TOP_RATIO_MAX,
+    ),
+    rectanglePreserveArea:
+      params.rectanglePreserveArea ?? DEFAULT_RECTANGLE_PRESERVE_AREA,
+    rectangleEdgeDirectedTaper:
+      params.rectangleEdgeDirectedTaper ?? DEFAULT_RECTANGLE_EDGE_DIRECTED_TAPER,
+    rectangleStructureAwareRatio:
+      params.rectangleStructureAwareRatio ?? DEFAULT_RECTANGLE_STRUCTURE_AWARE_RATIO,
+    rectangleAsymmetricSoftness:
+      params.rectangleAsymmetricSoftness ?? DEFAULT_RECTANGLE_ASYMMETRIC_SOFTNESS,
+    illustrativeOilVersion: Math.max(0, Math.round(Number(params.illustrativeOilVersion) || 0)),
+    illustrativeOilFamilyStats: params.illustrativeOilFamilyStats
+      ? structuredClone(params.illustrativeOilFamilyStats)
+      : null,
+    opaqueLayered: Boolean(params.opaqueLayered),
+    minimumOpacityEnabled: Boolean(params.minimumOpacityEnabled),
+    fixedOpacity: clampNumber(
+      params.fixedOpacity,
+      MIN_OPAQUE_PAINT_OPACITY,
+      MAX_OPAQUE_PAINT_OPACITY,
+      LAYERED_OPAQUE_BRUSH_OPACITY,
+    ),
     xy, scale, rgb, opacity, theta, depthOrder, virtualDepth, detailTags, count: targetCount,
     rows: params.rows, cols: params.cols, bg: params.bg,
     boundarySigma: params.boundarySigma,
     layerOrderEnabled: Boolean(params.layerOrderEnabled),
+    layerAwareAccumulationEnabled: Boolean(params.layerAwareAccumulationEnabled),
+    pruneLowContributionDeepSplatsEnabled: Boolean(params.pruneLowContributionDeepSplatsEnabled),
+    deepPruneInterval: params.deepPruneInterval || DEFAULT_DEEP_PRUNE_INTERVAL,
+    hiddenRgbRecolorEnabled: Boolean(params.hiddenRgbRecolorEnabled),
+    hiddenRgbRecolorInterval: params.hiddenRgbRecolorInterval || DEFAULT_HIDDEN_RGB_RECOLOR_INTERVAL,
+    hiddenRgbRecolorFraction: params.hiddenRgbRecolorFraction || DEFAULT_HIDDEN_RGB_RECOLOR_FRACTION,
+    hiddenRgbRecolorStrength: params.hiddenRgbRecolorStrength || DEFAULT_HIDDEN_RGB_RECOLOR_STRENGTH,
+    discreteLayersEnabled: Boolean(params.discreteLayersEnabled),
+    discreteLayerCount: params.discreteLayerCount,
+    discreteLayerMoveRadius: params.discreteLayerMoveRadius,
     virtualDepthEnabled: Boolean(params.virtualDepthEnabled),
     virtualDepthThickness: Number(params.virtualDepthThickness) || DEFAULT_VIRTUAL_DEPTH_THICKNESS,
   };
@@ -4697,6 +6795,274 @@ function resizeParamPlaceholders(params, targetCount) {
     depthOrder: slice(params.depthOrder, targetCount),
     virtualDepth: slice(params.virtualDepth, targetCount),
     detailTags: slice(params.detailTags, targetCount),
+  };
+}
+
+function compactSplatParams(params, keepIndices) {
+  const count = keepIndices.length;
+  const copy = (source, stride, fallback = 0) => {
+    const output = new Float32Array(count * stride);
+    for (let target = 0; target < count; target += 1) {
+      const sourceIndex = keepIndices[target];
+      for (let component = 0; component < stride; component += 1) {
+        output[target * stride + component] = source?.[sourceIndex * stride + component] ?? fallback;
+      }
+    }
+    return output;
+  };
+  return {
+    ...params,
+    count,
+    xy: copy(params.xy, 2),
+    scale: copy(params.scale, 2),
+    rgb: copy(params.rgb, 3),
+    opacity: copy(params.opacity, 1),
+    theta: copy(params.theta, 1),
+    depthOrder: copy(params.depthOrder, 1),
+    virtualDepth: copy(params.virtualDepth, 1),
+    detailTags: copy(params.detailTags, 1, 1),
+  };
+}
+
+const DEEP_PRUNE_COLOR_SAMPLES = [
+  [0, 0, 1],
+  [-1, 0, Math.exp(-0.5)],
+  [1, 0, Math.exp(-0.5)],
+  [0, -1, Math.exp(-0.5)],
+  [0, 1, Math.exp(-0.5)],
+  [-1, -1, Math.exp(-1)],
+  [1, -1, Math.exp(-1)],
+  [-1, 1, Math.exp(-1)],
+  [1, 1, Math.exp(-1)],
+];
+
+function sampleImageRgbBilinear(image, x, y, out) {
+  const fx = Math.max(0, Math.min(image.width - 1, ((x + 1) * 0.5) * (image.width - 1)));
+  const fy = Math.max(0, Math.min(image.height - 1, ((y + 1) * 0.5) * (image.height - 1)));
+  const x0 = Math.floor(fx);
+  const y0 = Math.floor(fy);
+  const x1 = Math.min(image.width - 1, x0 + 1);
+  const y1 = Math.min(image.height - 1, y0 + 1);
+  const tx = fx - x0;
+  const ty = fy - y0;
+  const row = image.width * 3;
+  const i00 = y0 * row + x0 * 3;
+  const i10 = y0 * row + x1 * 3;
+  const i01 = y1 * row + x0 * 3;
+  const i11 = y1 * row + x1 * 3;
+  for (let channel = 0; channel < 3; channel += 1) {
+    const top = image.rgb[i00 + channel] * (1 - tx) + image.rgb[i10 + channel] * tx;
+    const bottom = image.rgb[i01 + channel] * (1 - tx) + image.rgb[i11 + channel] * tx;
+    out[channel] = top * (1 - ty) + bottom * ty;
+  }
+}
+
+function footprintWeightedTargetColor(image, params, index, out = new Float32Array(3)) {
+  out.fill(0);
+  if (!image?.rgb || !params?.xy || !params?.scale) return out;
+  const centerX = Number(params.xy[index * 2]);
+  const centerY = Number(params.xy[index * 2 + 1]);
+  const sx = Math.max(1e-6, Number(params.scale[index * 2]));
+  const sy = Math.max(1e-6, Number(params.scale[index * 2 + 1]));
+  const theta = Number(params.theta?.[index]) || 0;
+  const cosTheta = Math.cos(theta);
+  const sinTheta = Math.sin(theta);
+  const sample = new Float32Array(3);
+  const target = new Float64Array(3);
+  let weightSum = 0;
+  for (const [localX, localY, weight] of DEEP_PRUNE_COLOR_SAMPLES) {
+    const x = centerX + localX * sx * cosTheta - localY * sy * sinTheta;
+    const y = centerY + localX * sx * sinTheta + localY * sy * cosTheta;
+    sampleImageRgbBilinear(image, x, y, sample);
+    for (let channel = 0; channel < 3; channel += 1) target[channel] += sample[channel] * weight;
+    weightSum += weight;
+  }
+  for (let channel = 0; channel < 3; channel += 1) out[channel] = target[channel] / Math.max(weightSum, 1e-8);
+  return out;
+}
+
+function footprintWeightedTargetColorDistance(image, params, index) {
+  if (!params?.rgb) return 0;
+  const target = footprintWeightedTargetColor(image, params, index);
+  let distance = 0;
+  for (let channel = 0; channel < 3; channel += 1) {
+    distance += Math.abs(Number(params.rgb[index * 3 + channel]) - target[channel]);
+  }
+  return distance / 3;
+}
+
+function hiddenRgbRecolorPlan(image, params, attribution, settings) {
+  const count = params?.count || 0;
+  const rows = attribution?.rows || [];
+  if (!count || !rows.length) {
+    return { applied: false, reason: "no-positive-hidden-rgb-attribution", selected: 0, indices: [], targets: [] };
+  }
+  const maxSelected = Math.max(1, Math.min(count, Math.ceil(count * settings.fraction)));
+  const maxContribution = rows.reduce(
+    (maximum, row) => Math.max(maximum, Number(row.contribution_mass) || 0),
+    0,
+  );
+  const candidates = [];
+  for (const row of rows) {
+    const index = Number(row.index);
+    const harm = Math.max(0, Number(row.positive_leave_one_out_l1_harm) || 0);
+    if (!Number.isInteger(index) || index < 0 || index >= count || harm <= 0) continue;
+    const target = footprintWeightedTargetColor(image, params, index);
+    const colorDistance = (
+      Math.abs(params.rgb[index * 3] - target[0]) +
+      Math.abs(params.rgb[index * 3 + 1] - target[1]) +
+      Math.abs(params.rgb[index * 3 + 2] - target[2])
+    ) / 3;
+    const visibility = Math.sqrt(Math.max(0, Number(row.contribution_mass) || 0) / Math.max(maxContribution, 1e-8));
+    const lowVisibilityWeight = Math.max(0.1, 1 - 0.75 * visibility);
+    candidates.push({
+      index,
+      target: Array.from(target),
+      harm,
+      colorDistance,
+      visibility,
+      score: harm * colorDistance * lowVisibilityWeight,
+    });
+  }
+  if (!candidates.length) {
+    return { applied: false, reason: "no-valid-hidden-rgb-candidates", selected: 0, indices: [], targets: [] };
+  }
+  const sortedDistances = candidates.map((candidate) => candidate.colorDistance).sort((a, b) => a - b);
+  const colorDistanceThreshold = percentileSorted(sortedDistances, 0.5);
+  const selected = candidates
+    .filter((candidate) => candidate.colorDistance >= colorDistanceThreshold && candidate.score > 0)
+    .sort((a, b) => b.score - a.score || b.harm - a.harm || a.index - b.index)
+    .slice(0, maxSelected);
+  if (!selected.length) {
+    return { applied: false, reason: "color-distance-gate-empty", selected: 0, indices: [], targets: [] };
+  }
+  return {
+    applied: true,
+    reason: "positive-harm-footprint-color-low-visibility",
+    candidate_count: candidates.length,
+    selected: selected.length,
+    selected_ratio: selected.length / count,
+    requested_fraction: settings.fraction,
+    strength: settings.strength,
+    color_distance_threshold: colorDistanceThreshold,
+    selected_positive_harm: selected.reduce((sum, candidate) => sum + candidate.harm, 0),
+    selected_mean_color_distance: selected.reduce((sum, candidate) => sum + candidate.colorDistance, 0) / selected.length,
+    selected_mean_visibility: selected.reduce((sum, candidate) => sum + candidate.visibility, 0) / selected.length,
+    indices: selected.map((candidate) => candidate.index),
+    targets: selected.map((candidate) => candidate.target),
+  };
+}
+
+function lowContributionDeepPrunePlan(
+  params,
+  importanceData,
+  maxPruneFraction = DEEP_PRUNE_MAX_FRACTION,
+  deepFraction = DEEP_PRUNE_FRACTION,
+  alphaGamma = 1,
+  selectionMode = "depth",
+  image = null,
+) {
+  const count = params?.count || 0;
+  if (count < DEEP_PRUNE_MIN_SPLATS || !params?.depthOrder || !importanceData?.normalizedInfluence) {
+    return { applied: false, reason: "insufficient-data", before: count, after: count, removed: 0 };
+  }
+  const boundedDeepFraction = Math.max(
+    0.05,
+    Math.min(DEEP_PRUNE_EXPERIMENT_MAX_DEPTH_FRACTION, deepFraction),
+  );
+  const boundedAlphaGamma = Math.max(0.25, Math.min(4, alphaGamma));
+  const boundedSelectionMode = ["depth", "depth-color", "color"].includes(selectionMode)
+    ? selectionMode
+    : "depth";
+  const useDepthGate = boundedSelectionMode !== "color";
+  const useColorGate = boundedSelectionMode !== "depth";
+  const deepCandidates = [];
+  for (let index = 0; index < count; index += 1) {
+    const depth = Number(params.depthOrder[index]);
+    const baseInfluence = Number(importanceData.normalizedInfluence[index]);
+    const opacity = Math.max(0.005, Math.min(0.995, Number(params.opacity?.[index]) || 0.005));
+    const influence = baseInfluence * opacity ** (boundedAlphaGamma - 1);
+    const integratedInfluence = Number(importanceData.integratedInfluence?.[index]) || 0;
+    if (
+      Number.isFinite(depth) &&
+      Number.isFinite(influence) &&
+      (!useDepthGate || depth <= boundedDeepFraction)
+    ) {
+      deepCandidates.push({ index, depth, influence, integratedInfluence });
+    }
+  }
+  if (!deepCandidates.length) {
+    return { applied: false, reason: "no-deep-candidates", before: count, after: count, removed: 0 };
+  }
+  const boundedPruneFraction = Math.max(0, Math.min(DEEP_PRUNE_EXPERIMENT_MAX_FRACTION, maxPruneFraction));
+  const candidateFraction = useDepthGate ? boundedDeepFraction : 1;
+  const maxRemove = Math.min(
+    Math.floor(count * boundedPruneFraction),
+    Math.floor(deepCandidates.length * (boundedPruneFraction / candidateFraction)),
+    count - DEEP_PRUNE_MIN_SPLATS,
+  );
+  if (maxRemove <= 0) {
+    return { applied: false, reason: "minimum-count-guard", before: count, after: count, removed: 0 };
+  }
+  deepCandidates.sort((a, b) => a.influence - b.influence || a.depth - b.depth || a.index - b.index);
+  let selectedCandidates = deepCandidates.slice(0, maxRemove);
+  let colorGateReport = null;
+  if (useColorGate) {
+    const poolSize = Math.min(deepCandidates.length, Math.max(maxRemove, maxRemove * 4));
+    const lowInfluencePool = deepCandidates.slice(0, poolSize);
+    for (const candidate of lowInfluencePool) {
+      candidate.colorDistance = footprintWeightedTargetColorDistance(image, params, candidate.index);
+    }
+    const colorDistances = lowInfluencePool.map((candidate) => candidate.colorDistance).sort((a, b) => a - b);
+    const integratedValues = deepCandidates
+      .map((candidate) => candidate.integratedInfluence)
+      .sort((a, b) => a - b);
+    const colorThreshold = percentileSorted(colorDistances, 0.5);
+    const coverageGuardThreshold = percentileSorted(integratedValues, 0.9);
+    const colorCandidates = lowInfluencePool.filter((candidate) => (
+      candidate.colorDistance >= colorThreshold &&
+      candidate.integratedInfluence <= coverageGuardThreshold
+    ));
+    colorCandidates.sort((a, b) => (
+      b.colorDistance - a.colorDistance ||
+      a.influence - b.influence ||
+      a.integratedInfluence - b.integratedInfluence ||
+      a.index - b.index
+    ));
+    selectedCandidates = colorCandidates.slice(0, maxRemove);
+    colorGateReport = {
+      reference: "nine-point-footprint-weighted-teacher-rgb",
+      low_influence_pool: lowInfluencePool.length,
+      color_candidate_count: colorCandidates.length,
+      color_distance_threshold: colorThreshold,
+      coverage_guard_integrated_influence_p90: coverageGuardThreshold,
+      condition_limited: selectedCandidates.length < maxRemove,
+    };
+  }
+  const influenceThreshold = deepCandidates[Math.max(0, Math.min(deepCandidates.length - 1, maxRemove - 1))].influence;
+  const removedIndices = selectedCandidates.map((item) => item.index);
+  const removed = new Set(removedIndices);
+  const keepIndices = [];
+  for (let index = 0; index < count; index += 1) if (!removed.has(index)) keepIndices.push(index);
+  return {
+    applied: true,
+    reason: boundedSelectionMode === "color"
+      ? "color-low-contribution"
+      : boundedSelectionMode === "depth-color"
+        ? "deep-color-low-contribution"
+        : "deep-low-contribution",
+    before: count,
+    after: keepIndices.length,
+    removed: removedIndices.length,
+    removed_ratio: removedIndices.length / count,
+    deep_fraction: useDepthGate ? boundedDeepFraction : null,
+    alpha_gamma: boundedAlphaGamma,
+    selection_mode: boundedSelectionMode,
+    color_gate: colorGateReport,
+    max_prune_fraction: boundedPruneFraction,
+    normalized_influence_threshold: influenceThreshold,
+    pruneIndices: removedIndices,
+    keepIndices,
   };
 }
 
@@ -4741,6 +7107,11 @@ function percentileSorted(values, fraction) {
   return values[lower] * (1 - mix) + values[upper] * mix;
 }
 
+function psnrFromRgbMse(mse) {
+  if (!Number.isFinite(mse) || mse < 0) return Number.NaN;
+  return 10 * Math.log10(1 / Math.max(PSNR_MSE_FLOOR, mse));
+}
+
 function profileDistributionSummary(histogramValues, pixelCount, total) {
   const labels = ["0", "1", "2-3", "4-7", "8-15", "16-31", "32-63", "64+"];
   const counts = Array.from(histogramValues, (value) => Number(value) || 0);
@@ -4783,6 +7154,8 @@ function summarizeVirtualCameraMetricSet(entries) {
     rgb_ssim_p10: percentileSorted(sortedSsim, 0.1),
     rgb_ssim_min: sortedSsim[0] ?? null,
     rgb_l1_macro: average("loss"),
+    rgb_mse_macro: average("mse"),
+    rgb_psnr_macro: average("psnr"),
     alpha_ssim_macro: average("alphaSsim"),
     alpha_l1_macro: average("alphaL1"),
     coverage_mean: average("coverage_mean"),
@@ -4833,11 +7206,12 @@ function phase39ContractProbe(width = 1024, height = 512, sx = 0.02, sy = 0.004,
 function computeThinLineMetrics(image, params) {
   const tags = params.detailTags;
   if (!tags || !params.count) return null;
+  const sampling = finalDiagnosticSampling(params.count, MAX_THIN_LINE_DIAGNOSTIC_SAMPLES);
   const points = [];
   const cellSize = 8;
   const cells = new Map();
   const key = (x, y) => `${Math.floor(x / cellSize)},${Math.floor(y / cellSize)}`;
-  for (let i = 0; i < params.count; i += 1) {
+  for (let i = 0; i < params.count; i += sampling.stride) {
     if (tags[i] <= 1.5) continue;
     const sx = params.scale[i * 2];
     const sy = params.scale[i * 2 + 1];
@@ -4858,7 +7232,17 @@ function computeThinLineMetrics(image, params) {
     if (!cells.has(bucketKey)) cells.set(bucketKey, []);
     cells.get(bucketKey).push(point);
   }
-  if (!points.length) return { detail_count: 0, gap_ratio: null, isolated_detail_ratio: null, off_ridge_streak_ratio: null };
+  if (!points.length) {
+    return {
+      detail_count: 0,
+      sampled_splats: sampling.sampleCount,
+      source_splats: sampling.sourceCount,
+      sample_stride: sampling.stride,
+      gap_ratio: null,
+      isolated_detail_ratio: null,
+      off_ridge_streak_ratio: null,
+    };
+  }
   const hasSupport = (point, side) => {
     const maxSearchPx = Math.min(64, Math.max(image.width, image.height) * 0.02);
     const reach = Math.min(maxSearchPx, Math.max(2, point.majorPx * 1.25));
@@ -4895,6 +7279,9 @@ function computeThinLineMetrics(image, params) {
   }
   return {
     detail_count: points.length,
+    sampled_splats: sampling.sampleCount,
+    source_splats: sampling.sourceCount,
+    sample_stride: sampling.stride,
     gap_ratio: missingSides / (points.length * 2),
     isolated_detail_ratio: isolated / points.length,
     off_ridge_streak_ratio: offRidge / points.length,
@@ -4997,7 +7384,7 @@ async function detectWebGpu() {
     els.backendText.textContent = "webgpu unavailable";
     updateMemoryRecommendation();
     log("WebGPU unavailable; training disabled");
-    return;
+    return false;
   }
   try {
     const adapter = await navigator.gpu.requestAdapter();
@@ -5050,27 +7437,146 @@ async function detectWebGpu() {
       subgroups: device.features.has("subgroups"),
     };
     syncExperimentalPerformanceControls();
-    device.lost.then((info) => {
-      if (state.webgpu.renderer !== renderer) return;
-      renderer.deviceLost = true;
-      state.stopRequested = true;
-      state.paused = false;
-      renderer.disposeTrainState();
-      state.webgpu = { supported: false, renderer: null, reason: `device lost: ${info.reason || "unknown"}`, limits: null, adapterInfo: null };
-      els.backendText.textContent = "webgpu unavailable";
-      updateMemoryRecommendation();
-      setStatus("error");
-      log(state.webgpu.reason);
-    });
+    device.lost.then((info) => handleWebGpuDeviceLoss(renderer, info));
     els.backendText.textContent = "webgpu available";
     updateMemoryRecommendation();
     log("WebGPU available for train and preview");
+    return true;
   } catch (error) {
     state.webgpu = { supported: false, renderer: null, reason: error.message, limits: null, adapterInfo: null };
     els.backendText.textContent = "webgpu unavailable";
     updateMemoryRecommendation();
     log(`WebGPU failed; training disabled: ${error.message}`);
+    return false;
   }
+}
+
+function completedResultStatus() {
+  if (!state.params || !state.image || !state.metrics?.finished_at) return "";
+  if (state.metrics.safety_stop) return "safety stopped";
+  return state.metrics.stopped ? "stopped" : "done";
+}
+
+function cancelCompletedResultGpuRecovery() {
+  state.webGpuRecoveryGeneration += 1;
+  state.webGpuRecoveryPending = false;
+  state.webGpuRecoveryAttempts = 0;
+}
+
+async function recoverCompletedResultWebGpu(generation, terminalStatus) {
+  const expectedParams = state.params;
+  const expectedMetrics = state.metrics;
+  const recoveryIsCurrent = () => (
+    generation === state.webGpuRecoveryGeneration &&
+    state.params === expectedParams &&
+    state.metrics === expectedMetrics
+  );
+  state.webGpuRecoveryPending = true;
+  publishState();
+  let recovered = false;
+  for (let attempt = 1; attempt <= 2 && recoveryIsCurrent(); attempt += 1) {
+    state.webGpuRecoveryAttempts = attempt;
+    recovered = await detectWebGpu();
+    if (!recoveryIsCurrent()) return;
+    if (recovered && state.webgpu.renderer && !state.webgpu.renderer.deviceLost) break;
+    await nextFrame();
+    if (!recoveryIsCurrent()) return;
+  }
+  if (!recoveryIsCurrent()) return;
+  state.webGpuRecoveryPending = false;
+  if (!recovered || !state.webgpu.renderer || state.webgpu.renderer.deviceLost) {
+    els.backendText.textContent = "webgpu unavailable";
+    setStatus("gpu unavailable");
+    setTrainingMessage("Training result preserved, but the GPU preview could not be restored.", "info");
+    updateDownloads(false);
+    log("GPU preview recovery failed; completed CPU result was preserved");
+    publishState();
+    return;
+  }
+  state.previewGeneration += 1;
+  state.previewAppliedRevision = 0;
+  const recoveryRenderer = state.webgpu.renderer;
+  const uploaded = await recoveryRenderer.uploadResultRenderState(expectedParams);
+  if (!recoveryIsCurrent()) {
+    recoveryRenderer.disposeResultRenderState();
+    return;
+  }
+  if (!uploaded) throw new Error("The preserved result could not be uploaded to the recovered GPU.");
+  await refreshOutsidePreview();
+  if (!recoveryIsCurrent()) {
+    recoveryRenderer.disposeResultRenderState();
+    return;
+  }
+  state.webGpuRecoveryAttempts = 0;
+  setStatus(terminalStatus);
+  setTrainingMessage(
+    terminalStatus === "stopped" ? "Training stopped. GPU preview restored." : "Training complete. GPU preview restored.",
+    terminalStatus === "safety stopped" ? "error" : "success",
+  );
+  updateDownloads(!state.metrics?.safety_stop);
+  if (state.metrics) {
+    state.metrics.post_training_gpu_recoveries =
+      (state.metrics.post_training_gpu_recoveries || 0) + 1;
+  }
+  log("GPU preview restored; completed training result preserved");
+  publishState();
+}
+
+function handleWebGpuDeviceLoss(renderer, info = {}) {
+  if (state.webgpu.renderer !== renderer) return;
+  const terminalStatus = completedResultStatus();
+  const reason = `device lost: ${info.reason || "unknown"}`;
+  renderer.deviceLost = true;
+  state.lastGpuLoss = { reason, at: new Date().toISOString(), after_training: Boolean(terminalStatus) };
+  state.previewGeneration += 1;
+  state.splatAdjustmentEpoch += 1;
+  window.clearTimeout(state.splatAdjustmentValidationTimer);
+  if (state.splatAdjustmentFrame) window.cancelAnimationFrame(state.splatAdjustmentFrame);
+  state.splatAdjustmentFrame = 0;
+  state.splatAdjustmentValidationVersion = 0;
+  invalidateTrainingRun("WebGPU device lost");
+  state.paused = false;
+  if (!terminalStatus) state.stopRequested = true;
+  // Dependency synchronizers consult state.running when controls are enabled.
+  // Clear it first so a device loss cannot leave next-run settings disabled.
+  state.running = false;
+  try {
+    renderer.disposeTrainState();
+    renderer.disposeResultRenderState();
+  } catch {
+    // A lost device may reject cleanup; CPU parameters remain authoritative.
+  }
+  state.webgpu = { supported: false, renderer: null, reason, limits: null, adapterInfo: null };
+  els.backendText.textContent = terminalStatus ? "webgpu recovering" : "webgpu unavailable";
+  setInputControlsDisabled(false);
+  setPausedRuntimeControlsEnabled(false);
+  els.pauseButton.disabled = true;
+  els.pauseButton.textContent = "Pause";
+  els.stopButton.disabled = true;
+  updateDownloads(false);
+  renderSplatInspector();
+  updateMemoryRecommendation();
+  if (terminalStatus) {
+    state.stopRequested = false;
+    const generation = ++state.webGpuRecoveryGeneration;
+    setStatus("recovering gpu");
+    setTrainingMessage("Training result preserved. Restoring the GPU preview...", "info");
+    log("GPU preview connection lost after training; restoring it without discarding the result");
+    publishState();
+    recoverCompletedResultWebGpu(generation, terminalStatus).catch((error) => {
+      if (generation !== state.webGpuRecoveryGeneration) return;
+      state.webGpuRecoveryPending = false;
+      setStatus("gpu unavailable");
+      setTrainingMessage("Training result preserved, but the GPU preview could not be restored.", "info");
+      log(`GPU preview recovery failed: ${error.message}`);
+      publishState();
+    });
+    return;
+  }
+  setTrainingMessage(`Training failed: ${reason}`, "error");
+  setStatus("error");
+  log(reason);
+  publishState();
 }
 
 class WebGpuPreview {
@@ -5106,6 +7612,11 @@ class WebGpuPreview {
     this.tilePrefixPipeline = null;
     this.tileFillPipeline = null;
     this.tileSortPipeline = null;
+    this.discreteLayerAssignPipeline = null;
+    this.discreteLayerCommitPipeline = null;
+    this.deepPruneParamCompactPipeline = null;
+    this.deepPruneStateCompactPipeline = null;
+    this.hiddenRgbRecolorPipeline = null;
     this.renderStatePipeline = null;
     this.tileCooperativeRenderPipeline = null;
     this.ssimTilePipeline = null;
@@ -5117,11 +7628,24 @@ class WebGpuPreview {
     this.virtualOrderPenaltyPipeline = null;
     this.exactBackwardTelemetryPipeline = null;
     this.exactOptimizerPipeline = null;
+    this.segmentedReferenceCountPipeline = null;
+    this.segmentedReferencePrefixPipeline = null;
+    this.segmentedReferenceFillPipeline = null;
+    this.segmentedGradientReducePipeline = null;
+    this.compiledSegmentedExactBackward = null;
+    this.compiledFixedPointExactGradient = null;
+    this.compiledInverseScaleOptimization = null;
     const performance = performanceVariants();
     this.quadExactBackwardEnabled = performance.quadExactBackward;
     this.exactTileIntersectionEnabled = performance.exactTileIntersection;
     this.subgroupExactBackwardEnabled = Boolean(profile.subgroupExactBackward && device.features.has("subgroups"));
     this.opacityAwareSupportMode = performance.opacityAwareSupportMode;
+    this.shapeAwarePaintCullingEnabled = performance.shapeAwarePaintCulling;
+    this.projectedVirtualExactCullingEnabled = performance.projectedVirtualExactCulling;
+    this.segmentedExactBackwardRequested = performance.segmentedExactBackward;
+    this.fixedPointExactGradientRequested = performance.fixedPointExactGradient;
+    this.inverseScaleOptimizationRequested = performance.inverseScaleOptimization;
+    this.trainingResidualMapPipeline = null;
     this.pixelMetricsPipeline = null;
     this.virtualCameraMetricsPipeline = null;
     this.overlapMetricsPipeline = null;
@@ -5132,23 +7656,68 @@ class WebGpuPreview {
       requested: Boolean(profile.profileRequested),
       timestampQuery: Boolean(profile.timestampQuery),
     };
+    this.resultRenderState = null;
   }
 
   configureExperimentalPerformance(performance = performanceVariants()) {
     const opacityAwareSupportMode = performance.opacityAwareSupportMode === "aggressive"
       ? "aggressive"
       : "off";
-    if (this.opacityAwareSupportMode !== opacityAwareSupportMode) {
+    const tilePipelineChanged =
+      this.opacityAwareSupportMode !== opacityAwareSupportMode ||
+      this.shapeAwarePaintCullingEnabled !== performance.shapeAwarePaintCulling ||
+      this.projectedVirtualExactCullingEnabled !== performance.projectedVirtualExactCulling;
+    if (tilePipelineChanged) {
       this.opacityAwareSupportMode = opacityAwareSupportMode;
+      this.shapeAwarePaintCullingEnabled = performance.shapeAwarePaintCulling;
+      this.projectedVirtualExactCullingEnabled = performance.projectedVirtualExactCulling;
       this.tileCountPipeline = null;
       this.tilePrefixPipeline = null;
       this.tileFillPipeline = null;
       this.tileSortPipeline = null;
-      if (this.trainState) this.trainState.tileReady = false;
+      if (this.trainState) {
+        this.trainState.tileReady = false;
+        this.trainState.bindGroupCache?.clear();
+      }
+    }
+    if (this.segmentedExactBackwardRequested !== performance.segmentedExactBackward) {
+      this.segmentedExactBackwardRequested = performance.segmentedExactBackward;
+      this.exactAlphaBackwardPipeline = null;
+      this.sourceDomainBackwardPipeline = null;
+      this.segmentedReferenceCountPipeline = null;
+      this.segmentedReferencePrefixPipeline = null;
+      this.segmentedReferenceFillPipeline = null;
+      this.segmentedGradientReducePipeline = null;
+      this.compiledSegmentedExactBackward = null;
+      this.trainState?.bindGroupCache?.clear();
+    }
+    if (this.fixedPointExactGradientRequested !== performance.fixedPointExactGradient) {
+      this.fixedPointExactGradientRequested = performance.fixedPointExactGradient;
+      this.exactAlphaBackwardPipeline = null;
+      this.sourceDomainBackwardPipeline = null;
+      this.virtualOrderPenaltyPipeline = null;
+      this.exactOptimizerPipeline = null;
+      this.compiledFixedPointExactGradient = null;
+      this.trainState?.bindGroupCache?.clear();
+    }
+    if (this.inverseScaleOptimizationRequested !== performance.inverseScaleOptimization) {
+      this.inverseScaleOptimizationRequested = performance.inverseScaleOptimization;
+      this.renderGradientPipeline = null;
+      this.parallelRenderGradientPipeline = null;
+      this.exactOptimizerPipeline = null;
+      this.compiledInverseScaleOptimization = null;
+      this.trainState?.bindGroupCache?.clear();
     }
     return {
       opacityAwareSupportMode: this.opacityAwareSupportMode,
+      shapeAwarePaintCulling: this.shapeAwarePaintCullingEnabled,
+      projectedVirtualExactCulling: this.projectedVirtualExactCullingEnabled,
+      bindGroupCache: performance.bindGroupCache,
+      segmentedExactBackward: this.segmentedExactBackwardRequested,
+      fixedPointExactGradient: this.fixedPointExactGradientRequested,
+      inverseScaleOptimization: this.inverseScaleOptimizationRequested,
       adaptiveGpuThroughput: performance.adaptiveGpuThroughput,
+      adaptiveGpuBatch: performance.adaptiveGpuBatch,
       gpuSchedulingMode: performance.gpuSchedulingMode,
       asyncPresentation: performance.asyncPresentation,
       metricTileReuse: performance.metricTileReuse,
@@ -5296,6 +7865,20 @@ struct Uniforms {
   alphaBgB: f32,
   kernelFalloff: f32,
   shapeMode: f32,
+  layerAware: f32,
+  layerCount: f32,
+  padPaint0: f32,
+  padPaint1: f32,
+  rectangleTopRatio: f32,
+  rectangleTopRatioMax: f32,
+  rectangleShapeFlags: f32,
+  opacityMultiplier: f32,
+  splatScaleMultiplier: f32,
+  localAspectRatio: f32,
+  reservedPreview0: f32,
+  reservedPreview1: f32,
+  padBrushDetail: f32,
+  pad2: f32,
 };
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 struct SplatPosition { center: vec2f, rawDepth: f32, depthGradient: f32, };
@@ -5331,7 +7914,54 @@ fn gaussian_kernel(d: vec2f, c: f32, s: f32, scale: vec2f) -> f32 {
   return exp(-0.5 * q);
 }
 
-fn preview_kernel(d: vec2f, c: f32, s: f32, scale: vec2f) -> f32 {
+${RECTANGLE_TRAPEZOID_WGSL}
+${ILLUSTRATIVE_OIL_WGSL}
+
+fn preview_kernel(
+  d: vec2f,
+  c: f32,
+  s: f32,
+  scale: vec2f,
+  packedTag: f32,
+  worldPoint: vec2f
+) -> f32 {
+  if (uniforms.shapeMode > 4.5) {
+    let r = vec2f(c * d.x + s * d.y, -s * d.x + c * d.y);
+    let normalized = r / max(scale * ${LAYERED_OPAQUE_BRUSH_KERNEL_EXTENT}, vec2f(0.0001));
+    let family = illustrative_oil_family(scale, packedTag);
+    let oilKernel = illustrative_oil_kernel_sample(
+      normalized,
+      scale.x >= scale.y,
+      ${LAYERED_OPAQUE_BRUSH_EDGE_SOFTNESS},
+      family
+    ).kernel;
+    return oilKernel;
+  }
+  if (uniforms.shapeMode > 1.5) {
+    let r = vec2f(c * d.x + s * d.y, -s * d.x + c * d.y);
+    let widthRatios = rectangle_effective_width_ratios(
+      uniforms.rectangleTopRatio,
+      uniforms.rectangleTopRatioMax,
+      packedTag,
+      uniforms.rectangleShapeFlags
+    );
+    let areaCompensation =
+      rectangle_area_compensation(widthRatios, uniforms.rectangleShapeFlags);
+    let normalized = r / max(
+      scale * ${RECTANGLE_KERNEL_EXTENT} * areaCompensation,
+      vec2f(0.0001)
+    );
+    return rectangle_trapezoid_kernel_sample(
+      normalized,
+      ${RECTANGLE_EDGE_SOFTNESS},
+      widthRatios.x,
+      widthRatios.y,
+      rectangle_flag_enabled(
+        uniforms.rectangleShapeFlags,
+        ${RECTANGLE_FLAG_ASYMMETRIC_SOFTNESS}u
+      )
+    ).kernel;
+  }
   if (uniforms.shapeMode > 0.5) {
     let r = vec2f(c * d.x + s * d.y, -s * d.x + c * d.y);
     let local = abs(r / max(scale, vec2f(0.0001)));
@@ -5343,6 +7973,11 @@ fn preview_kernel(d: vec2f, c: f32, s: f32, scale: vec2f) -> f32 {
 
 fn tile_offset(index: u32) -> u32 {
   return tileOffsets[index] & 0x7fffffffu;
+}
+
+fn preview_layer(packed: f32, layerCount: u32) -> u32 {
+  let order = clamp(min(fract(packed), ${LAYER_CODE_RANGE}) / ${LAYER_CODE_RANGE}, 0.0, 0.999999);
+  return min(layerCount - 1u, u32(floor(order * f32(layerCount))));
 }
 
 @fragment
@@ -5358,6 +7993,11 @@ fn fs(in: VertexOut) -> @location(0) vec4f {
   );
   var transmittance = 1.0;
   var rgb = vec3f(0.0);
+  let layerAware = uniforms.layerAware > 0.5;
+  let accumulationLayerCount = clamp(u32(round(uniforms.layerCount)), ${MIN_DISCRETE_LAYER_COUNT}u, ${MAX_DISCRETE_LAYER_COUNT}u);
+  var activeLayer = accumulationLayerCount;
+  var layerRgb = vec3f(0.0);
+  var layerTransmittance = 1.0;
   let tileCols = max(1u, (u32(uniforms.width) + ${TILE_SIZE - 1}u) / ${TILE_SIZE}u);
   let tileX = min(tileCols - 1u, u32(in.position.x) / ${TILE_SIZE}u);
   let tileRows = max(1u, (u32(uniforms.height) + ${TILE_SIZE - 1}u) / ${TILE_SIZE}u);
@@ -5382,10 +8022,16 @@ fn fs(in: VertexOut) -> @location(0) vec4f {
     }
     let c = cos(t.z);
     let sT = sin(t.z);
-    let baseScale = max(t.xy, vec2f(0.0001));
+    let aspectStretch = sqrt(max(uniforms.localAspectRatio, 0.000001));
+    let baseScale = max(
+      t.xy *
+        max(uniforms.splatScaleMultiplier, 0.0) *
+        vec2f(aspectStretch, 1.0 / aspectStretch),
+      vec2f(0.0001)
+    );
     let mip = mip_weight_scale(baseScale);
     let useEwa = uniforms.useEwa > 0.5;
-    var kernel = preview_kernel(d, c, sT, mip.xy);
+    var kernel = preview_kernel(d, c, sT, mip.xy, t.w, p);
     var compensation = select(mip.z, 1.0, uniforms.shapeMode > 0.5);
     if (useEwa) {
       let sampleOffset = select(0.5, 0.28867513459481287, uniforms.useGaussLegendre > 0.5);
@@ -5397,10 +8043,10 @@ fn fs(in: VertexOut) -> @location(0) vec4f {
       let p01 = select(p + vec2f(-ox,  oy), clamp(p + vec2f(-ox,  oy), vec2f(-1.0), vec2f(1.0)), clampToImage);
       let p11 = select(p + vec2f( ox,  oy), clamp(p + vec2f( ox,  oy), vec2f(-1.0), vec2f(1.0)), clampToImage);
       kernel = 0.25 * (
-        preview_kernel(p00 - xy[i].center, c, sT, baseScale) +
-        preview_kernel(p10 - xy[i].center, c, sT, baseScale) +
-        preview_kernel(p01 - xy[i].center, c, sT, baseScale) +
-        preview_kernel(p11 - xy[i].center, c, sT, baseScale)
+        preview_kernel(p00 - xy[i].center, c, sT, baseScale, t.w, p00) +
+        preview_kernel(p10 - xy[i].center, c, sT, baseScale, t.w, p10) +
+        preview_kernel(p01 - xy[i].center, c, sT, baseScale, t.w, p01) +
+        preview_kernel(p11 - xy[i].center, c, sT, baseScale, t.w, p11)
       );
       compensation = 1.0;
     }
@@ -5408,13 +8054,39 @@ fn fs(in: VertexOut) -> @location(0) vec4f {
     // that footprint so this preview control cannot create new out-of-frame tails.
     if (kernel >= 0.0003354626) {
       kernel = pow(kernel, clamp(uniforms.kernelFalloff, 0.0, 2.0));
-      let alpha = clamp(kernel * color[i].a * compensation, 0.0, 0.99);
+      // Match the optimizer contract exactly. Rectangle opacity is learned
+      // above a floor but composited with the shared 0.99 cap. Illustrative
+      // Oil uses its fixed per-splat opacity as the cap.
+      let alphaLimit = select(0.99, color[i].a, uniforms.shapeMode > 4.5);
+      let alpha = clamp(
+        kernel * color[i].a * max(uniforms.opacityMultiplier, 0.0) * compensation,
+        0.0,
+        alphaLimit
+      );
       if (alpha >= 0.0039215686) {
-        rgb += transmittance * alpha * color[i].rgb;
-        transmittance *= 1.0 - alpha;
+        let pigment = color[i].rgb;
+        let layer = preview_layer(t.w, accumulationLayerCount);
+        if (layerAware && activeLayer != accumulationLayerCount && layer != activeLayer) {
+          rgb += transmittance * layerRgb;
+          transmittance *= layerTransmittance;
+          layerRgb = vec3f(0.0);
+          layerTransmittance = 1.0;
+        }
+        if (layerAware) {
+          activeLayer = layer;
+          layerRgb += layerTransmittance * alpha * pigment;
+          layerTransmittance *= 1.0 - alpha;
+        } else {
+          rgb += transmittance * alpha * pigment;
+          transmittance *= 1.0 - alpha;
+        }
       }
     }
     cursor = cursor + 1u;
+  }
+  if (layerAware && activeLayer != accumulationLayerCount) {
+    rgb += transmittance * layerRgb;
+    transmittance *= layerTransmittance;
   }
   rgb += transmittance * vec3f(uniforms.alphaBgR, uniforms.alphaBgG, uniforms.alphaBgB);
   return vec4f(rgb, 1.0 - transmittance);
@@ -5609,6 +8281,33 @@ fn opacity_support_q(g: u32) -> f32 {
     const supportQExpression = aggressiveOpacitySupport
       ? "select(16.0, opacity_support_q(g), !virtual_tilt_enabled()) + 0.0001"
       : "16.0001";
+    const paintSupportFunctions = this.shapeAwarePaintCullingEnabled
+      ? `
+fn finite_paint_support(g: u32) -> bool {
+  return cfg(40u) > 0.5;
+}
+
+fn finite_paint_extent(g: u32) -> f32 {
+  if (cfg(40u) > 3.5) {
+    let oilFeatherMargin = pow(1.0 + clamp(cfg(41u), 0.01, 0.49), 0.25);
+    return ${LAYERED_OPAQUE_BRUSH_KERNEL_EXTENT} * oilFeatherMargin;
+  }
+  let widthRatios = rectangle_effective_width_ratios(
+    cfg(96u),
+    cfg(98u),
+    transform[g].w,
+    cfg(97u)
+  );
+  let rectangleFeatherMargin = 1.0 + 1.25 * clamp(cfg(41u), 0.01, 0.49);
+  return ${RECTANGLE_KERNEL_EXTENT} *
+    rectangle_area_compensation(widthRatios, cfg(97u)) *
+    rectangleFeatherMargin;
+}
+`
+      : `
+fn finite_paint_support(g: u32) -> bool { return false; }
+fn finite_paint_extent(g: u32) -> f32 { return 1.0; }
+`;
     const exactTileIntersectionFunction = exactTileIntersectionEnabled
       ? `
 fn normalized_coordinate(pixel: u32, size: u32) -> f32 {
@@ -5623,6 +8322,7 @@ fn minimum_quadratic_on_rect(dMin: vec2<f32>, dMax: vec2<f32>, a: f32, b: f32, c
   if (dMin.x <= 0.0 && dMax.x >= 0.0 && dMin.y <= 0.0 && dMax.y >= 0.0) {
     return 0.0;
   }
+
   var best = 1.0e30;
   var dx = dMin.x;
   var dy = clamp(-b * dx / c, dMin.y, dMax.y);
@@ -5641,12 +8341,13 @@ fn minimum_quadratic_on_rect(dMin: vec2<f32>, dMax: vec2<f32>, a: f32, b: f32, c
 fn tile_intersects_footprint(g: u32, tx: u32, ty: u32) -> bool {
   let width = u32(cfg(0u));
   let height = u32(cfg(1u));
-  let t = transform[g];
+  let sourceT = transform[g];
+  let t = sourceT;
   let baseScale = max(t.xy, vec2<f32>(0.0001));
   let pixelSigma = ${MIP_PIXEL_SIGMA} * 2.0 / max(cfg(0u), cfg(1u));
   let effective = sqrt(baseScale * baseScale + vec2<f32>(pixelSigma * pixelSigma));
   let useEwa = cfg(26u) > 0.5;
-  let sampleScale = select(effective, baseScale, useEwa);
+  var sampleScale = select(effective, baseScale, useEwa);
   let sampleOffset = select(0.5, 0.28867513459481287, cfg(31u) > 0.5);
   let padding = select(
     vec2<f32>(0.0),
@@ -5660,20 +8361,43 @@ fn tile_intersects_footprint(g: u32, tx: u32, ty: u32) -> bool {
   let maxPixel = min(vec2<u32>((tx + 1u) * ${TILE_SIZE}u - 1u, (ty + 1u) * ${TILE_SIZE}u - 1u), vec2<u32>(width - 1u, height - 1u));
   let rectMin = max(vec2<f32>(-1.0), vec2<f32>(normalized_coordinate(minPixel.x, width), normalized_coordinate(minPixel.y, height)) - padding);
   let rectMax = min(vec2<f32>(1.0), vec2<f32>(normalized_coordinate(maxPixel.x, width), normalized_coordinate(maxPixel.y, height)) + padding);
-  let cTheta = cos(t.z);
-  let sTheta = sin(t.z);
+  var footprintCenter = xy[g].center;
+  var footprintTheta = t.z;
+  var footprintQ = ${supportQExpression};
+  if (finite_paint_support(g)) {
+    sampleScale *= finite_paint_extent(g);
+    footprintQ = 2.0001;
+  }
+  if (virtual_tilt_enabled()) {
+    if (!camera_covariance_3d_enabled()) { return true; }
+    let layerZ = virtual_pass_layer_depth(t.w, xy[g].rawDepth);
+    let projected = project_planar_gaussian(xy[g].center, layerZ, t);
+    footprintCenter = projected.center;
+    footprintTheta = projected.theta;
+    sampleScale = max(projected.scale, vec2<f32>(0.0001));
+    footprintQ = 16.0001;
+  }
+  let cTheta = cos(footprintTheta);
+  let sTheta = sin(footprintTheta);
   let invScale2 = 1.0 / (sampleScale * sampleScale);
   let a = cTheta * cTheta * invScale2.x + sTheta * sTheta * invScale2.y;
   let b = cTheta * sTheta * (invScale2.x - invScale2.y);
   let c = sTheta * sTheta * invScale2.x + cTheta * cTheta * invScale2.y;
-  let center = xy[g].center;
-  let minimumQ = minimum_quadratic_on_rect(rectMin - center, rectMax - center, a, b, c);
-  return minimumQ <= ${supportQExpression};
+  let minimumQ = minimum_quadratic_on_rect(
+    rectMin - footprintCenter,
+    rectMax - footprintCenter,
+    a,
+    b,
+    c
+  );
+  return minimumQ <= footprintQ;
 }
 `
       : "";
     const exactTileIntersectionGuard = exactTileIntersectionEnabled
-      ? "if (!virtual_tilt_enabled() && !tile_intersects_footprint(g, tx, ty)) { continue; }"
+      ? this.projectedVirtualExactCullingEnabled
+        ? "if (!tile_intersects_footprint(g, tx, ty)) { continue; }"
+        : "if (!virtual_tilt_enabled() && !tile_intersects_footprint(g, tx, ty)) { continue; }"
       : "";
     const sortTilesFunction = `
 @compute @workgroup_size(1)
@@ -5706,7 +8430,7 @@ fn sort_tiles(
 }
 `;
     const shader = `
-struct Config { values: array<vec4<f32>, 21>, };
+struct Config { values: array<vec4<f32>, 25>, };
 @group(0) @binding(0) var<uniform> config: Config;
 struct SplatPosition { center: vec2<f32>, rawDepth: f32, depthGradient: f32, };
 @group(0) @binding(1) var<storage, read> xy: array<SplatPosition>;
@@ -5721,13 +8445,17 @@ ${opacitySupportDeclaration}
 fn cfg(i: u32) -> f32 { return config.values[i / 4u][i % 4u]; }
 
 ${VIRTUAL_TILT_WGSL}
+${RECTANGLE_TRAPEZOID_WGSL}
+${ILLUSTRATIVE_OIL_WGSL}
 ${opacitySupportFunction}
+${paintSupportFunctions}
 
 fn tile_bounds(g: u32) -> vec4<u32> {
   let width = u32(cfg(0u));
   let height = u32(cfg(1u));
+  let sourceT = transform[g];
   let center = xy[g].center;
-  let t = transform[g];
+  let t = sourceT;
   let c = cos(t.z);
   let s = sin(t.z);
   let pixelSigma = ${MIP_PIXEL_SIGMA} * 2.0 / max(cfg(0u), cfg(1u));
@@ -5742,9 +8470,12 @@ fn tile_bounds(g: u32) -> vec4<u32> {
       select(0.0, 0.5 / f32(u32(cfg(1u)) - 1u), u32(cfg(1u)) > 1u)
     );
   }
+  let finitePaint = finite_paint_support(g);
+  let boundsScale = select(effective, effective * finite_paint_extent(g), finitePaint);
+  let boundsSigma = select(${supportSigmaExpression}, 1.0, finitePaint);
   let radius = vec2<f32>(
-    ${supportSigmaExpression} * (abs(c) * effective.x + abs(s) * effective.y),
-    ${supportSigmaExpression} * (abs(s) * effective.x + abs(c) * effective.y)
+    boundsSigma * (abs(c) * boundsScale.x + abs(s) * boundsScale.y),
+    boundsSigma * (abs(s) * boundsScale.x + abs(c) * boundsScale.y)
   ) + pixelPadding;
   var minNorm = center - radius;
   var maxNorm = center + radius;
@@ -5877,6 +8608,155 @@ ${sortTilesFunction}`;
     ]);
   }
 
+  async ensureDiscreteLayerPipelines() {
+    if (this.discreteLayerAssignPipeline && this.discreteLayerCommitPipeline) return;
+    const shader = `
+struct Config { values: array<vec4<f32>, 21>, };
+struct SplatPosition { center: vec2<f32>, rawDepth: f32, depthGradient: f32, };
+@group(0) @binding(0) var<uniform> config: Config;
+@group(0) @binding(1) var<storage, read> xy: array<SplatPosition>;
+@group(0) @binding(2) var<storage, read_write> transform: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> tileOffsets: array<u32>;
+@group(0) @binding(4) var<storage, read> tileIndices: array<u32>;
+@group(0) @binding(5) var<storage, read_write> scratch: array<f32>;
+@group(0) @binding(6) var<storage, read> targetRgb: array<f32>;
+@group(0) @binding(7) var<storage, read_write> color: array<vec4<f32>>;
+
+fn cfg(index: u32) -> f32 { return config.values[index / 4u][index % 4u]; }
+fn packed_layer(packed: f32) -> f32 {
+  return clamp(min(fract(packed), ${LAYER_CODE_RANGE}) / ${LAYER_CODE_RANGE}, 0.0, 1.0);
+}
+fn quantized_layer_id(packed: f32, layerCount: u32) -> u32 {
+  return min(layerCount - 1u, u32(floor(min(packed_layer(packed), 0.999999) * f32(layerCount))));
+}
+fn in_layer_order(packed: f32, layerCount: u32) -> f32 {
+  return fract(min(packed_layer(packed), 0.999999) * f32(layerCount));
+}
+fn footprint_radius(t: vec4<f32>) -> vec2<f32> {
+  let c = abs(cos(t.z));
+  let s = abs(sin(t.z));
+  return ${RENDER_SIGMA} * vec2<f32>(c * t.x + s * t.y, s * t.x + c * t.y);
+}
+fn overlap_score(centerA: vec2<f32>, tA: vec4<f32>, centerB: vec2<f32>, tB: vec4<f32>) -> f32 {
+  let radiusA = footprint_radius(tA);
+  let radiusB = footprint_radius(tB);
+  let overlap = max(vec2<f32>(0.0), radiusA + radiusB - abs(centerA - centerB));
+  let intersection = overlap.x * overlap.y;
+  let minimumArea = max(0.00000001, min(4.0 * radiusA.x * radiusA.y, 4.0 * radiusB.x * radiusB.y));
+  return clamp(intersection / minimumArea, 0.0, 1.0);
+}
+
+fn target_at(center: vec2<f32>, width: u32, height: u32) -> vec3<f32> {
+  let safeCenter = clamp(center, vec2<f32>(-1.0), vec2<f32>(1.0));
+  let pixel = vec2<u32>(clamp(
+    round((safeCenter * 0.5 + 0.5) * vec2<f32>(f32(width - 1u), f32(height - 1u))),
+    vec2<f32>(0.0),
+    vec2<f32>(f32(width - 1u), f32(height - 1u))
+  ));
+  let offset = (pixel.y * width + pixel.x) * 3u;
+  return vec3<f32>(targetRgb[offset], targetRgb[offset + 1u], targetRgb[offset + 2u]);
+}
+
+@compute @workgroup_size(64)
+fn assign_layers(@builtin(global_invocation_id) id: vec3<u32>) {
+  let g = id.x;
+  let count = u32(cfg(2u));
+  if (g >= count) { return; }
+  let t = transform[g];
+  if (t.w < 0.5) { return; }
+  let layerCount = clamp(u32(round(cfg(82u))), ${MIN_DISCRETE_LAYER_COUNT}u, ${MAX_DISCRETE_LAYER_COUNT}u);
+  let baseLayer = quantized_layer_id(t.w, layerCount);
+  var costs: array<f32, ${MAX_DISCRETE_LAYER_COUNT}>;
+  for (var layer = 0u; layer < ${MAX_DISCRETE_LAYER_COUNT}u; layer += 1u) { costs[layer] = 0.0; }
+  let width = max(1u, u32(cfg(0u)));
+  let height = max(1u, u32(cfg(1u)));
+  let tileCols = (width + ${TILE_SIZE - 1}u) / ${TILE_SIZE}u;
+  let tileRows = (height + ${TILE_SIZE - 1}u) / ${TILE_SIZE}u;
+  let radius = footprint_radius(t);
+  let minPixel = vec2<u32>(clamp(
+    floor(((xy[g].center - radius) * 0.5 + 0.5) * vec2<f32>(f32(width - 1u), f32(height - 1u))),
+    vec2<f32>(0.0),
+    vec2<f32>(f32(width - 1u), f32(height - 1u))
+  ));
+  let maxPixel = vec2<u32>(clamp(
+    ceil(((xy[g].center + radius) * 0.5 + 0.5) * vec2<f32>(f32(width - 1u), f32(height - 1u))),
+    vec2<f32>(0.0),
+    vec2<f32>(f32(width - 1u), f32(height - 1u))
+  ));
+  let minTile = minPixel / ${TILE_SIZE}u;
+  let maxTile = min(maxPixel / ${TILE_SIZE}u, vec2<u32>(tileCols - 1u, tileRows - 1u));
+  let capacity = arrayLength(&tileIndices);
+  for (var tileY = minTile.y; tileY <= maxTile.y; tileY += 1u) {
+    for (var tileX = minTile.x; tileX <= maxTile.x; tileX += 1u) {
+      let tile = tileY * tileCols + tileX;
+      let begin = min(tileOffsets[tile] & 0x7fffffffu, capacity);
+      let end = min(tileOffsets[tile + 1u] & 0x7fffffffu, capacity);
+      for (var cursor = begin; cursor < end; cursor += 1u) {
+        let other = tileIndices[cursor];
+        if (other >= g || other >= count) { continue; }
+        let otherTransform = transform[other];
+        if (otherTransform.w < 0.5) { continue; }
+        let otherRadius = footprint_radius(otherTransform);
+        let otherMinPixel = vec2<u32>(clamp(
+          floor(((xy[other].center - otherRadius) * 0.5 + 0.5) * vec2<f32>(f32(width - 1u), f32(height - 1u))),
+          vec2<f32>(0.0),
+          vec2<f32>(f32(width - 1u), f32(height - 1u))
+        ));
+        let otherMinTile = otherMinPixel / ${TILE_SIZE}u;
+        let representativeTile = max(minTile, otherMinTile);
+        if (tileX != representativeTile.x || tileY != representativeTile.y) { continue; }
+        let score = overlap_score(xy[g].center, t, xy[other].center, otherTransform);
+        if (score <= 0.01) { continue; }
+        costs[quantized_layer_id(otherTransform.w, layerCount)] += score;
+      }
+    }
+  }
+  var selected = baseLayer;
+  var bestCost = costs[baseLayer];
+  let targetColorForGate = target_at(xy[g].center, width, height);
+  let targetColorError = dot(abs(color[g].rgb - targetColorForGate), vec3<f32>(0.33333334));
+  if (bestCost > 0.25) {
+    if (targetColorError > 0.075) {
+      // Fit stale hidden RGB without promoting it in the same layer event.
+      color[g] = vec4<f32>(targetColorForGate, color[g].a);
+    } else {
+      let moveRadius = clamp(u32(round(cfg(83u))), 1u, layerCount - 1u);
+      let firstCandidate = max(baseLayer, moveRadius) - moveRadius;
+      let lastCandidate = min(layerCount - 1u, baseLayer + moveRadius);
+      for (var layer = firstCandidate; layer <= lastCandidate; layer += 1u) {
+        let candidateCost = costs[layer] + 0.03 * abs(f32(layer) - f32(baseLayer));
+        if (candidateCost + 0.000001 * f32((layer + g * 17u) % layerCount) < bestCost * 0.8) {
+          selected = layer;
+          bestCost = candidateCost;
+        }
+      }
+    }
+  }
+  let quantized = (f32(selected) + in_layer_order(t.w, layerCount) * 0.999999) / f32(layerCount);
+  let out = g * 4u;
+  scratch[out] = t.x;
+  scratch[out + 1u] = t.y;
+  scratch[out + 2u] = t.z;
+  scratch[out + 3u] = floor(t.w) + quantized * ${LAYER_CODE_RANGE};
+}
+
+@compute @workgroup_size(64)
+fn commit_layers(@builtin(global_invocation_id) id: vec3<u32>) {
+  let g = id.x;
+  if (g >= u32(cfg(2u))) { return; }
+  let offset = g * 4u;
+  transform[g] = vec4<f32>(scratch[offset], scratch[offset + 1u], scratch[offset + 2u], scratch[offset + 3u]);
+}`;
+    const module = this.device.createShaderModule({ code: shader });
+    const info = await module.getCompilationInfo();
+    const errors = info.messages.filter((message) => message.type === "error");
+    if (errors.length) throw new Error(errors.map((message) => message.message).join(" | "));
+    [this.discreteLayerAssignPipeline, this.discreteLayerCommitPipeline] = await Promise.all([
+      this.device.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint: "assign_layers" } }),
+      this.device.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint: "commit_layers" } }),
+    ]);
+  }
+
   async prepareTileLists(
     image,
     params,
@@ -5899,6 +8779,7 @@ ${sortTilesFunction}`;
     config[45] = params.layerOrderEnabled ? 1 : 0;
     config[67] = params.virtualDepthEnabled ? 1 : 0;
     config[68] = params.virtualDepthEnabled ? Number(params.virtualDepthThickness) || DEFAULT_VIRTUAL_DEPTH_THICKNESS : 0;
+    configurePaintKernel(config, params);
     if (writeConfig) this.device.queue.writeBuffer(this.trainState.configBuffer, 0, config);
     const front = this.trainState.front;
     const common = [
@@ -5909,41 +8790,34 @@ ${sortTilesFunction}`;
         ? [{ binding: 8, resource: { buffer: this.trainState.colorBuffers[front] } }]
         : []),
     ];
-    const countBindGroup = this.device.createBindGroup({
-      layout: this.tileCountPipeline.getBindGroupLayout(0),
-      entries: [
+    const tileBindGroup = (kind, pipeline, entries) => this.trainBindGroup(
+      `tile-${kind}:${front}:${this.opacityAwareSupportMode}`,
+      pipeline,
+      entries,
+    );
+    const countBindGroup = tileBindGroup("count", this.tileCountPipeline, [
         ...common,
         { binding: 3, resource: { buffer: this.trainState.tileCountsBuffer } },
-      ],
-    });
-    const prefixBindGroup = this.device.createBindGroup({
-      layout: this.tilePrefixPipeline.getBindGroupLayout(0),
-      entries: [
+      ]);
+    const prefixBindGroup = tileBindGroup("prefix", this.tilePrefixPipeline, [
         { binding: 3, resource: { buffer: this.trainState.tileCountsBuffer } },
         { binding: 4, resource: { buffer: this.trainState.tileOffsetsBuffer } },
         { binding: 6, resource: { buffer: this.trainState.tileIndicesBuffer } },
         { binding: 7, resource: { buffer: this.trainState.tileControlBuffer } },
-      ],
-    });
-    const fillBindGroup = this.device.createBindGroup({
-      layout: this.tileFillPipeline.getBindGroupLayout(0),
-      entries: [
+      ]);
+    const fillBindGroup = tileBindGroup("fill", this.tileFillPipeline, [
         ...common,
         { binding: 4, resource: { buffer: this.trainState.tileOffsetsBuffer } },
         { binding: 5, resource: { buffer: this.trainState.tileCursorsBuffer } },
         { binding: 6, resource: { buffer: this.trainState.tileIndicesBuffer } },
-      ],
-    });
-    const sortBindGroup = this.device.createBindGroup({
-      layout: this.tileSortPipeline.getBindGroupLayout(0),
-      entries: [
+      ]);
+    const sortBindGroup = tileBindGroup("sort", this.tileSortPipeline, [
         { binding: 0, resource: { buffer: this.trainState.configBuffer } },
         { binding: 1, resource: { buffer: this.trainState.xyBuffers[front] } },
         { binding: 2, resource: { buffer: this.trainState.transformBuffers[front] } },
         { binding: 4, resource: { buffer: this.trainState.tileOffsetsBuffer } },
         { binding: 6, resource: { buffer: this.trainState.tileIndicesBuffer } },
-      ],
-    });
+      ]);
     const commandEncoder = encoder || this.device.createCommandEncoder();
     commandEncoder.clearBuffer(this.trainState.tileCountsBuffer);
     commandEncoder.clearBuffer(this.trainState.tileCursorsBuffer);
@@ -6023,6 +8897,75 @@ ${sortTilesFunction}`;
         qa_readback_bytes: includeDistribution ? controlBytes + distributionBytes : 0,
         active_count: this.trainState.count,
         free_count: Math.max(0, this.trainState.capacity - this.trainState.count),
+      };
+    } finally {
+      readBuffer.destroy();
+    }
+  }
+
+  async readLayerTileDiagnostics(params, layerCounts = [5, 10]) {
+    if (!this.trainState?.tileReady || !params?.depthOrder || params.count <= 0) return null;
+    const counters = await this.readTileCounters();
+    if (!counters) return null;
+    const tileCount = this.trainState.tileCount;
+    const total = Math.min(counters.total, this.trainState.tileIndexCapacity);
+    const offsetBytes = (tileCount + 1) * 4;
+    const indexBytes = total * 4;
+    const readBuffer = this.device.createBuffer({
+      size: Math.max(4, offsetBytes + indexBytes),
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    try {
+      const encoder = this.device.createCommandEncoder();
+      encoder.copyBufferToBuffer(this.trainState.tileOffsetsBuffer, 0, readBuffer, 0, offsetBytes);
+      if (indexBytes > 0) {
+        encoder.copyBufferToBuffer(this.trainState.tileIndicesBuffer, 0, readBuffer, offsetBytes, indexBytes);
+      }
+      this.device.queue.submit([encoder.finish()]);
+      await readBuffer.mapAsync(GPUMapMode.READ);
+      const mapped = readBuffer.getMappedRange();
+      const offsets = new Uint32Array(mapped, 0, tileCount + 1).slice();
+      const indices = indexBytes > 0
+        ? new Uint32Array(mapped, offsetBytes, total).slice()
+        : new Uint32Array();
+      readBuffer.unmap();
+      const referenceCounts = new Uint32Array(params.count);
+      for (const index of indices) {
+        if (index < params.count) referenceCounts[index] += 1;
+      }
+      const comparisonCost = (count) => count > 1 ? count * Math.log2(count) : 0;
+      const quantization = {};
+      for (const rawLayerCount of layerCounts) {
+        const layerCount = Math.max(2, Math.floor(rawLayerCount));
+        let fullSortCost = 0;
+        let bucketSortCost = 0;
+        for (let tile = 0; tile < tileCount; tile += 1) {
+          const begin = Math.min(total, offsets[tile]);
+          const end = Math.min(total, offsets[tile + 1]);
+          const bins = new Uint32Array(layerCount);
+          for (let cursor = begin; cursor < end; cursor += 1) {
+            const index = indices[cursor];
+            if (index >= params.count) continue;
+            const layer = Math.max(0, Math.min(1, params.depthOrder[index]));
+            bins[Math.min(layerCount - 1, Math.floor(layer * layerCount))] += 1;
+          }
+          fullSortCost += comparisonCost(end - begin);
+          for (const count of bins) bucketSortCost += comparisonCost(count);
+        }
+        quantization[layerCount] = {
+          layer_count: layerCount,
+          estimated_comparison_reduction_ratio: fullSortCost > 0
+            ? 1 - bucketSortCost / fullSortCost
+            : 0,
+          full_sort_cost: fullSortCost,
+          bucket_sort_cost: bucketSortCost,
+        };
+      }
+      return {
+        total_tile_references: total,
+        tile_count: tileCount,
+        per_splat_reference_count: referenceCounts,
+        quantization,
       };
     } finally {
       readBuffer.destroy();
@@ -6136,7 +9079,145 @@ ${sortTilesFunction}`;
       tileIndicesBuffer: this.trainState.tileIndicesBuffer,
       pixelStateBuffer: this.trainState.pixelStateBuffer,
       ssimTileBuffer: this.trainState.ssimTileBuffer,
+      orderMode: "tiles",
     };
+  }
+
+  resultRenderMemorySnapshot() {
+    const buffers = this.resultRenderState?.buffers || [];
+    const bytes = buffers.reduce((total, buffer) => total + Math.max(0, Number(buffer?.size) || 0), 0);
+    return { activeBytes: bytes, reservedBytes: bytes };
+  }
+
+  disposeResultRenderState() {
+    if (!this.resultRenderState) return;
+    destroyBuffers(...this.resultRenderState.buffers);
+    this.resultRenderState = null;
+    updateGpuMemoryStatus();
+  }
+
+  currentResultBuffers(params) {
+    const result = this.resultRenderState;
+    if (!result || result.count !== params?.count) return null;
+    return {
+      xyBuffer: result.xyBuffer,
+      transformBuffer: result.transformBuffer,
+      colorBuffer: result.colorBuffer,
+      tileOffsetsBuffer: result.tileOffsetsBuffer,
+      tileIndicesBuffer: result.tileIndicesBuffer,
+      orderMode: result.orderMode,
+    };
+  }
+
+  async preserveResultRenderState(image, params) {
+    if (!this.trainState || this.trainState.count !== params.count) return false;
+    this.disposeResultRenderState();
+    const count = params.count;
+    const front = this.trainState.front;
+    const parameterBytes = Math.max(16, count * 4 * 4);
+    const buffers = [];
+    const makeResultBuffer = (size) => {
+      const buffer = this.device.createBuffer({
+        size: Math.max(4, Math.ceil(size / 4) * 4),
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+      });
+      buffers.push(buffer);
+      return buffer;
+    };
+    const xyBuffer = makeResultBuffer(parameterBytes);
+    const transformBuffer = makeResultBuffer(parameterBytes);
+    const colorBuffer = makeResultBuffer(parameterBytes);
+    const encoder = this.device.createCommandEncoder();
+    encoder.copyBufferToBuffer(this.trainState.xyBuffers[front], 0, xyBuffer, 0, parameterBytes);
+    encoder.copyBufferToBuffer(this.trainState.transformBuffers[front], 0, transformBuffer, 0, parameterBytes);
+    encoder.copyBufferToBuffer(this.trainState.colorBuffers[front], 0, colorBuffer, 0, parameterBytes);
+    let tileOffsetsBuffer = null;
+    let tileIndicesBuffer = null;
+    let orderMode = "none";
+    const tileCount = Math.ceil(image.width / TILE_SIZE) * Math.ceil(image.height / TILE_SIZE);
+    const tileReferences = Math.max(
+      0,
+      Math.min(
+        this.trainState.tileIndexCapacity,
+        Math.round(Number(state.metrics?.tile_counters?.total) || 0),
+      ),
+    );
+    if (
+      els.tileCullingToggle.checked &&
+      this.trainState.tileReady &&
+      this.trainState.pixelStateKind === "full" &&
+      tileReferences > 0
+    ) {
+      const tileOffsetBytes = Math.max(4, (tileCount + 1) * 4);
+      const tileIndexBytes = Math.max(4, tileReferences * 4);
+      tileOffsetsBuffer = makeResultBuffer(tileOffsetBytes);
+      tileIndicesBuffer = makeResultBuffer(tileIndexBytes);
+      encoder.copyBufferToBuffer(this.trainState.tileOffsetsBuffer, 0, tileOffsetsBuffer, 0, tileOffsetBytes);
+      encoder.copyBufferToBuffer(this.trainState.tileIndicesBuffer, 0, tileIndicesBuffer, 0, tileIndexBytes);
+      orderMode = "tiles";
+    }
+    this.device.queue.submit([encoder.finish()]);
+    await this.device.queue.onSubmittedWorkDone();
+    this.resultRenderState = {
+      count,
+      xyBuffer,
+      transformBuffer,
+      colorBuffer,
+      tileOffsetsBuffer,
+      tileIndicesBuffer,
+      orderMode,
+      buffers,
+    };
+    if (state.metrics) {
+      state.metrics.result_render_cache = {
+        source: "gpu-final-state-copy",
+        count,
+        order_mode: orderMode,
+        bytes: this.resultRenderMemorySnapshot().reservedBytes,
+        tile_references: orderMode === "tiles" ? tileReferences : 0,
+      };
+    }
+    updateGpuMemoryStatus();
+    return true;
+  }
+
+  async uploadResultRenderState(params) {
+    if (!params?.count) return false;
+    this.disposeResultRenderState();
+    const xyBuffer = makeBuffer(this.device, packPositions(params), GPUBufferUsage.STORAGE);
+    const transformBuffer = makeBuffer(this.device, packTransforms(params), GPUBufferUsage.STORAGE);
+    const colorBuffer = makeBuffer(this.device, packColors(params), GPUBufferUsage.STORAGE);
+    const ordered = new Uint32Array(params.count);
+    for (let index = 0; index < params.count; index += 1) ordered[index] = index;
+    if (params.layerOrderEnabled) ordered.sort((a, b) => layerOrderComparator(a, b, params));
+    const tileOffsetsBuffer = makeBuffer(
+      this.device,
+      new Uint32Array([0, params.count]),
+      GPUBufferUsage.STORAGE,
+    );
+    const tileIndicesBuffer = makeBuffer(this.device, ordered, GPUBufferUsage.STORAGE);
+    this.resultRenderState = {
+      count: params.count,
+      xyBuffer,
+      transformBuffer,
+      colorBuffer,
+      tileOffsetsBuffer,
+      tileIndicesBuffer,
+      orderMode: "global",
+      buffers: [xyBuffer, transformBuffer, colorBuffer, tileOffsetsBuffer, tileIndicesBuffer],
+    };
+    await this.device.queue.onSubmittedWorkDone();
+    if (state.metrics) {
+      state.metrics.result_render_cache = {
+        source: "cpu-recovery-upload-once",
+        count: params.count,
+        order_mode: "global",
+        bytes: this.resultRenderMemorySnapshot().reservedBytes,
+        tile_references: 0,
+      };
+    }
+    updateGpuMemoryStatus();
+    return true;
   }
 
   async render(image, params, sourceBuffers = null, targetView = null, options = {}) {
@@ -6152,13 +9233,31 @@ ${sortTilesFunction}`;
     const kernelFalloff = Number.isFinite(Number(options.kernelFalloff))
       ? Math.max(0, Math.min(2, Number(options.kernelFalloff)))
       : 1;
-    const shapeMode = options.splatShape === "rectangle" ? 1 : 0;
+    const requestedShape = options.splatShape || trainedSplatShape(params);
+    const shapeMode = requestedShape === "opaque-brush"
+      ? 5
+      : requestedShape === "box"
+          ? 2
+          : requestedShape === "rectangle" ? 1 : 0;
     const useSplatPreviewOrder = Boolean(options.splatSmallFirstOrder);
-    // Shape changes only the footprint kernel. Rectangle and Gaussian share
-    // the trained layer order unless the user explicitly enables the
+    // Shape changes only the footprint kernel. Paint kernels and Gaussian
+    // share the trained layer order unless the user explicitly enables the
     // preview-only small-first override.
-    const useTileOrder = !useSplatPreviewOrder && !padded && els.tileCullingToggle.checked && Boolean(sourceBuffers?.tileOffsetsBuffer);
-    const useGlobalOrder = !useTileOrder && (Boolean(params.layerOrderEnabled) || useSplatPreviewOrder);
+    const useTileOrder =
+      !useSplatPreviewOrder &&
+      !padded &&
+      els.tileCullingToggle.checked &&
+      sourceBuffers?.orderMode === "tiles" &&
+      Boolean(sourceBuffers?.tileOffsetsBuffer);
+    const useCachedGlobalOrder =
+      !useTileOrder &&
+      sourceBuffers?.orderMode === "global" &&
+      Boolean(sourceBuffers?.tileOffsetsBuffer) &&
+      Boolean(sourceBuffers?.tileIndicesBuffer);
+    const useGlobalOrder =
+      !useTileOrder &&
+      !useCachedGlobalOrder &&
+      (Boolean(params.layerOrderEnabled) || useSplatPreviewOrder);
     const uniform = new Float32Array([
       preview.width,
       preview.height,
@@ -6166,7 +9265,7 @@ ${sortTilesFunction}`;
       params.bg[0],
       params.bg[1],
       params.bg[2],
-      useTileOrder ? 1 : useGlobalOrder ? 2 : 0,
+      useTileOrder ? 1 : useCachedGlobalOrder || useGlobalOrder ? 2 : 0,
       phase33Variants().ewa2x2 ? 1 : 0,
       image.width,
       image.height,
@@ -6178,9 +9277,36 @@ ${sortTilesFunction}`;
       alphaBackground[2] || 0,
       kernelFalloff,
       shapeMode,
+      params.layerAwareAccumulationEnabled ? 1 : 0,
+      Math.max(MIN_DISCRETE_LAYER_COUNT, Math.min(MAX_DISCRETE_LAYER_COUNT, Math.round(params.discreteLayerCount || DEFAULT_DISCRETE_LAYER_COUNT))),
+      0,
+      0,
+      clampNumber(
+        params.rectangleTopRatio,
+        MIN_RECTANGLE_TOP_RATIO,
+        MAX_RECTANGLE_TOP_RATIO,
+        selectedRectangleTopRatio(),
+      ),
+      clampNumber(
+        params.rectangleTopRatioMax,
+        params.rectangleTopRatio,
+        MAX_RECTANGLE_TOP_RATIO,
+        selectedRectangleTopRatioMax(params.rectangleTopRatio),
+      ),
+      rectangleShapeFlags(params),
+      Number.isFinite(Number(options.opacityMultiplier))
+        ? Math.max(0, Number(options.opacityMultiplier))
+        : 1,
+      Number.isFinite(Number(options.splatScaleMultiplier))
+        ? Math.max(0, Number(options.splatScaleMultiplier))
+        : 1,
+      Math.max(0.000001, Number(options.localAspectRatio) || 1),
+      0,
+      0,
+      0,
+      0,
     ]);
-    const uniformBuffer = makeBuffer(this.device, uniform, GPUBufferUsage.UNIFORM);
-    const buffers = [uniformBuffer];
+    const buffers = [];
     let xyBuffer = sourceBuffers?.xyBuffer;
     let transformBuffer = sourceBuffers?.transformBuffer;
     let colorBuffer = sourceBuffers?.colorBuffer;
@@ -6203,23 +9329,88 @@ ${sortTilesFunction}`;
       tileOffsetsBuffer = makeBuffer(this.device, new Uint32Array([0, params.count]), GPUBufferUsage.STORAGE);
       tileIndicesBuffer = makeBuffer(this.device, ordered, GPUBufferUsage.STORAGE);
       buffers.push(tileOffsetsBuffer, tileIndicesBuffer);
+    } else if (useCachedGlobalOrder) {
+      tileOffsetsBuffer = sourceBuffers.tileOffsetsBuffer;
+      tileIndicesBuffer = sourceBuffers.tileIndicesBuffer;
     } else if (!tileOffsetsBuffer || !tileIndicesBuffer) {
       tileOffsetsBuffer = makeBuffer(this.device, new Uint32Array([0, params.count]), GPUBufferUsage.STORAGE);
       tileIndicesBuffer = makeBuffer(this.device, new Uint32Array([0]), GPUBufferUsage.STORAGE);
       buffers.push(tileOffsetsBuffer, tileIndicesBuffer);
     }
+    const resultState = this.resultRenderState;
+    const usePersistentPreviewState =
+      !useGlobalOrder &&
+      resultState?.count === params.count &&
+      xyBuffer === resultState.xyBuffer &&
+      transformBuffer === resultState.transformBuffer &&
+      colorBuffer === resultState.colorBuffer &&
+      tileOffsetsBuffer === resultState.tileOffsetsBuffer &&
+      tileIndicesBuffer === resultState.tileIndicesBuffer;
+    let uniformBuffer;
+    let bindGroup;
+    if (usePersistentPreviewState) {
+      if (!resultState.previewUniformBuffer) {
+        resultState.previewUniformBuffer = this.device.createBuffer({
+          size: Math.ceil(uniform.byteLength / 4) * 4,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        resultState.buffers.push(resultState.previewUniformBuffer);
+        resultState.previewUniformAllocations =
+          (resultState.previewUniformAllocations || 0) + 1;
+      }
+      uniformBuffer = resultState.previewUniformBuffer;
+      this.device.queue.writeBuffer(
+        uniformBuffer,
+        0,
+        uniform.buffer,
+        uniform.byteOffset,
+        uniform.byteLength,
+      );
+      resultState.previewUniformWrites =
+        (resultState.previewUniformWrites || 0) + 1;
+      if (!resultState.previewBindGroup || resultState.previewPipeline !== this.pipeline) {
+        resultState.previewBindGroup = this.device.createBindGroup({
+          layout: this.pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: uniformBuffer } },
+            { binding: 1, resource: { buffer: xyBuffer } },
+            { binding: 2, resource: { buffer: transformBuffer } },
+            { binding: 3, resource: { buffer: colorBuffer } },
+            { binding: 4, resource: { buffer: tileOffsetsBuffer } },
+            { binding: 5, resource: { buffer: tileIndicesBuffer } },
+          ],
+        });
+        resultState.previewPipeline = this.pipeline;
+        resultState.previewBindGroupCreations =
+          (resultState.previewBindGroupCreations || 0) + 1;
+      }
+      bindGroup = resultState.previewBindGroup;
+      if (state.metrics?.result_render_cache) {
+        state.metrics.result_render_cache.preview_uniform_allocations =
+          resultState.previewUniformAllocations || 0;
+        state.metrics.result_render_cache.preview_uniform_writes =
+          resultState.previewUniformWrites || 0;
+        state.metrics.result_render_cache.preview_bind_group_creations =
+          resultState.previewBindGroupCreations || 0;
+        state.metrics.result_render_cache.bytes =
+          this.resultRenderMemorySnapshot().reservedBytes;
+      }
+    } else {
+      uniformBuffer = makeBuffer(this.device, uniform, GPUBufferUsage.UNIFORM);
+      buffers.push(uniformBuffer);
+    }
     try {
-      const bindGroup = this.device.createBindGroup({
-        layout: this.pipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: uniformBuffer } },
-          { binding: 1, resource: { buffer: xyBuffer } },
-          { binding: 2, resource: { buffer: transformBuffer } },
-          { binding: 3, resource: { buffer: colorBuffer } },
-          { binding: 4, resource: { buffer: tileOffsetsBuffer } },
-          { binding: 5, resource: { buffer: tileIndicesBuffer } },
-        ],
-      });
+      bindGroup ||= this.device.createBindGroup({
+          layout: this.pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: uniformBuffer } },
+            { binding: 1, resource: { buffer: xyBuffer } },
+            { binding: 2, resource: { buffer: transformBuffer } },
+            { binding: 3, resource: { buffer: colorBuffer } },
+            { binding: 4, resource: { buffer: tileOffsetsBuffer } },
+            { binding: 5, resource: { buffer: tileIndicesBuffer } },
+          ],
+        });
       const encoder = this.device.createCommandEncoder();
       const pass = encoder.beginRenderPass({
         colorAttachments: [
@@ -6237,7 +9428,12 @@ ${sortTilesFunction}`;
       pass.draw(4);
       pass.end();
       this.device.queue.submit([encoder.finish()]);
-      await this.device.queue.onSubmittedWorkDone();
+      // Persistent result-cache renders own every referenced buffer and WebGPU
+      // submission order preserves the latest-only preview sequence. Fence only
+      // when a temporary resource must be destroyed or a capture target follows.
+      if (buffers.length > 0 || targetView) {
+        await this.device.queue.onSubmittedWorkDone();
+      }
     } finally {
       destroyBuffers(...buffers);
     }
@@ -6457,6 +9653,40 @@ fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
 
   async ensureRenderGradientPipelines() {
     const legacyGradientSupported = Number(this.device.limits?.maxStorageBuffersPerShaderStage || 8) >= 9;
+    const segmentedExactBackwardEnabled = Boolean(this.trainState?.segmentedExactBackward?.enabled);
+    const fixedPointExactGradientEnabled = Boolean(this.trainState?.fixedPointExactGradient?.enabled);
+    const inverseScaleOptimizationEnabled = Boolean(this.inverseScaleOptimizationRequested);
+    if (
+      this.compiledSegmentedExactBackward !== null &&
+      this.compiledSegmentedExactBackward !== segmentedExactBackwardEnabled
+    ) {
+      this.exactAlphaBackwardPipeline = null;
+      this.sourceDomainBackwardPipeline = null;
+      this.segmentedReferenceCountPipeline = null;
+      this.segmentedReferencePrefixPipeline = null;
+      this.segmentedReferenceFillPipeline = null;
+      this.segmentedGradientReducePipeline = null;
+      this.trainState?.bindGroupCache?.clear();
+    }
+    if (
+      this.compiledInverseScaleOptimization !== null &&
+      this.compiledInverseScaleOptimization !== inverseScaleOptimizationEnabled
+    ) {
+      this.renderGradientPipeline = null;
+      this.parallelRenderGradientPipeline = null;
+      this.exactOptimizerPipeline = null;
+      this.trainState?.bindGroupCache?.clear();
+    }
+    if (
+      this.compiledFixedPointExactGradient !== null &&
+      this.compiledFixedPointExactGradient !== fixedPointExactGradientEnabled
+    ) {
+      this.exactAlphaBackwardPipeline = null;
+      this.sourceDomainBackwardPipeline = null;
+      this.virtualOrderPenaltyPipeline = null;
+      this.exactOptimizerPipeline = null;
+      this.trainState?.bindGroupCache?.clear();
+    }
     if (
       this.renderStatePipeline &&
       this.tileCooperativeRenderPipeline &&
@@ -6467,7 +9697,13 @@ fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
       this.sourceDomainBackwardPipeline &&
       this.virtualOrderPenaltyPipeline &&
       this.exactBackwardTelemetryPipeline &&
-      this.exactOptimizerPipeline
+      this.exactOptimizerPipeline &&
+      (!segmentedExactBackwardEnabled || (
+        this.segmentedReferenceCountPipeline &&
+        this.segmentedReferencePrefixPipeline &&
+        this.segmentedReferenceFillPipeline &&
+        this.segmentedGradientReducePipeline
+      ))
     ) return;
     const optimizerStatsDeclaration = "@group(0) @binding(8) var<storage, read_write> stats: array<vec4<f32>>;";
     const optimizerStatsUpdate = `adam[g] = opt;
@@ -6487,7 +9723,7 @@ fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   let importanceW = select(previousImportance.w + 1.0, previousImportance.w + coherenceNorm, densityGradientMode == 2u);
   stats[capacity + g] = vec4<f32>(mix(previousImportance.xyz, measuredImportance, importanceAlpha), importanceW);`;
     const renderShader = `
-struct Config { values: array<vec4<f32>, 19>, };
+struct Config { values: array<vec4<f32>, 25>, };
 struct AlphaState { compositeAlpha: f32, acceptedEnd: u32, pad0: f32, pad1: u32, };
 @group(0) @binding(0) var<uniform> config: Config;
 struct SplatPosition { center: vec2<f32>, rawDepth: f32, depthGradient: f32, };
@@ -6501,12 +9737,53 @@ struct SplatPosition { center: vec2<f32>, rawDepth: f32, depthGradient: f32, };
 
 fn cfg(i: u32) -> f32 { return config.values[i / 4u][i % 4u]; }
 
+fn accumulation_layer(packed: f32, layerCount: u32) -> u32 {
+  let order = clamp(min(fract(packed), ${LAYER_CODE_RANGE}) / ${LAYER_CODE_RANGE}, 0.0, 0.999999);
+  return min(layerCount - 1u, u32(floor(order * f32(layerCount))));
+}
+
 ${VIRTUAL_TILT_WGSL}
+${RECTANGLE_TRAPEZOID_WGSL}
+${ILLUSTRATIVE_OIL_WGSL}
 
 fn gaussian_kernel(d: vec2<f32>, c: f32, s: f32, scale: vec2<f32>) -> f32 {
   let r = vec2<f32>(c * d.x + s * d.y, -s * d.x + c * d.y);
   let q = dot(r / scale, r / scale);
   return exp(-0.5 * q);
+}
+
+fn training_kernel(d: vec2<f32>, c: f32, s: f32, scale: vec2<f32>, packedTag: f32) -> f32 {
+  if (cfg(40u) < 0.5) {
+    return gaussian_kernel(d, c, s, scale);
+  }
+  let r = vec2<f32>(c * d.x + s * d.y, -s * d.x + c * d.y);
+  if (cfg(40u) > 3.5) {
+    let normalized = r / max(scale * ${LAYERED_OPAQUE_BRUSH_KERNEL_EXTENT}, vec2<f32>(0.0001));
+    return illustrative_oil_kernel_sample(
+      normalized,
+      scale.x >= scale.y,
+      clamp(cfg(41u), 0.01, 0.49),
+      illustrative_oil_family(scale, packedTag)
+    ).kernel;
+  }
+  let widthRatios = rectangle_effective_width_ratios(
+    cfg(96u),
+    cfg(98u),
+    packedTag,
+    cfg(97u)
+  );
+  let areaCompensation = rectangle_area_compensation(widthRatios, cfg(97u));
+  let normalized = r / max(
+    scale * ${RECTANGLE_KERNEL_EXTENT} * areaCompensation,
+    vec2<f32>(0.0001)
+  );
+  return rectangle_trapezoid_kernel_sample(
+    normalized,
+    cfg(41u),
+    widthRatios.x,
+    widthRatios.y,
+    rectangle_flag_enabled(cfg(97u), ${RECTANGLE_FLAG_ASYMMETRIC_SOFTNESS}u)
+  ).kernel;
 }
 
 fn tile_offset(index: u32) -> u32 {
@@ -6522,6 +9799,8 @@ var<workgroup> tileShared0: array<vec4<f32>, ${TILE_SIZE * TILE_SIZE}>;
 var<workgroup> tileShared1: array<vec4<f32>, ${TILE_SIZE * TILE_SIZE}>;
 var<workgroup> tileSharedColor: array<vec4<f32>, ${TILE_SIZE * TILE_SIZE}>;
 var<workgroup> tileSharedLayer: array<f32, ${TILE_SIZE * TILE_SIZE}>;
+var<workgroup> tileSharedPackedOrder: array<f32, ${TILE_SIZE * TILE_SIZE}>;
+var<workgroup> tileSharedIndex: array<u32, ${TILE_SIZE * TILE_SIZE}>;
 
 @compute @workgroup_size(64)
 fn render_state(
@@ -6569,6 +9848,11 @@ fn render_state(
   let pixelSigma = ${MIP_PIXEL_SIGMA} * 2.0 / max(cfg(0u), cfg(1u));
   var rendered = vec3<f32>(0.0);
   var transmittance = 1.0;
+  let layerAware = cfg(84u) > 0.5;
+  let accumulationLayerCount = clamp(u32(round(cfg(82u))), ${MIN_DISCRETE_LAYER_COUNT}u, ${MAX_DISCRETE_LAYER_COUNT}u);
+  var activeLayer = accumulationLayerCount;
+  var layerRendered = vec3<f32>(0.0);
+  var layerTransmittance = 1.0;
   var cursor = start;
   var acceptedEnd = start;
   var contributorCount = 0u;
@@ -6576,7 +9860,8 @@ fn render_state(
     if (cursor >= end) { break; }
     var g = cursor;
     if (useTiles) { g = tileIndices[cursor]; }
-    let t = transform[g];
+    let sourceT = transform[g];
+    let t = sourceT;
     if (t.w >= 0.5) {
       var center = xy[g].center;
       var c = cos(t.z);
@@ -6584,7 +9869,11 @@ fn render_state(
       var baseScale = max(t.xy, vec2<f32>(0.0001));
       var effective = sqrt(baseScale * baseScale + vec2<f32>(pixelSigma * pixelSigma));
       var sampleScale = effective;
-      var mip = sqrt((baseScale.x * baseScale.y) / max(effective.x * effective.y, 0.00000001));
+      var mip = select(
+        sqrt((baseScale.x * baseScale.y) / max(effective.x * effective.y, 0.00000001)),
+        1.0,
+        cfg(40u) > 0.5
+      );
       let useEwa = cfg(26u) > 0.5;
       if (useEwa) {
         sampleScale = baseScale;
@@ -6602,12 +9891,12 @@ fn render_state(
         mip = select(
           sqrt((baseScale.x * baseScale.y) / max(effective.x * effective.y, 0.00000001)),
           1.0,
-          useEwa
+          useEwa || cfg(40u) > 0.5
         );
       }
       let splatPoint = select(virtual_inverse_point_at_z(outputPoint, layerZ).xy, outputPoint, camera_covariance_3d_enabled());
       let d = splatPoint - center;
-      var kernel = gaussian_kernel(d, c, s, sampleScale);
+      var kernel = training_kernel(d, c, s, sampleScale, t.w);
       if (useEwa) {
         let sampleOffset = select(0.5, 0.28867513459481287, cfg(31u) > 0.5);
         let ox = select(0.0, sampleOffset / f32(width - 1u), width > 1u);
@@ -6621,24 +9910,46 @@ fn render_state(
         let q01 = select(virtual_inverse_point_at_z(p01, layerZ).xy, p01, camera_covariance_3d_enabled());
         let q11 = select(virtual_inverse_point_at_z(p11, layerZ).xy, p11, camera_covariance_3d_enabled());
         kernel = 0.25 * (
-          gaussian_kernel(q00 - center, c, s, baseScale) +
-          gaussian_kernel(q10 - center, c, s, baseScale) +
-          gaussian_kernel(q01 - center, c, s, baseScale) +
-          gaussian_kernel(q11 - center, c, s, baseScale)
+          training_kernel(q00 - center, c, s, baseScale, t.w) +
+          training_kernel(q10 - center, c, s, baseScale, t.w) +
+          training_kernel(q01 - center, c, s, baseScale, t.w) +
+          training_kernel(q11 - center, c, s, baseScale, t.w)
         );
       }
       if (kernel >= 0.0003354626) {
-        let alpha = clamp(kernel * color[g].a * mip, 0.0, 0.99);
+        let fixedOpaque = cfg(85u) > 0.5 && cfg(90u) < 0.5;
+        let minimumOpacity = select(0.0, cfg(88u), cfg(85u) > 0.5 && cfg(90u) > 0.5);
+        let effectiveOpacity = select(max(color[g].a, minimumOpacity) * mip, cfg(88u), fixedOpaque);
+        let alphaLimit = select(0.99, cfg(88u), fixedOpaque);
+        let alpha = clamp(kernel * effectiveOpacity, 0.0, alphaLimit);
         if (alpha >= 0.0039215686) {
-          rendered += transmittance * alpha * color[g].rgb;
-          transmittance *= 1.0 - alpha;
+          let surfaceRgb = color[g].rgb;
+          let layer = accumulation_layer(t.w, accumulationLayerCount);
+          if (layerAware && activeLayer != accumulationLayerCount && layer != activeLayer) {
+            rendered += transmittance * layerRendered;
+            transmittance *= layerTransmittance;
+            layerRendered = vec3<f32>(0.0);
+            layerTransmittance = 1.0;
+          }
+          if (layerAware) {
+            activeLayer = layer;
+            layerRendered += layerTransmittance * alpha * surfaceRgb;
+            layerTransmittance *= 1.0 - alpha;
+          } else {
+            rendered += transmittance * alpha * surfaceRgb;
+            transmittance *= 1.0 - alpha;
+          }
           acceptedEnd = cursor + 1u;
           contributorCount += 1u;
         }
       }
     }
     cursor += 1u;
-    if (transmittance < 0.0001) { break; }
+    if (transmittance * select(1.0, layerTransmittance, layerAware) < 0.0001) { break; }
+  }
+  if (layerAware && activeLayer != accumulationLayerCount) {
+    rendered += transmittance * layerRendered;
+    transmittance *= layerTransmittance;
   }
   rendered += transmittance * bg;
   let compositeAlpha = 1.0 - transmittance;
@@ -6690,6 +10001,11 @@ fn render_state_tile(
   let oy = select(0.0, sampleOffset / f32(height - 1u), height > 1u);
   var rendered = vec3<f32>(0.0);
   var transmittance = 1.0;
+  let layerAware = cfg(84u) > 0.5;
+  let accumulationLayerCount = clamp(u32(round(cfg(82u))), ${MIN_DISCRETE_LAYER_COUNT}u, ${MAX_DISCRETE_LAYER_COUNT}u);
+  var activeLayer = accumulationLayerCount;
+  var layerRendered = vec3<f32>(0.0);
+  var layerTransmittance = 1.0;
   var batchStart = start;
   var acceptedEnd = start;
   var contributorCount = 0u;
@@ -6698,7 +10014,8 @@ fn render_state_tile(
     let batchCount = min(${TILE_SIZE * TILE_SIZE}u, end - batchStart);
     if (localIndex < batchCount) {
       let g = tileIndices[batchStart + localIndex];
-      let t = transform[g];
+      let sourceT = transform[g];
+      let t = sourceT;
       var center = xy[g].center;
       var c = cos(t.z);
       var s = sin(t.z);
@@ -6723,13 +10040,15 @@ fn render_state_tile(
         mip = select(
           sqrt((baseScale.x * baseScale.y) / max(effective.x * effective.y, 0.00000001)),
           1.0,
-          useEwa
+          useEwa || cfg(40u) > 0.5
         );
       }
       tileShared0[localIndex] = vec4<f32>(center, c, s);
       tileShared1[localIndex] = vec4<f32>(sampleScale, mip, select(0.0, 1.0, isActive));
       tileSharedColor[localIndex] = color[g];
       tileSharedLayer[localIndex] = layerZ;
+      tileSharedPackedOrder[localIndex] = t.w;
+      tileSharedIndex[localIndex] = g;
     }
     workgroupBarrier();
     if (inside) {
@@ -6741,7 +10060,7 @@ fn render_state_tile(
           let sampleScale = tileShared1[j].xy;
           let layerZ = tileSharedLayer[j];
           let splatPoint = select(virtual_inverse_point_at_z(outputPoint, layerZ).xy, outputPoint, camera_covariance_3d_enabled());
-          var kernel = gaussian_kernel(splatPoint - center, c, s, sampleScale);
+          var kernel = training_kernel(splatPoint - center, c, s, sampleScale, tileSharedPackedOrder[j]);
           if (useEwa) {
             let p00 = clamp(outputPoint + vec2<f32>(-ox, -oy), vec2<f32>(-1.0), vec2<f32>(1.0));
             let p10 = clamp(outputPoint + vec2<f32>( ox, -oy), vec2<f32>(-1.0), vec2<f32>(1.0));
@@ -6752,18 +10071,37 @@ fn render_state_tile(
             let q01 = select(virtual_inverse_point_at_z(p01, layerZ).xy, p01, camera_covariance_3d_enabled());
             let q11 = select(virtual_inverse_point_at_z(p11, layerZ).xy, p11, camera_covariance_3d_enabled());
             kernel = 0.25 * (
-              gaussian_kernel(q00 - center, c, s, sampleScale) +
-              gaussian_kernel(q10 - center, c, s, sampleScale) +
-              gaussian_kernel(q01 - center, c, s, sampleScale) +
-              gaussian_kernel(q11 - center, c, s, sampleScale)
+              training_kernel(q00 - center, c, s, sampleScale, tileSharedPackedOrder[j]) +
+              training_kernel(q10 - center, c, s, sampleScale, tileSharedPackedOrder[j]) +
+              training_kernel(q01 - center, c, s, sampleScale, tileSharedPackedOrder[j]) +
+              training_kernel(q11 - center, c, s, sampleScale, tileSharedPackedOrder[j])
             );
           }
           if (kernel >= 0.0003354626) {
             let rgba = tileSharedColor[j];
-            let alpha = clamp(kernel * rgba.a * tileShared1[j].z, 0.0, 0.99);
-            if (alpha >= 0.0039215686 && transmittance >= 0.0001) {
-              rendered += transmittance * alpha * rgba.rgb;
-              transmittance *= 1.0 - alpha;
+            let d = splatPoint - center;
+            let surfaceRgb = rgba.rgb;
+            let fixedOpaque = cfg(85u) > 0.5 && cfg(90u) < 0.5;
+            let minimumOpacity = select(0.0, cfg(88u), cfg(85u) > 0.5 && cfg(90u) > 0.5);
+            let effectiveOpacity = select(max(rgba.a, minimumOpacity) * tileShared1[j].z, cfg(88u), fixedOpaque);
+            let alphaLimit = select(0.99, cfg(88u), fixedOpaque);
+            let alpha = clamp(kernel * effectiveOpacity, 0.0, alphaLimit);
+            if (alpha >= 0.0039215686 && transmittance * select(1.0, layerTransmittance, layerAware) >= 0.0001) {
+              let layer = accumulation_layer(tileSharedPackedOrder[j], accumulationLayerCount);
+              if (layerAware && activeLayer != accumulationLayerCount && layer != activeLayer) {
+                rendered += transmittance * layerRendered;
+                transmittance *= layerTransmittance;
+                layerRendered = vec3<f32>(0.0);
+                layerTransmittance = 1.0;
+              }
+              if (layerAware) {
+                activeLayer = layer;
+                layerRendered += layerTransmittance * alpha * surfaceRgb;
+                layerTransmittance *= 1.0 - alpha;
+              } else {
+                rendered += transmittance * alpha * surfaceRgb;
+                transmittance *= 1.0 - alpha;
+              }
               acceptedEnd = batchStart + j + 1u;
               contributorCount += 1u;
             }
@@ -6776,6 +10114,10 @@ fn render_state_tile(
   }
   if (screenInside) {
     let pixel = py * width + px;
+    if (layerAware && activeLayer != accumulationLayerCount) {
+      rendered += transmittance * layerRendered;
+      transmittance *= layerTransmittance;
+    }
     rendered = select(bg, rendered + transmittance * bg, inside);
     let compositeAlpha = 1.0 - transmittance;
     let storedAlpha = select(0.0, compositeAlpha, inside);
@@ -7074,7 +10416,7 @@ fn ssim_tiles(
 
     const subgroupCounterReductionLines = [
         "var<workgroup> subgroupCounter: atomic<u32>;",
-        "fn add_subtile_gradient(localIndex: u32, subgroupSize: u32, subgroupInvocation: u32, g: u32, geom: vec4<f32>, appearance: vec4<f32>, misc: vec4<f32>, density: vec4<f32>, depth: f32) {",
+        "fn add_subtile_gradient(localIndex: u32, subgroupSize: u32, subgroupInvocation: u32, recordIndex: u32, g: u32, geom: vec4<f32>, appearance: vec4<f32>, misc: vec4<f32>, density: vec4<f32>, depth: f32) {",
         "  if (localIndex == 0u) { atomicStore(&subgroupCounter, 0u); }",
         "  workgroupBarrier();",
         "  let subgroupGeom = subgroupAdd(geom);",
@@ -7108,7 +10450,7 @@ fn ssim_tiles(
         "    let totalDepth = subgroupAdd(partialDepth);",
         "    let electedForFinal = subgroupElect();",
         "    if (subgroupSlot == 0u && electedForFinal) {",
-        "      add_gradient(g, totalGeom, totalAppearance, totalMisc, totalDensity, totalDepth);",
+        "      store_reduced_gradient(recordIndex, g, totalGeom, totalAppearance, totalMisc, totalDensity, totalDepth);",
         "    }",
         "    workgroupBarrier();",
         "    return;",
@@ -7129,14 +10471,14 @@ fn ssim_tiles(
         "    }",
         "    workgroupBarrier();",
         "  }",
-        "  if (localIndex == 0u) { add_gradient(g, reduceGeom[0], reduceAppearance[0], reduceMisc[0], reduceDensity[0], reduceDepth[0]); }",
+        "  if (localIndex == 0u) { store_reduced_gradient(recordIndex, g, reduceGeom[0], reduceAppearance[0], reduceMisc[0], reduceDensity[0], reduceDepth[0]); }",
         "  workgroupBarrier();",
         "}",
       ];
     const exactBackwardReductionLines = this.subgroupExactBackwardEnabled
       ? subgroupCounterReductionLines
       : [
-        "fn add_subtile_gradient(localIndex: u32, g: u32, geom: vec4<f32>, appearance: vec4<f32>, misc: vec4<f32>, density: vec4<f32>, depth: f32) {",
+        "fn add_subtile_gradient(localIndex: u32, recordIndex: u32, g: u32, geom: vec4<f32>, appearance: vec4<f32>, misc: vec4<f32>, density: vec4<f32>, depth: f32) {",
         "  reduceGeom[localIndex] = geom;",
         "  reduceAppearance[localIndex] = appearance;",
         "  reduceMisc[localIndex] = misc;",
@@ -7156,13 +10498,13 @@ fn ssim_tiles(
         "    if (stride == 1u) { break; }",
         "    stride /= 2u;",
         "  }",
-        "  if (localIndex == 0u) { add_gradient(g, reduceGeom[0], reduceAppearance[0], reduceMisc[0], reduceDensity[0], reduceDepth[0]); }",
+        "  if (localIndex == 0u) { store_reduced_gradient(recordIndex, g, reduceGeom[0], reduceAppearance[0], reduceMisc[0], reduceDensity[0], reduceDepth[0]); }",
         "  workgroupBarrier();",
         "}",
       ];
     const exactBackwardShader = [
       this.subgroupExactBackwardEnabled ? "enable subgroups;" : "",
-      "struct Config { values: array<vec4<f32>, 19>, };",
+      "struct Config { values: array<vec4<f32>, 25>, };",
       "struct AlphaState { compositeAlpha: f32, acceptedEnd: u32, pad0: f32, pad1: u32, };",
       "struct KernelSample { kernel: f32, dCenter: vec2<f32>, dLogScale: vec2<f32>, dTheta: f32, };",
       "struct KernelEvaluation { rawKernel: f32, weightedKernel: f32, dCenter: vec2<f32>, dLogScale: vec2<f32>, dTheta: f32, dDepth: f32, };",
@@ -7174,14 +10516,60 @@ fn ssim_tiles(
       "@group(0) @binding(4) var<storage, read> tileOffsets: array<u32>;",
       "@group(0) @binding(5) var<storage, read> tileIndices: array<u32>;",
       "@group(0) @binding(6) var<storage, read> lossGradient: array<vec4<f32>>;",
-      "@group(0) @binding(7) var<storage, read_write> exactGradient: array<atomic<u32>>;",
+      fixedPointExactGradientEnabled
+        ? "@group(0) @binding(7) var<storage, read_write> exactGradient: array<atomic<i32>>;"
+        : "@group(0) @binding(7) var<storage, read_write> exactGradient: array<atomic<u32>>;",
       "@group(0) @binding(8) var<storage, read> alphaState: array<AlphaState>;",
+      ...(segmentedExactBackwardEnabled
+        ? ["@group(0) @binding(9) var<storage, read_write> partialGradient: array<f32>;"]
+        : fixedPointExactGradientEnabled
+          ? ["@group(0) @binding(9) var<storage, read_write> fixedPointControl: array<atomic<u32>>;"]
+          : []),
       "fn cfg(i: u32) -> f32 { return config.values[i / 4u][i % 4u]; }",
       VIRTUAL_TILT_WGSL,
+      RECTANGLE_TRAPEZOID_WGSL,
+      ILLUSTRATIVE_OIL_WGSL,
       "fn tile_offset(index: u32) -> u32 { return tileOffsets[index] & 0x7fffffffu; }",
       "fn tile_list_overflow() -> bool { return cfg(19u) > 0.5 && (tileOffsets[arrayLength(&tileOffsets) - 1u] & 0x80000000u) != 0u; }",
-      "fn kernel_sample(d: vec2<f32>, c: f32, s: f32, baseScale: vec2<f32>, sampleScale: vec2<f32>, includeMipGradient: bool) -> KernelSample {",
+      "fn kernel_sample(d: vec2<f32>, c: f32, s: f32, baseScale: vec2<f32>, sampleScale: vec2<f32>, includeMipGradient: bool, packedTag: f32) -> KernelSample {",
       "  let r = vec2<f32>(c * d.x + s * d.y, -s * d.x + c * d.y);",
+      "  if (cfg(40u) > 3.5) {",
+      `    let extent = ${LAYERED_OPAQUE_BRUSH_KERNEL_EXTENT};`,
+      "    let extentScale = max(sampleScale * extent, vec2<f32>(0.0001));",
+      "    let normalized = r / extentScale;",
+      "    let sample = illustrative_oil_kernel_sample(",
+      "      normalized,",
+      "      sampleScale.x >= sampleScale.y,",
+      "      clamp(cfg(41u), 0.01, 0.49),",
+      "      illustrative_oil_family(baseScale, packedTag)",
+      "    );",
+      "    if (sample.kernel <= 0.00000001) { return KernelSample(0.0, vec2<f32>(0.0), vec2<f32>(0.0), 0.0); }",
+      "    let dLogDNormalized = sample.gradient / max(sample.kernel, 0.000001);",
+      "    let dLogDr = dLogDNormalized / extentScale;",
+      "    let dCenter = vec2<f32>(-c * dLogDr.x + s * dLogDr.y, -s * dLogDr.x - c * dLogDr.y);",
+      "    let baseRatio = (baseScale * baseScale) / max(sampleScale * sampleScale, vec2<f32>(0.00000001));",
+      "    let dLogScale = -dLogDNormalized * normalized * baseRatio;",
+      "    let dTheta = dLogDr.x * r.y - dLogDr.y * r.x;",
+      "    return KernelSample(sample.kernel, dCenter, dLogScale, dTheta);",
+      "  }",
+      "  if (cfg(40u) > 0.5) {",
+      `    let extent = ${RECTANGLE_KERNEL_EXTENT};`,
+      "    let feather = clamp(cfg(41u), 0.01, 0.49);",
+      "    let widthRatios = rectangle_effective_width_ratios(cfg(96u), cfg(98u), packedTag, cfg(97u));",
+      "    let areaCompensation = rectangle_area_compensation(widthRatios, cfg(97u));",
+      "    let extentScale = max(sampleScale * extent * areaCompensation, vec2<f32>(0.0001));",
+      "    let normalized = r / extentScale;",
+      `    let asymmetricSoftness = rectangle_flag_enabled(cfg(97u), ${RECTANGLE_FLAG_ASYMMETRIC_SOFTNESS}u);`,
+      "    let sample = rectangle_trapezoid_kernel_sample(normalized, feather, widthRatios.x, widthRatios.y, asymmetricSoftness);",
+      "    if (sample.kernel <= 0.00000001) { return KernelSample(0.0, vec2<f32>(0.0), vec2<f32>(0.0), 0.0); }",
+      "    let dLogDNormalized = sample.gradient / max(sample.kernel, 0.000001);",
+      "    let dLogDr = dLogDNormalized / extentScale;",
+      "    let dCenter = vec2<f32>(-c * dLogDr.x + s * dLogDr.y, -s * dLogDr.x - c * dLogDr.y);",
+      "    let baseRatio = (baseScale * baseScale) / max(sampleScale * sampleScale, vec2<f32>(0.00000001));",
+      "    let dLogScale = -dLogDNormalized * normalized * baseRatio;",
+      "    let dTheta = dLogDr.x * r.y - dLogDr.y * r.x;",
+      "    return KernelSample(sample.kernel, dCenter, dLogScale, dTheta);",
+      "  }",
       "  let invS2 = 1.0 / (sampleScale * sampleScale);",
       "  let q = dot(r * r, invS2);",
       "  if (q > 16.0) { return KernelSample(0.0, vec2<f32>(0.0), vec2<f32>(0.0), 0.0); }",
@@ -7195,7 +10583,9 @@ fn ssim_tiles(
       "  let dTheta = -r.x * r.y * (invS2.x - invS2.y);",
       "  return KernelSample(kernel, dCenter, dLogScale, dTheta);",
       "}",
-      "fn evaluate_kernel(p: vec2<f32>, outputPoint: vec2<f32>, center: vec2<f32>, rawDepth: f32, t: vec4<f32>, width: u32, height: u32) -> KernelEvaluation {",
+      "fn evaluate_kernel(g: u32, p: vec2<f32>, outputPoint: vec2<f32>, sourceCenter: vec2<f32>, rawDepth: f32, sourceT: vec4<f32>, width: u32, height: u32) -> KernelEvaluation {",
+      "  let center = sourceCenter;",
+      "  let t = sourceT;",
       "  let baseScale = max(t.xy, vec2<f32>(0.0001));",
       "  let c = cos(t.z);",
       "  let s = sin(t.z);",
@@ -7215,8 +10605,8 @@ fn ssim_tiles(
       "    var projectedScaleDerivative = vec2<f32>(0.0);",
       "    var projectedThetaDerivative = 0.0;",
       "    if (!useEwa) {",
-      "      let sample = kernel_sample(outputPoint - projected.center, projectedC, projectedS, projectedScale, projectedEffective, true);",
-      "      let mip = sqrt((projectedScale.x * projectedScale.y) / max(projectedEffective.x * projectedEffective.y, 0.00000001));",
+      "      let sample = kernel_sample(outputPoint - projected.center, projectedC, projectedS, projectedScale, projectedEffective, true, t.w);",
+      "      let mip = select(sqrt((projectedScale.x * projectedScale.y) / max(projectedEffective.x * projectedEffective.y, 0.00000001)), 1.0, cfg(40u) > 0.5);",
       "      rawKernel = sample.kernel;",
       "      weightedKernel = sample.kernel * mip;",
       "      screenCenterDerivative = sample.kernel * mip * sample.dCenter;",
@@ -7226,10 +10616,10 @@ fn ssim_tiles(
       "      let sampleOffset = select(0.5, 0.28867513459481287, cfg(31u) > 0.5);",
       "      let ox = select(0.0, sampleOffset / f32(width - 1u), width > 1u);",
       "      let oy = select(0.0, sampleOffset / f32(height - 1u), height > 1u);",
-      "      let sample0 = kernel_sample(clamp(outputPoint + vec2<f32>(-ox, -oy), vec2<f32>(-1.0), vec2<f32>(1.0)) - projected.center, projectedC, projectedS, projectedScale, projectedScale, false);",
-      "      let sample1 = kernel_sample(clamp(outputPoint + vec2<f32>( ox, -oy), vec2<f32>(-1.0), vec2<f32>(1.0)) - projected.center, projectedC, projectedS, projectedScale, projectedScale, false);",
-      "      let sample2 = kernel_sample(clamp(outputPoint + vec2<f32>(-ox,  oy), vec2<f32>(-1.0), vec2<f32>(1.0)) - projected.center, projectedC, projectedS, projectedScale, projectedScale, false);",
-      "      let sample3 = kernel_sample(clamp(outputPoint + vec2<f32>( ox,  oy), vec2<f32>(-1.0), vec2<f32>(1.0)) - projected.center, projectedC, projectedS, projectedScale, projectedScale, false);",
+      "      let sample0 = kernel_sample(clamp(outputPoint + vec2<f32>(-ox, -oy), vec2<f32>(-1.0), vec2<f32>(1.0)) - projected.center, projectedC, projectedS, projectedScale, projectedScale, false, t.w);",
+      "      let sample1 = kernel_sample(clamp(outputPoint + vec2<f32>( ox, -oy), vec2<f32>(-1.0), vec2<f32>(1.0)) - projected.center, projectedC, projectedS, projectedScale, projectedScale, false, t.w);",
+      "      let sample2 = kernel_sample(clamp(outputPoint + vec2<f32>(-ox,  oy), vec2<f32>(-1.0), vec2<f32>(1.0)) - projected.center, projectedC, projectedS, projectedScale, projectedScale, false, t.w);",
+      "      let sample3 = kernel_sample(clamp(outputPoint + vec2<f32>( ox,  oy), vec2<f32>(-1.0), vec2<f32>(1.0)) - projected.center, projectedC, projectedS, projectedScale, projectedScale, false, t.w);",
       "      rawKernel = 0.25 * (sample0.kernel + sample1.kernel + sample2.kernel + sample3.kernel);",
       "      weightedKernel = rawKernel;",
       "      screenCenterDerivative = 0.25 * (sample0.kernel * sample0.dCenter + sample1.kernel * sample1.dCenter + sample2.kernel * sample2.dCenter + sample3.kernel * sample3.dCenter);",
@@ -7249,8 +10639,8 @@ fn ssim_tiles(
       "    inverseDepthDerivative = (after - before) / (2.0 * epsilon);",
       "  }",
       "  if (!useEwa) {",
-      "    let sample = kernel_sample(splatPoint - center, c, s, baseScale, effective, true);",
-      "    let mip = sqrt((baseScale.x * baseScale.y) / max(effective.x * effective.y, 0.00000001));",
+      "    let sample = kernel_sample(splatPoint - center, c, s, baseScale, effective, true, t.w);",
+      "    let mip = select(sqrt((baseScale.x * baseScale.y) / max(effective.x * effective.y, 0.00000001)), 1.0, cfg(40u) > 0.5);",
       "    let weightedCenter = sample.kernel * mip * sample.dCenter;",
       "    return KernelEvaluation(sample.kernel, sample.kernel * mip, weightedCenter, sample.kernel * mip * sample.dLogScale, sample.kernel * mip * sample.dTheta, -dot(weightedCenter, inverseDepthDerivative));",
       "  }",
@@ -7261,46 +10651,89 @@ fn ssim_tiles(
       "  let q1 = virtual_inverse_point_at_z(clamp(outputPoint + vec2<f32>( ox, -oy), vec2<f32>(-1.0), vec2<f32>(1.0)), layerZ).xy;",
       "  let q2 = virtual_inverse_point_at_z(clamp(outputPoint + vec2<f32>(-ox,  oy), vec2<f32>(-1.0), vec2<f32>(1.0)), layerZ).xy;",
       "  let q3 = virtual_inverse_point_at_z(clamp(outputPoint + vec2<f32>( ox,  oy), vec2<f32>(-1.0), vec2<f32>(1.0)), layerZ).xy;",
-      "  let sample0 = kernel_sample(q0 - center, c, s, baseScale, baseScale, false);",
-      "  let sample1 = kernel_sample(q1 - center, c, s, baseScale, baseScale, false);",
-      "  let sample2 = kernel_sample(q2 - center, c, s, baseScale, baseScale, false);",
-      "  let sample3 = kernel_sample(q3 - center, c, s, baseScale, baseScale, false);",
+      "  let sample0 = kernel_sample(q0 - center, c, s, baseScale, baseScale, false, t.w);",
+      "  let sample1 = kernel_sample(q1 - center, c, s, baseScale, baseScale, false, t.w);",
+      "  let sample2 = kernel_sample(q2 - center, c, s, baseScale, baseScale, false, t.w);",
+      "  let sample3 = kernel_sample(q3 - center, c, s, baseScale, baseScale, false, t.w);",
       "  let rawKernel = 0.25 * (sample0.kernel + sample1.kernel + sample2.kernel + sample3.kernel);",
       "  let dCenter = 0.25 * (sample0.kernel * sample0.dCenter + sample1.kernel * sample1.dCenter + sample2.kernel * sample2.dCenter + sample3.kernel * sample3.dCenter);",
       "  let dLogScale = 0.25 * (sample0.kernel * sample0.dLogScale + sample1.kernel * sample1.dLogScale + sample2.kernel * sample2.dLogScale + sample3.kernel * sample3.dLogScale);",
       "  let dTheta = 0.25 * (sample0.kernel * sample0.dTheta + sample1.kernel * sample1.dTheta + sample2.kernel * sample2.dTheta + sample3.kernel * sample3.dTheta);",
       "  return KernelEvaluation(rawKernel, rawKernel, dCenter, dLogScale, dTheta, -dot(dCenter, inverseDepthDerivative));",
       "}",
-      "fn atomic_add_f32(index: u32, value: f32) {",
-      "  if (abs(value) < 0.00000000000000000001) { return; }",
-      "  var oldBits = atomicLoad(&exactGradient[index]);",
-      "  loop {",
-      "    let oldValue = bitcast<f32>(oldBits);",
-      "    let nextBits = bitcast<u32>(oldValue + value);",
-      "    let exchanged = atomicCompareExchangeWeak(&exactGradient[index], oldBits, nextBits);",
-      "    if (exchanged.exchanged) { break; }",
-      "    oldBits = exchanged.old_value;",
-      "  }",
-      "}",
-      "fn add_gradient(g: u32, geom: vec4<f32>, appearance: vec4<f32>, misc: vec4<f32>, density: vec4<f32>, depth: f32) {",
+      ...(fixedPointExactGradientEnabled
+        ? [
+            `const FIXED_GRADIENT_SCALE = ${FIXED_POINT_EXACT_GRADIENT_SCALE}.0;`,
+            "fn atomic_add_f32(index: u32, value: f32, maximumWrites: u32) {",
+            "  if (abs(value) < 0.00000000000000000001) { return; }",
+            "  let safeMagnitude = max(1, i32(1073741823u / max(1u, maximumWrites)));",
+            "  let raw = i32(round(clamp(value * FIXED_GRADIENT_SCALE, -2147483000.0, 2147483000.0)));",
+            "  atomicMax(&fixedPointControl[1], u32(abs(raw)));",
+            "  if (abs(raw) > safeMagnitude) { atomicAdd(&fixedPointControl[0], 1u); }",
+            "  atomicAdd(&exactGradient[index], clamp(raw, -safeMagnitude, safeMagnitude));",
+            "}",
+          ]
+        : [
+            "fn atomic_add_f32(index: u32, value: f32, maximumWrites: u32) {",
+            "  if (abs(value) < 0.00000000000000000001) { return; }",
+            "  var oldBits = atomicLoad(&exactGradient[index]);",
+            "  loop {",
+            "    let oldValue = bitcast<f32>(oldBits);",
+            "    let nextBits = bitcast<u32>(oldValue + value);",
+            "    let exchanged = atomicCompareExchangeWeak(&exactGradient[index], oldBits, nextBits);",
+            "    if (exchanged.exchanged) { break; }",
+            "    oldBits = exchanged.old_value;",
+            "  }",
+            "}",
+          ]),
+      "fn add_gradient(g: u32, geom: vec4<f32>, appearance: vec4<f32>, misc: vec4<f32>, density: vec4<f32>, depth: f32, maximumWrites: u32) {",
       "  let base = g * 16u;",
-      "  atomic_add_f32(base, geom.x);",
-      "  atomic_add_f32(base + 1u, geom.y);",
-      "  atomic_add_f32(base + 2u, geom.z);",
-      "  atomic_add_f32(base + 3u, geom.w);",
-      "  atomic_add_f32(base + 4u, appearance.x);",
-      "  atomic_add_f32(base + 5u, appearance.y);",
-      "  atomic_add_f32(base + 6u, appearance.z);",
-      "  atomic_add_f32(base + 7u, appearance.w);",
-      "  atomic_add_f32(base + 8u, misc.x);",
-      "  atomic_add_f32(base + 9u, misc.y);",
-      "  atomic_add_f32(base + 10u, misc.z);",
-      "  atomic_add_f32(base + 11u, misc.w);",
-      "  atomic_add_f32(base + 12u, density.x);",
-      "  atomic_add_f32(base + 13u, density.y);",
-      "  atomic_add_f32(base + 14u, density.z);",
-      "  atomic_add_f32(base + 15u, depth);",
+      "  atomic_add_f32(base, geom.x, maximumWrites);",
+      "  atomic_add_f32(base + 1u, geom.y, maximumWrites);",
+      "  atomic_add_f32(base + 2u, geom.z, maximumWrites);",
+      "  atomic_add_f32(base + 3u, geom.w, maximumWrites);",
+      "  atomic_add_f32(base + 4u, appearance.x, maximumWrites);",
+      "  atomic_add_f32(base + 5u, appearance.y, maximumWrites);",
+      "  atomic_add_f32(base + 6u, appearance.z, maximumWrites);",
+      "  atomic_add_f32(base + 7u, appearance.w, maximumWrites);",
+      "  atomic_add_f32(base + 8u, misc.x, maximumWrites);",
+      "  atomic_add_f32(base + 9u, misc.y, maximumWrites);",
+      "  atomic_add_f32(base + 10u, misc.z, maximumWrites);",
+      "  atomic_add_f32(base + 11u, misc.w, maximumWrites);",
+      "  atomic_add_f32(base + 12u, density.x, maximumWrites);",
+      "  atomic_add_f32(base + 13u, density.y, maximumWrites);",
+      "  atomic_add_f32(base + 14u, density.z, maximumWrites);",
+      "  atomic_add_f32(base + 15u, depth, maximumWrites);",
       "}",
+      ...(segmentedExactBackwardEnabled
+        ? [
+            "fn store_reduced_gradient(recordIndex: u32, g: u32, geom: vec4<f32>, appearance: vec4<f32>, misc: vec4<f32>, density: vec4<f32>, depth: f32) {",
+            "  let base = recordIndex * 16u;",
+            "  partialGradient[base] = geom.x;",
+            "  partialGradient[base + 1u] = geom.y;",
+            "  partialGradient[base + 2u] = geom.z;",
+            "  partialGradient[base + 3u] = geom.w;",
+            "  partialGradient[base + 4u] = appearance.x;",
+            "  partialGradient[base + 5u] = appearance.y;",
+            "  partialGradient[base + 6u] = appearance.z;",
+            "  partialGradient[base + 7u] = appearance.w;",
+            "  partialGradient[base + 8u] = misc.x;",
+            "  partialGradient[base + 9u] = misc.y;",
+            "  partialGradient[base + 10u] = misc.z;",
+            "  partialGradient[base + 11u] = misc.w;",
+            "  partialGradient[base + 12u] = density.x;",
+            "  partialGradient[base + 13u] = density.y;",
+            "  partialGradient[base + 14u] = density.z;",
+            "  partialGradient[base + 15u] = depth;",
+            "}",
+          ]
+        : [
+            "fn store_reduced_gradient(recordIndex: u32, g: u32, geom: vec4<f32>, appearance: vec4<f32>, misc: vec4<f32>, density: vec4<f32>, depth: f32) {",
+            `  let workgroupSide = ${this.quadExactBackwardEnabled ? TILE_SIZE : 8}u;`,
+            "  let maximumWrites = ((u32(cfg(0u)) + workgroupSide - 1u) / workgroupSide) * ((u32(cfg(1u)) + workgroupSide - 1u) / workgroupSide) + 1u;",
+            "  add_gradient(g, geom, appearance, misc, density, depth, maximumWrites);",
+            "}",
+          ]),
       "var<workgroup> reduceGeom: array<vec4<f32>, 64>;",
       "var<workgroup> reduceAppearance: array<vec4<f32>, 64>;",
       "var<workgroup> reduceMisc: array<vec4<f32>, 64>;",
@@ -7352,35 +10785,40 @@ fn ssim_tiles(
       "    if (validPixel && reverseCursor < acceptedEnd) {",
       "      let t = transform[g];",
       "      if (t.w >= 0.5) {",
-      "        let evaluation = evaluate_kernel(p, outputPoint, xy[g].center, xy[g].rawDepth, t, width, height);",
+      "        let evaluation = evaluate_kernel(g, p, outputPoint, xy[g].center, xy[g].rawDepth, t, width, height);",
       "        if (evaluation.rawKernel >= 0.0003354626) {",
       "          let rgba = color[g];",
-      "          let unclampedAlpha = evaluation.weightedKernel * rgba.a;",
-      "          let alpha = clamp(unclampedAlpha, 0.0, 0.99);",
+      `          let fixedOpaque = cfg(85u) > 0.5 && cfg(90u) < 0.5;`,
+      `          let minimumOpacity = select(0.0, cfg(88u), cfg(85u) > 0.5 && cfg(90u) > 0.5);`,
+      `          let effectiveOpacity = select(max(rgba.a, minimumOpacity), cfg(88u), fixedOpaque);`,
+      `          let alphaLimit = select(0.99, cfg(88u), fixedOpaque);`,
+      "          let unclampedAlpha = evaluation.weightedKernel * effectiveOpacity;",
+      "          let alpha = clamp(unclampedAlpha, 0.0, alphaLimit);",
       "          if (alpha >= 0.0039215686) {",
-      "            let transBefore = transAfter / max(1.0 - alpha, 0.01);",
-      "            let dAlpha = transBefore * dot(dColor, rgba.rgb) - gradTransmittance * transBefore;",
-      "            let differentiableAlpha = select(0.0, dAlpha, unclampedAlpha > 0.0 && unclampedAlpha < 0.99);",
-      "            let dWeightedKernel = differentiableAlpha * rgba.a;",
+      "            let surfaceRgb = rgba.rgb;",
+      "            let transBefore = transAfter / max(1.0 - alpha, select(0.01, 0.005, fixedOpaque));",
+      "            let dAlpha = transBefore * dot(dColor, surfaceRgb) - gradTransmittance * transBefore;",
+      "            let differentiableAlpha = select(0.0, dAlpha, unclampedAlpha > 0.0 && unclampedAlpha < alphaLimit);",
+      "            let dWeightedKernel = differentiableAlpha * effectiveOpacity;",
       "            let gradCenter = dWeightedKernel * evaluation.dCenter;",
       "            let gradLogScale = dWeightedKernel * evaluation.dLogScale;",
       "            let gradTheta = dWeightedKernel * evaluation.dTheta;",
       "            let influence = transBefore * alpha;",
-      "            let anchor = sign(rgba.rgb - targetAndError.rgb) * (cfg(44u) * influence / 3.0);",
+      "            let anchor = sign(surfaceRgb - targetAndError.rgb) * (cfg(44u) * influence / 3.0);",
       "            let gradColor = dColor * influence + anchor;",
-      "            let gradLogit = differentiableAlpha * evaluation.weightedKernel * rgba.a * (1.0 - rgba.a);",
+      "            let gradLogit = select(differentiableAlpha * evaluation.weightedKernel * rgba.a * (1.0 - rgba.a), 0.0, fixedOpaque);",
       "            geom = vec4<f32>(gradCenter, gradLogScale) * cfg(35u);",
       "            appearance = vec4<f32>(gradColor, gradLogit) * cfg(36u);",
       "            misc = vec4<f32>(gradTheta * cfg(35u), influence, targetAndError.a * cfg(37u), cfg(37u));",
       "            density = vec4<f32>(abs(gradCenter), length(gradCenter), 0.0) * cfg(37u);",
       "            depth = dWeightedKernel * evaluation.dDepth * cfg(38u);",
-      "            gradTransmittance = dot(dColor, alpha * rgba.rgb) + gradTransmittance * (1.0 - alpha);",
+      "            gradTransmittance = dot(dColor, alpha * surfaceRgb) + gradTransmittance * (1.0 - alpha);",
       "            transAfter = transBefore;",
       "          }",
       "        }",
       "      }",
       "    }",
-      `    add_subtile_gradient(localIndex${this.subgroupExactBackwardEnabled ? ", subgroupSize, subgroupInvocation" : ""}, g, geom, appearance, misc, density, depth);`,
+      `    add_subtile_gradient(localIndex${this.subgroupExactBackwardEnabled ? ", subgroupSize, subgroupInvocation" : ""}, reverseCursor, g, geom, appearance, misc, density, depth);`,
       "  }",
       "}",
       "@compute @workgroup_size(64)",
@@ -7417,30 +10855,35 @@ fn ssim_tiles(
       "    let g = select(reverseCursor, tileIndices[reverseCursor], useTiles);",
       "    let t = transform[g];",
       "    if (t.w >= 0.5) {",
-      "      let evaluation = evaluate_kernel(inversePoint.xy, outputPoint, xy[g].center, xy[g].rawDepth, t, width, height);",
+      "      let evaluation = evaluate_kernel(g, inversePoint.xy, outputPoint, xy[g].center, xy[g].rawDepth, t, width, height);",
       "      if (evaluation.rawKernel >= 0.0003354626) {",
       "        let rgba = color[g];",
-      "        let unclampedAlpha = evaluation.weightedKernel * rgba.a;",
-      "        let alpha = clamp(unclampedAlpha, 0.0, 0.99);",
+      `        let fixedOpaque = cfg(85u) > 0.5 && cfg(90u) < 0.5;`,
+      `        let minimumOpacity = select(0.0, cfg(88u), cfg(85u) > 0.5 && cfg(90u) > 0.5);`,
+      `        let effectiveOpacity = select(max(rgba.a, minimumOpacity), cfg(88u), fixedOpaque);`,
+      `        let alphaLimit = select(0.99, cfg(88u), fixedOpaque);`,
+      "        let unclampedAlpha = evaluation.weightedKernel * effectiveOpacity;",
+      "        let alpha = clamp(unclampedAlpha, 0.0, alphaLimit);",
       "        if (alpha >= 0.0039215686) {",
-      "          let transBefore = transAfter / max(1.0 - alpha, 0.01);",
-      "          let dAlpha = transBefore * dot(dColor, rgba.rgb) - gradTransmittance * transBefore;",
-      "          let differentiableAlpha = select(0.0, dAlpha, unclampedAlpha > 0.0 && unclampedAlpha < 0.99);",
-      "          let dWeightedKernel = differentiableAlpha * rgba.a;",
+      "          let surfaceRgb = rgba.rgb;",
+      "          let transBefore = transAfter / max(1.0 - alpha, select(0.01, 0.005, fixedOpaque));",
+      "          let dAlpha = transBefore * dot(dColor, surfaceRgb) - gradTransmittance * transBefore;",
+      "          let differentiableAlpha = select(0.0, dAlpha, unclampedAlpha > 0.0 && unclampedAlpha < alphaLimit);",
+      "          let dWeightedKernel = differentiableAlpha * effectiveOpacity;",
       "          let gradCenter = dWeightedKernel * evaluation.dCenter;",
       "          let gradLogScale = dWeightedKernel * evaluation.dLogScale;",
       "          let gradTheta = dWeightedKernel * evaluation.dTheta;",
       "          let influence = transBefore * alpha;",
-      "          let anchor = sign(rgba.rgb - targetAndError.rgb) * (cfg(44u) * influence / 3.0);",
+      "          let anchor = sign(surfaceRgb - targetAndError.rgb) * (cfg(44u) * influence / 3.0);",
       "          let gradColor = dColor * influence + anchor;",
-      "          let gradLogit = differentiableAlpha * evaluation.weightedKernel * rgba.a * (1.0 - rgba.a);",
+      "          let gradLogit = select(differentiableAlpha * evaluation.weightedKernel * rgba.a * (1.0 - rgba.a), 0.0, fixedOpaque);",
       "          let geom = vec4<f32>(gradCenter, gradLogScale) * cfg(35u);",
       "          let appearance = vec4<f32>(gradColor, gradLogit) * cfg(36u);",
       "          let misc = vec4<f32>(gradTheta * cfg(35u), influence, targetAndError.a * cfg(37u), cfg(37u));",
       "          let density = vec4<f32>(abs(gradCenter), length(gradCenter), 0.0) * cfg(37u);",
       "          let depth = dWeightedKernel * evaluation.dDepth * cfg(38u);",
-      "          add_gradient(g, geom, appearance, misc, density, depth);",
-      "          gradTransmittance = dot(dColor, alpha * rgba.rgb) + gradTransmittance * (1.0 - alpha);",
+      "          add_gradient(g, geom, appearance, misc, density, depth, width * height + 1u);",
+      "          gradTransmittance = dot(dColor, alpha * surfaceRgb) + gradTransmittance * (1.0 - alpha);",
       "          transAfter = transBefore;",
       "        }",
       "      }",
@@ -7515,36 +10958,188 @@ fn ssim_tiles(
       "    if (t.w >= 0.5) {",
       "      for (var i = 0u; i < 4u; i += 1u) {",
       "        if (validPixels[i] != 0u && reverseCursor < acceptedEnds[i]) {",
-      "          let evaluation = evaluate_kernel(points[i], outputPoints[i], xy[g].center, xy[g].rawDepth, t, width, height);",
+      "          let evaluation = evaluate_kernel(g, points[i], outputPoints[i], xy[g].center, xy[g].rawDepth, t, width, height);",
       "          if (evaluation.rawKernel >= 0.0003354626) {",
-      "            let unclampedAlpha = evaluation.weightedKernel * rgba.a;",
-      "            let alpha = clamp(unclampedAlpha, 0.0, 0.99);",
+      `            let fixedOpaque = cfg(85u) > 0.5 && cfg(90u) < 0.5;`,
+      `            let minimumOpacity = select(0.0, cfg(88u), cfg(85u) > 0.5 && cfg(90u) > 0.5);`,
+      `            let effectiveOpacity = select(max(rgba.a, minimumOpacity), cfg(88u), fixedOpaque);`,
+      `            let alphaLimit = select(0.99, cfg(88u), fixedOpaque);`,
+      "            let unclampedAlpha = evaluation.weightedKernel * effectiveOpacity;",
+      "            let alpha = clamp(unclampedAlpha, 0.0, alphaLimit);",
       "            if (alpha >= 0.0039215686) {",
-      "              let transBefore = transAfters[i] / max(1.0 - alpha, 0.01);",
-      "              let dAlpha = transBefore * dot(dColors[i], rgba.rgb) - gradTransmittances[i] * transBefore;",
-      "              let differentiableAlpha = select(0.0, dAlpha, unclampedAlpha > 0.0 && unclampedAlpha < 0.99);",
-      "              let dWeightedKernel = differentiableAlpha * rgba.a;",
+      "              let surfaceRgb = rgba.rgb;",
+      "              let transBefore = transAfters[i] / max(1.0 - alpha, select(0.01, 0.005, fixedOpaque));",
+      "              let dAlpha = transBefore * dot(dColors[i], surfaceRgb) - gradTransmittances[i] * transBefore;",
+      "              let differentiableAlpha = select(0.0, dAlpha, unclampedAlpha > 0.0 && unclampedAlpha < alphaLimit);",
+      "              let dWeightedKernel = differentiableAlpha * effectiveOpacity;",
       "              let gradCenter = dWeightedKernel * evaluation.dCenter;",
       "              let gradLogScale = dWeightedKernel * evaluation.dLogScale;",
       "              let gradTheta = dWeightedKernel * evaluation.dTheta;",
       "              let influence = transBefore * alpha;",
-      "              let anchor = sign(rgba.rgb - targetsAndErrors[i].rgb) * (cfg(44u) * influence / 3.0);",
+      "              let anchor = sign(surfaceRgb - targetsAndErrors[i].rgb) * (cfg(44u) * influence / 3.0);",
       "              geom += vec4<f32>(gradCenter, gradLogScale) * cfg(35u);",
-      "              appearance += vec4<f32>(dColors[i] * influence + anchor, differentiableAlpha * evaluation.weightedKernel * rgba.a * (1.0 - rgba.a)) * cfg(36u);",
+      "              let gradLogit = select(differentiableAlpha * evaluation.weightedKernel * rgba.a * (1.0 - rgba.a), 0.0, fixedOpaque);",
+      "              appearance += vec4<f32>(dColors[i] * influence + anchor, gradLogit) * cfg(36u);",
       "              misc += vec4<f32>(gradTheta * cfg(35u), influence, targetsAndErrors[i].a * cfg(37u), cfg(37u));",
       "              density += vec4<f32>(abs(gradCenter), length(gradCenter), 0.0) * cfg(37u);",
       "              depth += dWeightedKernel * evaluation.dDepth * cfg(38u);",
-      "              gradTransmittances[i] = dot(dColors[i], alpha * rgba.rgb) + gradTransmittances[i] * (1.0 - alpha);",
+      "              gradTransmittances[i] = dot(dColors[i], alpha * surfaceRgb) + gradTransmittances[i] * (1.0 - alpha);",
       "              transAfters[i] = transBefore;",
       "            }",
       "          }",
       "        }",
       "      }",
       "    }",
-      `    add_subtile_gradient(localIndex${this.subgroupExactBackwardEnabled ? ", subgroupSize, subgroupInvocation" : ""}, g, geom, appearance, misc, density, depth);`,
+      `    add_subtile_gradient(localIndex${this.subgroupExactBackwardEnabled ? ", subgroupSize, subgroupInvocation" : ""}, reverseCursor, g, geom, appearance, misc, density, depth);`,
       "  }",
       "}",
     ].join("\n");
+
+    const segmentedReferenceShader = `
+struct Config { values: array<vec4<f32>, 25>, };
+@group(0) @binding(0) var<uniform> config: Config;
+@group(0) @binding(1) var<storage, read> tileOffsets: array<u32>;
+@group(0) @binding(2) var<storage, read> tileIndices: array<u32>;
+@group(0) @binding(3) var<storage, read_write> referenceCounts: array<atomic<u32>>;
+@group(0) @binding(4) var<storage, read_write> referenceOffsets: array<u32>;
+@group(0) @binding(5) var<storage, read_write> referenceCursors: array<atomic<u32>>;
+@group(0) @binding(6) var<storage, read_write> references: array<u32>;
+
+fn cfg(i: u32) -> f32 { return config.values[i / 4u][i % 4u]; }
+fn active_reference_count() -> u32 {
+  return min(
+    tileOffsets[arrayLength(&tileOffsets) - 1u] & 0x7fffffffu,
+    arrayLength(&tileIndices)
+  );
+}
+
+@compute @workgroup_size(64)
+fn count_references(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(num_workgroups) workgroups: vec3<u32>
+) {
+  let cursor = id.x + id.y * workgroups.x * 64u;
+  if (cursor >= active_reference_count()) { return; }
+  let g = tileIndices[cursor];
+  if (g < u32(cfg(2u))) { atomicAdd(&referenceCounts[g], 1u); }
+}
+
+@compute @workgroup_size(1)
+fn prefix_references(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x != 0u) { return; }
+  let count = min(u32(cfg(2u)), arrayLength(&referenceCounts));
+  var total = 0u;
+  for (var g = 0u; g < count; g += 1u) {
+    referenceOffsets[g] = total;
+    total += atomicLoad(&referenceCounts[g]);
+  }
+  referenceOffsets[count] = total;
+}
+
+@compute @workgroup_size(64)
+fn fill_references(
+  @builtin(global_invocation_id) id: vec3<u32>,
+  @builtin(num_workgroups) workgroups: vec3<u32>
+) {
+  let cursor = id.x + id.y * workgroups.x * 64u;
+  if (cursor >= active_reference_count()) { return; }
+  let g = tileIndices[cursor];
+  if (g >= u32(cfg(2u))) { return; }
+  let local = atomicAdd(&referenceCursors[g], 1u);
+  let destination = referenceOffsets[g] + local;
+  if (destination < arrayLength(&references)) { references[destination] = cursor; }
+}`;
+
+    const segmentedGradientReduceShader = `
+struct Config { values: array<vec4<f32>, 25>, };
+@group(0) @binding(0) var<uniform> config: Config;
+@group(0) @binding(1) var<storage, read> referenceOffsets: array<u32>;
+@group(0) @binding(2) var<storage, read> references: array<u32>;
+@group(0) @binding(3) var<storage, read> partialGradient: array<f32>;
+@group(0) @binding(4) var<storage, read_write> exactGradient: array<f32>;
+var<workgroup> sum0: array<vec4<f32>, 64>;
+var<workgroup> sum1: array<vec4<f32>, 64>;
+var<workgroup> sum2: array<vec4<f32>, 64>;
+var<workgroup> sum3: array<vec4<f32>, 64>;
+
+fn cfg(i: u32) -> f32 { return config.values[i / 4u][i % 4u]; }
+
+@compute @workgroup_size(64)
+fn reduce_segmented_gradients(
+  @builtin(local_invocation_index) localIndex: u32,
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(num_workgroups) workgroups: vec3<u32>
+) {
+  let g = wid.x + wid.y * workgroups.x;
+  let count = u32(cfg(2u));
+  if (g >= count) { return; }
+  let start = referenceOffsets[g];
+  let end = referenceOffsets[g + 1u];
+  var local0 = vec4<f32>(0.0);
+  var local1 = vec4<f32>(0.0);
+  var local2 = vec4<f32>(0.0);
+  var local3 = vec4<f32>(0.0);
+  for (var cursor = start + localIndex; cursor < end; cursor += 64u) {
+    let record = references[cursor] * 16u;
+    local0 += vec4<f32>(
+      partialGradient[record],
+      partialGradient[record + 1u],
+      partialGradient[record + 2u],
+      partialGradient[record + 3u]
+    );
+    local1 += vec4<f32>(
+      partialGradient[record + 4u],
+      partialGradient[record + 5u],
+      partialGradient[record + 6u],
+      partialGradient[record + 7u]
+    );
+    local2 += vec4<f32>(
+      partialGradient[record + 8u],
+      partialGradient[record + 9u],
+      partialGradient[record + 10u],
+      partialGradient[record + 11u]
+    );
+    local3 += vec4<f32>(
+      partialGradient[record + 12u],
+      partialGradient[record + 13u],
+      partialGradient[record + 14u],
+      partialGradient[record + 15u]
+    );
+  }
+  sum0[localIndex] = local0;
+  sum1[localIndex] = local1;
+  sum2[localIndex] = local2;
+  sum3[localIndex] = local3;
+  workgroupBarrier();
+  for (var stride = 32u; stride > 0u; stride /= 2u) {
+    if (localIndex < stride) {
+      sum0[localIndex] += sum0[localIndex + stride];
+      sum1[localIndex] += sum1[localIndex + stride];
+      sum2[localIndex] += sum2[localIndex + stride];
+      sum3[localIndex] += sum3[localIndex + stride];
+    }
+    workgroupBarrier();
+  }
+  if (localIndex == 0u) {
+    let base = g * 16u;
+    exactGradient[base] = sum0[0].x;
+    exactGradient[base + 1u] = sum0[0].y;
+    exactGradient[base + 2u] = sum0[0].z;
+    exactGradient[base + 3u] = sum0[0].w;
+    exactGradient[base + 4u] = sum1[0].x;
+    exactGradient[base + 5u] = sum1[0].y;
+    exactGradient[base + 6u] = sum1[0].z;
+    exactGradient[base + 7u] = sum1[0].w;
+    exactGradient[base + 8u] = sum2[0].x;
+    exactGradient[base + 9u] = sum2[0].y;
+    exactGradient[base + 10u] = sum2[0].z;
+    exactGradient[base + 11u] = sum2[0].w;
+    exactGradient[base + 12u] = sum3[0].x;
+    exactGradient[base + 13u] = sum3[0].y;
+    exactGradient[base + 14u] = sum3[0].z;
+    exactGradient[base + 15u] = sum3[0].w;
+  }
+}`;
 
     const exactBackwardTelemetryShader = `
 struct Config { values: array<vec4<f32>, 14>, };
@@ -7653,23 +11248,34 @@ struct Config { values: array<vec4<f32>, 19>, };
 @group(0) @binding(0) var<uniform> config: Config;
 @group(0) @binding(2) var<storage, read> transform: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> color: array<vec4<f32>>;
-@group(0) @binding(4) var<storage, read_write> exactGradient: array<atomic<u32>>;
+@group(0) @binding(4) var<storage, read_write> exactGradient: array<atomic<${fixedPointExactGradientEnabled ? "i32" : "u32"}>>;
+${fixedPointExactGradientEnabled ? "@group(0) @binding(5) var<storage, read_write> fixedPointControl: array<atomic<u32>>;" : ""}
 
 fn cfg(i: u32) -> f32 { return config.values[i / 4u][i % 4u]; }
 
 ${VIRTUAL_TILT_WGSL}
 
-fn load_f32(index: u32) -> f32 { return bitcast<f32>(atomicLoad(&exactGradient[index])); }
+fn load_f32(index: u32) -> f32 {
+  return ${fixedPointExactGradientEnabled
+    ? `f32(atomicLoad(&exactGradient[index])) / ${FIXED_POINT_EXACT_GRADIENT_SCALE}.0`
+    : "bitcast<f32>(atomicLoad(&exactGradient[index]))"};
+}
 
 fn atomic_add_f32(index: u32, value: f32) {
   if (abs(value) < 0.00000000000000000001) { return; }
-  var oldBits = atomicLoad(&exactGradient[index]);
+  ${fixedPointExactGradientEnabled
+    ? `let safeMagnitude = 536870911;
+  let raw = i32(round(clamp(value * ${FIXED_POINT_EXACT_GRADIENT_SCALE}.0, -2147483000.0, 2147483000.0)));
+  atomicMax(&fixedPointControl[1], u32(abs(raw)));
+  if (abs(raw) > safeMagnitude) { atomicAdd(&fixedPointControl[0], 1u); }
+  atomicAdd(&exactGradient[index], clamp(raw, -safeMagnitude, safeMagnitude));`
+    : `var oldBits = atomicLoad(&exactGradient[index]);
   loop {
     let oldValue = bitcast<f32>(oldBits);
     let exchanged = atomicCompareExchangeWeak(&exactGradient[index], oldBits, bitcast<u32>(oldValue + value));
     if (exchanged.exchanged) { break; }
     oldBits = exchanged.old_value;
-  }
+  }`}
 }
 
 @compute @workgroup_size(64)
@@ -7709,7 +11315,7 @@ fn virtual_order_penalty(
 `;
 
     const optimizerShader = `
-struct Config { values: array<vec4<f32>, 21>, };
+struct Config { values: array<vec4<f32>, 25>, };
 struct AdamState {
   mGeom: vec4<f32>,
   vGeom: vec4<f32>,
@@ -7727,11 +11333,16 @@ struct SplatPosition { center: vec2<f32>, rawDepth: f32, depthGradient: f32, };
 @group(0) @binding(5) var<storage, read> pixelState: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read> ssimTiles: array<vec4<f32>>;
 @group(0) @binding(7) var<storage, read_write> adam: array<AdamState>;
-@group(0) @binding(9) var<storage, read> exactGradients: array<f32>;
+@group(0) @binding(9) var<storage, read> exactGradients: array<${fixedPointExactGradientEnabled ? "i32" : "f32"}>;
 @group(0) @binding(10) var<storage, read_write> tileControl: array<atomic<u32>>;
 ${optimizerStatsDeclaration}
 
 fn cfg(i: u32) -> f32 { return config.values[i / 4u][i % 4u]; }
+fn exact_gradient(index: u32) -> f32 {
+  return ${fixedPointExactGradientEnabled
+    ? `f32(exactGradients[index]) / ${FIXED_POINT_EXACT_GRADIENT_SCALE}.0`
+    : "exactGradients[index]"};
+}
 fn safe_signed(v: f32) -> f32 {
   if (abs(v) >= 0.0000001) { return v; }
   return select(-0.0000001, 0.0000001, v >= 0.0);
@@ -7940,7 +11551,10 @@ fn apply_optimizer(
   let gradCenterNorm = densitySum.z;
   let gradDepth = densitySum.w;
   let normalizer = 1.0 / max(influenceSum, 0.01);
-  let gradGeom = vec4<f32>(gradCenter, gradLogScale) * normalizer;
+  let optimizerScaleGradient = ${inverseScaleOptimizationEnabled
+    ? "-gradLogScale * baseScale"
+    : "gradLogScale"};
+  let gradGeom = vec4<f32>(gradCenter, optimizerScaleGradient) * normalizer;
   let gradAppearance = vec4<f32>(gradColor, gradLogit) * normalizer;
   let gradRotation = vec4<f32>(gradTheta * normalizer, 0.0, 0.0, 0.0);
   let beta1 = 0.9;
@@ -7989,11 +11603,21 @@ fn apply_optimizer(
   let opacityLr = cfg(12u) * lrScale * spatialGate;
   let scaleLr = cfg(13u) * lrScale * spatialGate * phaseOneShapeBoost;
   let rotationLr = cfg(14u) * lrScale * spatialGate * phaseOneShapeBoost;
-  var nextCenter = center - geomAdam.xy * positionLr;
-  var nextScale = exp(log(baseScale) - geomAdam.zw * scaleLr);
+  var centerUpdate = geomAdam.xy * positionLr;
+  var nextCenter = center - centerUpdate;
+  var nextScale = ${inverseScaleOptimizationEnabled
+    ? "1.0 / max((1.0 / baseScale) * max(vec2<f32>(0.5), vec2<f32>(1.0) - geomAdam.zw * scaleLr), vec2<f32>(0.0001))"
+    : "exp(log(baseScale) - geomAdam.zw * scaleLr)"};
   var nextColor = clamp(rgba.rgb - colorAdam.rgb * colorLr, vec3<f32>(0.0), vec3<f32>(1.0));
   let currentLogit = log(clamp(rgba.a, 0.005, 0.995) / (1.0 - clamp(rgba.a, 0.005, 0.995)));
-  var nextOpacity = 1.0 / (1.0 + exp(-(currentLogit - colorAdam.w * opacityLr)));
+  var nextOpacity = select(
+    1.0 / (1.0 + exp(-(currentLogit - colorAdam.w * opacityLr))),
+    cfg(88u),
+    cfg(85u) > 0.5 && cfg(90u) < 0.5
+  );
+  if (cfg(85u) > 0.5 && cfg(90u) > 0.5) {
+    nextOpacity = max(nextOpacity, cfg(88u));
+  }
   var nextTheta = t.z - thetaAdam.x * rotationLr;
   var nextVirtualDepthRaw = xy[g].rawDepth;
   var accumulatedDepthGradient = xy[g].depthGradient;
@@ -8038,7 +11662,8 @@ fn apply_optimizer(
   let u2 = hash_unit(f32(g) * 31.71 + step * 1.37);
   let normal = sqrt(-2.0 * log(u1)) * vec2<f32>(cos(6.28318530718 * u2), sin(6.28318530718 * u2));
   let covarianceNoise = vec2<f32>(c * normal.x * baseScale.x - s * normal.y * baseScale.y, s * normal.x * baseScale.x + c * normal.y * baseScale.y) / max(max(baseScale.x, baseScale.y), 0.0001);
-  let noiseStep = (1.0 - progress) * positionLr * select(1.0, 0.0, cfg(73u) > 0.5);
+  let noiseStep = (1.0 - progress) * positionLr *
+    select(1.0, 0.0, cfg(73u) > 0.5);
   let defaultNoiseGate = 1.0 - rgba.a;
   let sigmoidNoiseGate = 1.0 / (1.0 + exp((rgba.a - 0.2) * 20.0));
   let noiseGate = select(defaultNoiseGate, sigmoidNoiseGate, cfg(34u) > 0.5);
@@ -8054,7 +11679,7 @@ fn apply_optimizer(
   let baseMaxAnisotropy = max(cfg(17u), 1.0);
   let surfaceMaxAnisotropy = max(cfg(51u), 1.0);
   let detailTagged = floor(t.w) >= 2.0;
-  let maxAnisotropy = select(min(baseMaxAnisotropy, surfaceMaxAnisotropy), baseMaxAnisotropy, detailTagged);
+  var maxAnisotropy = select(min(baseMaxAnisotropy, surfaceMaxAnisotropy), baseMaxAnisotropy, detailTagged);
   if (major / minor > maxAnisotropy) {
     let capped = minor * maxAnisotropy;
     nextScale = select(vec2<f32>(minor, capped), vec2<f32>(capped, minor), nextScale.x >= nextScale.y);
@@ -8099,7 +11724,13 @@ fn apply_optimizer(
   }
   let packedLayer = layerTag + select(0.0, layerOrder * ${LAYER_CODE_RANGE}, cfg(45u) > 0.5);
   transform[g] = vec4<f32>(nextScale, nextTheta, packedLayer);
-  color[g] = vec4<f32>(nextColor, clamp(nextOpacity, 0.005, 0.995));
+  var outputOpacity = clamp(nextOpacity, 0.005, 0.995);
+  if (cfg(85u) > 0.5 && cfg(90u) < 0.5) {
+    outputOpacity = cfg(88u);
+  } else if (cfg(85u) > 0.5 && cfg(90u) > 0.5) {
+    outputOpacity = max(outputOpacity, cfg(88u));
+  }
+  color[g] = vec4<f32>(nextColor, outputOpacity);
   ${optimizerStatsUpdate}
 }
 
@@ -8169,7 +11800,10 @@ fn optimize(@builtin(global_invocation_id) id: vec3<u32>) {
     }
   }
   let normalizer = 1.0 / max(influenceSum, 0.01);
-  let gradGeom = vec4<f32>(gradCenter, gradLogScale) * normalizer;
+  let optimizerScaleGradient = ${inverseScaleOptimizationEnabled
+    ? "-gradLogScale * baseScale"
+    : "gradLogScale"};
+  let gradGeom = vec4<f32>(gradCenter, optimizerScaleGradient) * normalizer;
   let gradAppearance = vec4<f32>(gradColor, gradLogit) * normalizer;
   let gradRotation = vec4<f32>(gradTheta * normalizer, 0.0, 0.0, 0.0);
   let beta1 = 0.9;
@@ -8210,11 +11844,21 @@ fn optimize(@builtin(global_invocation_id) id: vec3<u32>) {
   let opacityLr = cfg(12u) * lrScale * spatialGate;
   let scaleLr = cfg(13u) * lrScale * spatialGate * phaseOneShapeBoost;
   let rotationLr = cfg(14u) * lrScale * spatialGate * phaseOneShapeBoost;
-  var nextCenter = center - geomAdam.xy * positionLr;
-  var nextScale = exp(log(baseScale) - geomAdam.zw * scaleLr);
+  var centerUpdate = geomAdam.xy * positionLr;
+  var nextCenter = center - centerUpdate;
+  var nextScale = ${inverseScaleOptimizationEnabled
+    ? "1.0 / max((1.0 / baseScale) * max(vec2<f32>(0.5), vec2<f32>(1.0) - geomAdam.zw * scaleLr), vec2<f32>(0.0001))"
+    : "exp(log(baseScale) - geomAdam.zw * scaleLr)"};
   var nextColor = clamp(rgba.rgb - colorAdam.rgb * colorLr, vec3<f32>(0.0), vec3<f32>(1.0));
   let currentLogit = log(clamp(rgba.a, 0.005, 0.995) / (1.0 - clamp(rgba.a, 0.005, 0.995)));
-  var nextOpacity = 1.0 / (1.0 + exp(-(currentLogit - colorAdam.w * opacityLr)));
+  var nextOpacity = select(
+    1.0 / (1.0 + exp(-(currentLogit - colorAdam.w * opacityLr))),
+    cfg(88u),
+    cfg(85u) > 0.5 && cfg(90u) < 0.5
+  );
+  if (cfg(85u) > 0.5 && cfg(90u) > 0.5) {
+    nextOpacity = max(nextOpacity, cfg(88u));
+  }
   var nextTheta = t.z - thetaAdam.x * rotationLr;
   let u1 = max(0.000001, hash_unit(f32(g) * 17.13 + step * 0.73));
   let u2 = hash_unit(f32(g) * 31.71 + step * 1.37);
@@ -8236,7 +11880,7 @@ fn optimize(@builtin(global_invocation_id) id: vec3<u32>) {
   let baseMaxAnisotropy = max(cfg(17u), 1.0);
   let surfaceMaxAnisotropy = max(cfg(51u), 1.0);
   let detailTagged = floor(t.w) >= 2.0;
-  let maxAnisotropy = select(min(baseMaxAnisotropy, surfaceMaxAnisotropy), baseMaxAnisotropy, detailTagged);
+  var maxAnisotropy = select(min(baseMaxAnisotropy, surfaceMaxAnisotropy), baseMaxAnisotropy, detailTagged);
   if (major / minor > maxAnisotropy) {
     let capped = minor * maxAnisotropy;
     nextScale = select(vec2<f32>(minor, capped), vec2<f32>(capped, minor), nextScale.x >= nextScale.y);
@@ -8279,7 +11923,13 @@ fn optimize(@builtin(global_invocation_id) id: vec3<u32>) {
   }
   let packedLayer = layerTag + select(0.0, layerOrder * ${LAYER_CODE_RANGE}, cfg(45u) > 0.5);
   transform[g] = vec4<f32>(nextScale, nextTheta, packedLayer);
-  color[g] = vec4<f32>(nextColor, clamp(nextOpacity, 0.005, 0.995));
+  var outputOpacity = clamp(nextOpacity, 0.005, 0.995);
+  if (cfg(85u) > 0.5 && cfg(90u) < 0.5) {
+    outputOpacity = cfg(88u);
+  } else if (cfg(85u) > 0.5 && cfg(90u) > 0.5) {
+    outputOpacity = max(outputOpacity, cfg(88u));
+  }
+  color[g] = vec4<f32>(nextColor, outputOpacity);
   ${optimizerStatsUpdate}
 }
 
@@ -8377,10 +12027,10 @@ fn optimize_exact(
   if (g >= count || transform[g].w < 0.5) { return; }
   let base = g * 16u;
   let gradientNormalization = max(cfg(63u), 0.0001);
-  let geomSum = gradientNormalization * vec4<f32>(exactGradients[base], exactGradients[base + 1u], exactGradients[base + 2u], exactGradients[base + 3u]);
-  let appearanceSum = gradientNormalization * vec4<f32>(exactGradients[base + 4u], exactGradients[base + 5u], exactGradients[base + 6u], exactGradients[base + 7u]);
-  let miscSum = gradientNormalization * vec4<f32>(exactGradients[base + 8u], exactGradients[base + 9u], exactGradients[base + 10u], exactGradients[base + 11u]);
-  let densitySum = gradientNormalization * vec4<f32>(exactGradients[base + 12u], exactGradients[base + 13u], exactGradients[base + 14u], exactGradients[base + 15u]);
+  let geomSum = gradientNormalization * vec4<f32>(exact_gradient(base), exact_gradient(base + 1u), exact_gradient(base + 2u), exact_gradient(base + 3u));
+  let appearanceSum = gradientNormalization * vec4<f32>(exact_gradient(base + 4u), exact_gradient(base + 5u), exact_gradient(base + 6u), exact_gradient(base + 7u));
+  let miscSum = gradientNormalization * vec4<f32>(exact_gradient(base + 8u), exact_gradient(base + 9u), exact_gradient(base + 10u), exact_gradient(base + 11u));
+  let densitySum = gradientNormalization * vec4<f32>(exact_gradient(base + 12u), exact_gradient(base + 13u), exact_gradient(base + 14u), exact_gradient(base + 15u));
   let center = xy[g].center;
   let t = transform[g];
   let rgba = color[g];
@@ -8395,7 +12045,23 @@ fn optimize_exact(
     const virtualOrderPenaltyModule = this.device.createShaderModule({ code: virtualOrderPenaltyShader });
     const exactBackwardTelemetryModule = this.device.createShaderModule({ code: exactBackwardTelemetryShader });
     const optimizerModule = this.device.createShaderModule({ code: optimizerShader });
-    for (const module of [renderModule, ssimModule, lossGradientModule, exactBackwardModule, virtualOrderPenaltyModule, exactBackwardTelemetryModule, optimizerModule]) {
+    const segmentedReferenceModule = segmentedExactBackwardEnabled
+      ? this.device.createShaderModule({ code: segmentedReferenceShader })
+      : null;
+    const segmentedGradientReduceModule = segmentedExactBackwardEnabled
+      ? this.device.createShaderModule({ code: segmentedGradientReduceShader })
+      : null;
+    for (const module of [
+      renderModule,
+      ssimModule,
+      lossGradientModule,
+      exactBackwardModule,
+      virtualOrderPenaltyModule,
+      exactBackwardTelemetryModule,
+      optimizerModule,
+      segmentedReferenceModule,
+      segmentedGradientReduceModule,
+    ].filter(Boolean)) {
       const info = await module.getCompilationInfo();
       const errors = info.messages.filter((message) => message.type === "error");
       if (errors.length && module === exactBackwardModule && this.subgroupExactBackwardEnabled) {
@@ -8417,6 +12083,10 @@ fn optimize_exact(
       this.virtualOrderPenaltyPipeline,
       this.exactBackwardTelemetryPipeline,
       this.exactOptimizerPipeline,
+      this.segmentedReferenceCountPipeline,
+      this.segmentedReferencePrefixPipeline,
+      this.segmentedReferenceFillPipeline,
+      this.segmentedGradientReducePipeline,
     ] = await Promise.all([
       this.device.createComputePipelineAsync({ layout: "auto", compute: { module: renderModule, entryPoint: "render_state" } }),
       this.device.createComputePipelineAsync({ layout: "auto", compute: { module: renderModule, entryPoint: "render_state_tile" } }),
@@ -8439,7 +12109,129 @@ fn optimize_exact(
       this.device.createComputePipelineAsync({ layout: "auto", compute: { module: virtualOrderPenaltyModule, entryPoint: "virtual_order_penalty" } }),
       this.device.createComputePipelineAsync({ layout: "auto", compute: { module: exactBackwardTelemetryModule, entryPoint: "measure_exact_backward" } }),
       this.device.createComputePipelineAsync({ layout: "auto", compute: { module: optimizerModule, entryPoint: "optimize_exact" } }),
+      segmentedReferenceModule
+        ? this.device.createComputePipelineAsync({ layout: "auto", compute: { module: segmentedReferenceModule, entryPoint: "count_references" } })
+        : Promise.resolve(null),
+      segmentedReferenceModule
+        ? this.device.createComputePipelineAsync({ layout: "auto", compute: { module: segmentedReferenceModule, entryPoint: "prefix_references" } })
+        : Promise.resolve(null),
+      segmentedReferenceModule
+        ? this.device.createComputePipelineAsync({ layout: "auto", compute: { module: segmentedReferenceModule, entryPoint: "fill_references" } })
+        : Promise.resolve(null),
+      segmentedGradientReduceModule
+        ? this.device.createComputePipelineAsync({ layout: "auto", compute: { module: segmentedGradientReduceModule, entryPoint: "reduce_segmented_gradients" } })
+        : Promise.resolve(null),
     ]);
+    this.compiledSegmentedExactBackward = segmentedExactBackwardEnabled;
+    this.compiledFixedPointExactGradient = fixedPointExactGradientEnabled;
+    this.compiledInverseScaleOptimization = inverseScaleOptimizationEnabled;
+  }
+
+  async ensureTrainingResidualMapPipeline() {
+    if (this.trainingResidualMapPipeline) return;
+    const shader = `
+struct Config { values: array<vec4<f32>, 8>, };
+@group(0) @binding(0) var<uniform> config: Config;
+@group(0) @binding(1) var<storage, read> targetRgb: array<f32>;
+@group(0) @binding(2) var<storage, read> pixelState: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> errorMap: array<f32>;
+fn cfg(i: u32) -> f32 { return config.values[i / 4u][i % 4u]; }
+fn mean_rgb(value: vec3<f32>) -> f32 {
+  return dot(value, vec3<f32>(1.0 / 3.0));
+}
+fn target_mean(pixel: u32) -> f32 {
+  let base = pixel * 3u;
+  return (targetRgb[base] + targetRgb[base + 1u] + targetRgb[base + 2u]) / 3.0;
+}
+
+@compute @workgroup_size(64)
+fn update_training_residual(@builtin(global_invocation_id) id: vec3<u32>) {
+  let width = u32(cfg(0u));
+  let height = u32(cfg(1u));
+  let pixel = id.x;
+  if (pixel >= width * height) { return; }
+  let px = pixel % width;
+  let py = pixel / width;
+  let rendered = pixelState[pixel].rgb;
+  let targetBase = pixel * 3u;
+  let targetColor = vec3<f32>(
+    targetRgb[targetBase],
+    targetRgb[targetBase + 1u],
+    targetRgb[targetBase + 2u]
+  );
+  let loss = (
+    abs(rendered.r - targetColor.r) +
+    abs(rendered.g - targetColor.g) +
+    abs(rendered.b - targetColor.b)
+  ) / 3.0;
+  var gradientError = 0.0;
+  var gradientCount = 0.0;
+  let renderedMean = mean_rgb(rendered);
+  let targetMean = mean_rgb(targetColor);
+  if (px + 1u < width) {
+    gradientError += abs(
+      (mean_rgb(pixelState[pixel + 1u].rgb) - renderedMean) -
+      (target_mean(pixel + 1u) - targetMean)
+    );
+    gradientCount += 1.0;
+  }
+  if (py + 1u < height) {
+    gradientError += abs(
+      (mean_rgb(pixelState[pixel + width].rgb) - renderedMean) -
+      (target_mean(pixel + width) - targetMean)
+    );
+    gradientCount += 1.0;
+  }
+  errorMap[pixel] = loss + select(
+    0.0,
+    0.2 * gradientError / max(1.0, gradientCount),
+    cfg(20u) > 0.5
+  );
+}`;
+    const module = this.device.createShaderModule({ code: shader });
+    const info = await module.getCompilationInfo();
+    const errors = info.messages.filter((message) => message.type === "error");
+    if (errors.length) throw new Error(errors.map((message) => message.message).join(" | "));
+    this.trainingResidualMapPipeline = await this.device.createComputePipelineAsync({
+      layout: "auto",
+      compute: { module, entryPoint: "update_training_residual" },
+    });
+  }
+
+  async refreshTrainingResidualMap(image, params, { step = 0, reason = "density" } = {}) {
+    if (!this.trainState?.errorMapBuffer) {
+      throw new Error("Training residual map requires active WebGPU training state.");
+    }
+    await this.ensureTrainingResidualMapPipeline();
+    if (els.tileCullingToggle.checked) {
+      await this.prepareTileLists(image, params, { sync: false });
+    }
+    await this.refreshRenderState(image, params, { computeSsim: false });
+    const bindGroup = this.device.createBindGroup({
+      layout: this.trainingResidualMapPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.trainState.configBuffer } },
+        { binding: 1, resource: { buffer: this.trainState.targetBuffer } },
+        { binding: 2, resource: { buffer: this.trainState.pixelStateBuffer } },
+        { binding: 3, resource: { buffer: this.trainState.errorMapBuffer } },
+      ],
+    });
+    const encoder = this.device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this.trainingResidualMapPipeline);
+    pass.setBindGroup(0, bindGroup);
+    this.dispatchLinear(pass, Math.ceil((image.width * image.height) / 64));
+    pass.end();
+    this.device.queue.submit([encoder.finish()]);
+    this.trainState.errorMapStep = Math.max(0, Math.round(step));
+    this.trainState.errorMapReason = String(reason);
+    return {
+      step: this.trainState.errorMapStep,
+      reason: this.trainState.errorMapReason,
+      pixels: image.width * image.height,
+      backend: "webgpu-training-signal",
+      cpu_readback: false,
+    };
   }
 
   async ensurePixelMetricsPipeline() {
@@ -8451,10 +12243,10 @@ struct AlphaState { compositeAlpha: f32, acceptedEnd: u32, pad0: f32, pad1: u32,
 @group(0) @binding(1) var<storage, read> targetRgb: array<f32>;
 @group(0) @binding(2) var<storage, read> pixelState: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> metricsOut: array<f32>;
-@group(0) @binding(4) var<storage, read_write> errorMap: array<f32>;
 @group(0) @binding(5) var<storage, read> targetAlpha: array<f32>;
 @group(0) @binding(6) var<storage, read> alphaState: array<AlphaState>;
 var<workgroup> wgLoss: array<f32, 64>;
+var<workgroup> wgSquaredError: array<f32, 64>;
 var<workgroup> wgX: array<f32, 64>;
 var<workgroup> wgY: array<f32, 64>;
 var<workgroup> wgX2: array<f32, 64>;
@@ -8494,6 +12286,7 @@ fn metrics(
   let px = tileX * 8u + lid.x % 8u;
   let py = tileY * 8u + lid.x / 8u;
   var loss = 0.0;
+  var squaredError = 0.0;
   var x = 0.0;
   var y = 0.0;
   var valid = 0.0;
@@ -8520,7 +12313,9 @@ fn metrics(
     backgroundExposure = select(0.0, 1.0, coverage < ${DEFAULT_ALPHA_TARGET});
     let targetIndex = pixel * 3u;
     let targetColor = vec3<f32>(targetRgb[targetIndex], targetRgb[targetIndex + 1u], targetRgb[targetIndex + 2u]);
+    let residual = rendered - targetColor;
     loss = (abs(rendered.r - targetColor.r) + abs(rendered.g - targetColor.g) + abs(rendered.b - targetColor.b)) / 3.0;
+    squaredError = dot(residual, residual);
     x = dot(rendered, vec3<f32>(1.0 / 3.0));
     y = dot(targetColor, vec3<f32>(1.0 / 3.0));
     let alphaBucket = vec4<f32>(coverage, alphaError, backgroundExposure, 1.0);
@@ -8549,10 +12344,10 @@ fn metrics(
       targetGradientEnergy += abs(downTarget - y);
       gradientCount += 1.0;
     }
-    errorMap[pixel] = loss + select(0.0, 0.2 * gradientError / max(1.0, gradientCount), cfg(20u) > 0.5);
     valid = 1.0;
   }
   wgLoss[lid.x] = loss;
+  wgSquaredError[lid.x] = squaredError;
   wgX[lid.x] = x;
   wgY[lid.x] = y;
   wgX2[lid.x] = x * x;
@@ -8577,6 +12372,7 @@ fn metrics(
   for (var stride = 32u; stride > 0u; stride /= 2u) {
     if (lid.x < stride) {
       wgLoss[lid.x] += wgLoss[lid.x + stride];
+      wgSquaredError[lid.x] += wgSquaredError[lid.x + stride];
       wgX[lid.x] += wgX[lid.x + stride];
       wgY[lid.x] += wgY[lid.x + stride];
       wgX2[lid.x] += wgX2[lid.x + stride];
@@ -8635,6 +12431,7 @@ fn metrics(
     metricsOut[out + 30u] = wgAlphaMoments[0].z;
     metricsOut[out + 31u] = wgAlphaMoments[0].w;
     metricsOut[out + 32u] = wgAlphaCross[0];
+    metricsOut[out + 33u] = wgSquaredError[0];
   }
 }`;
     const module = this.device.createShaderModule({ code: shader });
@@ -8656,6 +12453,7 @@ struct AlphaState { compositeAlpha: f32, acceptedEnd: u32, pad0: f32, pad1: u32,
 @group(0) @binding(4) var<storage, read> targetAlpha: array<f32>;
 @group(0) @binding(5) var<storage, read> alphaState: array<AlphaState>;
 var<workgroup> wgLoss: array<f32, 64>;
+var<workgroup> wgSquaredError: array<f32, 64>;
 var<workgroup> wgX: array<f32, 64>;
 var<workgroup> wgY: array<f32, 64>;
 var<workgroup> wgX2: array<f32, 64>;
@@ -8714,6 +12512,7 @@ fn metrics(
   let px = tileX * 8u + lid.x % 8u;
   let py = tileY * 8u + lid.x / 8u;
   var loss = 0.0;
+  var squaredError = 0.0;
   var x = 0.0;
   var y = 0.0;
   var valid = 0.0;
@@ -8737,13 +12536,16 @@ fn metrics(
       alphaX = coverage;
       alphaL1 = abs(alphaX - alphaY);
       background = select(0.0, 1.0, alphaX < ${DEFAULT_ALPHA_TARGET});
+      let residual = rendered - targetColor;
       loss = (abs(rendered.r - targetColor.r) + abs(rendered.g - targetColor.g) + abs(rendered.b - targetColor.b)) / 3.0;
+      squaredError = dot(residual, residual);
       x = dot(rendered, vec3<f32>(1.0 / 3.0));
       y = dot(targetColor, vec3<f32>(1.0 / 3.0));
       valid = 1.0;
     }
   }
   wgLoss[lid.x] = loss;
+  wgSquaredError[lid.x] = squaredError;
   wgX[lid.x] = x;
   wgY[lid.x] = y;
   wgX2[lid.x] = x * x;
@@ -8762,6 +12564,7 @@ fn metrics(
   for (var stride = 32u; stride > 0u; stride /= 2u) {
     if (lid.x < stride) {
       wgLoss[lid.x] += wgLoss[lid.x + stride];
+      wgSquaredError[lid.x] += wgSquaredError[lid.x + stride];
       wgX[lid.x] += wgX[lid.x + stride];
       wgY[lid.x] += wgY[lid.x + stride];
       wgX2[lid.x] += wgX2[lid.x + stride];
@@ -8796,6 +12599,7 @@ fn metrics(
     metricsOut[out + 12u] = wgAlphaXY[0];
     metricsOut[out + 13u] = wgCoverage[0];
     metricsOut[out + 14u] = wgBackground[0];
+    metricsOut[out + 15u] = wgSquaredError[0];
   }
 }`;
     const module = this.device.createShaderModule({ code: shader });
@@ -8866,6 +12670,46 @@ fn metrics(
         suffixColor = weight * color[g].rgb + (1.0 - weight) * suffixColor;
         suffixTransmittance *= 1.0 - weight;
       }
+      if (transmittance < 0.0001) {
+        var deepCursor = acceptedEnd;
+        loop {
+          if (deepCursor >= end) { break; }
+          var deepG = deepCursor;
+          if (useTiles) { deepG = tileIndices[deepCursor]; }
+          deepCursor += 1u;
+          let deepT = transform[deepG];
+          if (deepT.w < 0.5) { continue; }
+          let deepCenter = xy[deepG].center;
+          let deepC = cos(deepT.z);
+          let deepS = sin(deepT.z);
+          let deepPoint = virtual_inverse_point_at_z(outputPoint, virtual_pass_layer_depth(deepT.w, xy[deepG].rawDepth)).xy;
+          let deepBaseScale = max(deepT.xy * scaleFactor, vec2<f32>(0.0001));
+          let deepEffective = sqrt(deepBaseScale * deepBaseScale + vec2<f32>(pixelSigma * pixelSigma));
+          var deepKernel = gaussian_kernel(deepPoint - deepCenter, deepC, deepS, deepEffective);
+          var deepMip = sqrt((deepBaseScale.x * deepBaseScale.y) / max(deepEffective.x * deepEffective.y, 0.00000001));
+          if (cfg(26u) > 0.5) {
+            let deepSampleOffset = select(0.5, 0.28867513459481287, cfg(31u) > 0.5);
+            let deepOx = select(0.0, deepSampleOffset / f32(width - 1u), width > 1u);
+            let deepOy = select(0.0, deepSampleOffset / f32(height - 1u), height > 1u);
+            deepKernel = 0.25 * (
+              gaussian_kernel(virtual_inverse_point_at_z(clamp(outputPoint + vec2<f32>(-deepOx, -deepOy), vec2<f32>(-1.0), vec2<f32>(1.0)), virtual_pass_layer_depth(deepT.w, xy[deepG].rawDepth)).xy - deepCenter, deepC, deepS, deepBaseScale) +
+              gaussian_kernel(virtual_inverse_point_at_z(clamp(outputPoint + vec2<f32>( deepOx, -deepOy), vec2<f32>(-1.0), vec2<f32>(1.0)), virtual_pass_layer_depth(deepT.w, xy[deepG].rawDepth)).xy - deepCenter, deepC, deepS, deepBaseScale) +
+              gaussian_kernel(virtual_inverse_point_at_z(clamp(outputPoint + vec2<f32>(-deepOx,  deepOy), vec2<f32>(-1.0), vec2<f32>(1.0)), virtual_pass_layer_depth(deepT.w, xy[deepG].rawDepth)).xy - deepCenter, deepC, deepS, deepBaseScale) +
+              gaussian_kernel(virtual_inverse_point_at_z(clamp(outputPoint + vec2<f32>( deepOx,  deepOy), vec2<f32>(-1.0), vec2<f32>(1.0)), virtual_pass_layer_depth(deepT.w, xy[deepG].rawDepth)).xy - deepCenter, deepC, deepS, deepBaseScale)
+            );
+            deepMip = 1.0;
+          }
+          let deepWeight = clamp(deepKernel * color[deepG].a * deepMip, 0.0, 0.99);
+          if (deepKernel < 0.0003354626 || deepWeight < 0.0039215686) { continue; }
+          let deepQuantization = min(
+            HIDDEN_RGB_ATTRIBUTION_QUANTIZATION,
+            floor(4000000000.0 / max(1.0, f32(width) * f32(height) * 0.25))
+          );
+          let deepOut = deepG * HIDDEN_RGB_ATTRIBUTION_STRIDE;
+          atomicAdd(&hiddenRgbAttribution[deepOut + 3u], 1u);
+          atomicAdd(&hiddenRgbAttribution[deepOut + 4u], u32(round(clamp(deepWeight, 0.0, 0.25) * deepQuantization)));
+        }
+      }
     }` : "";
     const shader = `
 struct Config { values: array<vec4<f32>, 19>, };
@@ -8880,7 +12724,7 @@ struct SplatPosition { center: vec2<f32>, rawDepth: f32, depthGradient: f32, };
 @group(0) @binding(7) var<storage, read> tileIndices: array<u32>;
 @group(0) @binding(8) var<storage, read_write> metricsOut: array<f32>;
 ${hiddenRgbBinding}
-const HIDDEN_RGB_ATTRIBUTION_STRIDE = 3u;
+const HIDDEN_RGB_ATTRIBUTION_STRIDE = 5u;
 const HIDDEN_RGB_ATTRIBUTION_QUANTIZATION = 4096.0;
 var<workgroup> reduceA: array<vec4<f32>, 64>;
 var<workgroup> reduceB: array<vec4<f32>, 64>;
@@ -9207,11 +13051,15 @@ fn alpha_loss(
     this.alphaLossPipeline = await this.device.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint: "alpha_loss" } });
   }
 
-  async computeOverlapDiagnostics(image, params, { views = null, scales = [1, 0.5, 0.25] } = {}) {
+  async computeOverlapDiagnostics(
+    image,
+    params,
+    { views = null, scales = [1, 0.5, 0.25], hiddenRgb = false } = {},
+  ) {
     if (!this.trainState || !phase40Variants().overlapDiagnostics) return null;
     const partialCount = Math.ceil(image.width / 8) * Math.ceil(image.height / 8);
     const outputBytes = partialCount * OVERLAP_METRIC_STRIDE * 4;
-    const hiddenRgbRequested = hiddenRgbAttributionRequested() && !views?.length;
+    const hiddenRgbRequested = (hiddenRgb || hiddenRgbAttributionRequested()) && !views?.length;
     const bindingPlan = overlapDiagnosticsBindingPlan(
       this.device.limits?.maxStorageBuffersPerShaderStage,
       hiddenRgbRequested,
@@ -9220,7 +13068,8 @@ fn alpha_loss(
     const hiddenRgbEnabled = bindingPlan.hiddenRgbEnabled;
     const overlapMetricsPipeline = await this.ensureOverlapMetricsPipeline({ hiddenRgb: hiddenRgbEnabled });
     if (!overlapMetricsPipeline) throw new Error("Hidden RGB attribution pipeline unavailable on this WebGPU device.");
-    const hiddenRgbBytes = Math.max(12, params.count * 3 * 4);
+    const hiddenRgbStride = 5;
+    const hiddenRgbBytes = Math.max(hiddenRgbStride * 4, params.count * hiddenRgbStride * 4);
     const configBuffer = this.device.createBuffer({ size: TRAIN_CONFIG_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const outputBuffer = this.device.createBuffer({ size: outputBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
     const readBuffer = this.device.createBuffer({ size: outputBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
@@ -9299,6 +13148,10 @@ fn alpha_loss(
       config[64] = fovDegrees;
       config[67] = params.virtualDepthEnabled ? 1 : 0;
       config[68] = params.virtualDepthEnabled ? Number(params.virtualDepthThickness) || DEFAULT_VIRTUAL_DEPTH_THICKNESS : 0;
+      config[81] = params.discreteLayersEnabled ? 1 : 0;
+      config[82] = Math.max(MIN_DISCRETE_LAYER_COUNT, Math.min(MAX_DISCRETE_LAYER_COUNT, Math.round(params.discreteLayerCount || DEFAULT_DISCRETE_LAYER_COUNT)));
+      config[84] = params.layerAwareAccumulationEnabled ? 1 : 0;
+      configurePaintKernel(config, params);
       return { config, pitchDegrees, yawDegrees, cameraDistance, fovDegrees };
     };
     let operationError = null;
@@ -9358,15 +13211,19 @@ fn alpha_loss(
           );
           const rows = [];
           for (let index = 0; index < params.count; index += 1) {
-            const positiveHarm = attributionValues[index * 3] / attributionQuantization;
-            if (positiveHarm <= 0) continue;
+            const attributionBase = index * hiddenRgbStride;
+            const positiveHarm = attributionValues[attributionBase] / attributionQuantization;
+            const deepPixelHits = attributionValues[attributionBase + 3];
+            if (positiveHarm <= 0 && deepPixelHits <= 0) continue;
             const centerX = params.xy[index * 2];
             const centerY = params.xy[index * 2 + 1];
             rows.push({
               index,
               positive_leave_one_out_l1_harm: positiveHarm,
-              contribution_mass: attributionValues[index * 3 + 1] / attributionQuantization,
-              maximum_pixel_harm: attributionValues[index * 3 + 2] / attributionQuantization,
+              contribution_mass: attributionValues[attributionBase + 1] / attributionQuantization,
+              maximum_pixel_harm: attributionValues[attributionBase + 2] / attributionQuantization,
+              deep_occluded_pixel_hits: deepPixelHits,
+              deep_occluded_weight_mass: attributionValues[attributionBase + 4] / attributionQuantization,
               initial_cohort: index < initialCount,
               center: [centerX, centerY],
               region_16x16: [
@@ -9384,12 +13241,15 @@ fn alpha_loss(
             scale: 0.25,
             metric: "positive exact leave-one-out RGB L1 harm",
             quantization: attributionQuantization,
-            attributed_splat_count: rows.length,
+            attributed_splat_count: rows.filter((row) => row.positive_leave_one_out_l1_harm > 0).length,
+            deep_occluded_splat_count: rows.filter((row) => row.deep_occluded_pixel_hits > 0).length,
+            deep_occluded_pixel_hits: rows.reduce((sum, row) => sum + row.deep_occluded_pixel_hits, 0),
             total_positive_harm: rows.reduce((sum, row) => sum + row.positive_leave_one_out_l1_harm, 0),
             top_32_positive_harm: top.reduce((sum, row) => sum + row.positive_leave_one_out_l1_harm, 0),
             top_initial_cohort_fraction: top.filter((row) => row.initial_cohort).length / Math.max(1, top.length),
             fingerprint: top.slice(0, 12).map((row) => `${row.index}:${row.region_16x16.join(",")}`).join("|"),
             top,
+            rows,
           };
         }
         viewResults[String(scale)] = {
@@ -9464,7 +13324,7 @@ fn alpha_loss(
     return this.computeOverlapDiagnostics(image, params, { views, scales: [1] });
   }
 
-  async refreshRenderState(image, params, { view = null } = {}) {
+  async refreshRenderState(image, params, { view = null, computeSsim = true } = {}) {
     await this.ensureRenderGradientPipelines();
     const variants = phase33Variants();
     const requestedView = view === "front" ? null : view;
@@ -9507,6 +13367,10 @@ fn alpha_loss(
       ? Number(params.virtualDepthThickness) || DEFAULT_VIRTUAL_DEPTH_THICKNESS
       : 0;
     config[74] = virtualView && requestedView?.cameraCovariance3d ? 1 : 0;
+    config[81] = params.discreteLayersEnabled ? 1 : 0;
+    config[82] = Math.max(MIN_DISCRETE_LAYER_COUNT, Math.min(MAX_DISCRETE_LAYER_COUNT, Math.round(params.discreteLayerCount || DEFAULT_DISCRETE_LAYER_COUNT)));
+    config[84] = params.layerAwareAccumulationEnabled ? 1 : 0;
+    configurePaintKernel(config, params);
     this.device.queue.writeBuffer(this.trainState.configBuffer, 0, config);
     if (virtualView && els.tileCullingToggle.checked) {
       await this.prepareTileLists(image, params, {
@@ -9544,17 +13408,19 @@ fn alpha_loss(
       : stageKind === "mid"
         ? this.trainState.midTargetAlphaBuffer
         : this.trainState.targetAlphaBuffer;
-    const ssimBindGroup = this.device.createBindGroup({
-      layout: this.ssimTilePipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: this.trainState.configBuffer } },
-        { binding: 1, resource: { buffer: targetBuffer } },
-        { binding: 2, resource: { buffer: this.trainState.pixelStateBuffer } },
-        { binding: 3, resource: { buffer: this.trainState.ssimTileBuffer } },
-        { binding: 4, resource: { buffer: targetAlphaBuffer } },
-        { binding: 5, resource: { buffer: this.trainState.alphaStateBuffer } },
-      ],
-    });
+    const ssimBindGroup = computeSsim
+      ? this.device.createBindGroup({
+          layout: this.ssimTilePipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: this.trainState.configBuffer } },
+            { binding: 1, resource: { buffer: targetBuffer } },
+            { binding: 2, resource: { buffer: this.trainState.pixelStateBuffer } },
+            { binding: 3, resource: { buffer: this.trainState.ssimTileBuffer } },
+            { binding: 4, resource: { buffer: targetAlphaBuffer } },
+            { binding: 5, resource: { buffer: this.trainState.alphaStateBuffer } },
+          ],
+        })
+      : null;
     const encoder = this.device.createCommandEncoder();
     const renderPass = encoder.beginComputePass();
     renderPass.setPipeline(renderChoice.pipeline);
@@ -9565,11 +13431,13 @@ fn alpha_loss(
       this.dispatchLinear(renderPass, Math.ceil((image.width * image.height) / 64));
     }
     renderPass.end();
-    const ssimPass = encoder.beginComputePass();
-    ssimPass.setPipeline(this.ssimTilePipeline);
-    ssimPass.setBindGroup(0, ssimBindGroup);
-    this.dispatchLinear(ssimPass, Math.ceil(image.width / 8) * Math.ceil(image.height / 8));
-    ssimPass.end();
+    if (ssimBindGroup) {
+      const ssimPass = encoder.beginComputePass();
+      ssimPass.setPipeline(this.ssimTilePipeline);
+      ssimPass.setBindGroup(0, ssimBindGroup);
+      this.dispatchLinear(ssimPass, Math.ceil(image.width / 8) * Math.ceil(image.height / 8));
+      ssimPass.end();
+    }
     this.device.queue.submit([encoder.finish()]);
     await this.device.queue.onSubmittedWorkDone();
     this.trainState.pixelStateResolution = [image.width, image.height];
@@ -9593,7 +13461,6 @@ fn alpha_loss(
           { binding: 1, resource: { buffer: this.trainState.targetBuffer } },
           { binding: 2, resource: { buffer: this.trainState.pixelStateBuffer } },
           { binding: 3, resource: { buffer: lossBuffer } },
-          { binding: 4, resource: { buffer: this.trainState.errorMapBuffer } },
           { binding: 5, resource: { buffer: this.trainState.targetAlphaBuffer } },
           { binding: 6, resource: { buffer: this.trainState.alphaStateBuffer } },
         ],
@@ -9610,6 +13477,7 @@ fn alpha_loss(
       const values = new Float32Array(readBuffer.getMappedRange()).slice();
       readBuffer.unmap();
       let lossTotal = 0;
+      let squaredErrorTotal = 0;
       let renderedY = 0;
       let targetY = 0;
       let renderedY2 = 0;
@@ -9661,6 +13529,7 @@ fn alpha_loss(
         alphaMoments.rendered2 += values[i + 30];
         alphaMoments.target2 += values[i + 31];
         alphaMoments.cross += values[i + 32];
+        squaredErrorTotal += values[i + 33];
         const meanX = values[i + 1] / count;
         const meanY = values[i + 2] / count;
         windowedTotal += ssimFromMoments(meanX, meanY, Math.max(0, values[i + 3] / count - meanX ** 2), Math.max(0, values[i + 4] / count - meanY ** 2), values[i + 5] / count - meanX * meanY);
@@ -9668,6 +13537,8 @@ fn alpha_loss(
       }
       const pixelCount = image.width * image.height;
       const loss = lossTotal / pixelCount;
+      const mse = squaredErrorTotal / Math.max(1, pixelCount * 3);
+      const psnr = psnrFromRgbMse(mse);
       const alphaL1 = alphaError / pixelCount;
       const alphaMean = alphaMoments.rendered / pixelCount;
       const alphaTargetMean = alphaMoments.target / pixelCount;
@@ -9712,8 +13583,36 @@ fn alpha_loss(
           }];
         })),
       };
-      this.lastLossStats = { loss, alphaL1, alphaSsim, alphaObjective, alphaWeight, objectiveLoss, ssim, windowedSsim, regionalSsim, highFrequency, coverage, max: maxLoss, count: pixelCount, partial_count: partialCount, bytes: outputBytes, reduction: "tile-8x8-from-compact-render", compact_tile_candidates: Boolean(els.tileCullingToggle.checked), reused_render: reusedRender };
-      return { loss, alphaL1, alphaSsim, alphaObjective, alphaWeight, objectiveLoss, ssim, windowedSsim, regionalSsim, highFrequency, coverage, reusedRender };
+      this.lastLossStats = {
+        loss,
+        mse,
+        psnr,
+        psnr_metric: {
+          channels: "RGB",
+          signal_space: "sRGB signal values",
+          data_range: 1,
+          mse_floor: PSNR_MSE_FLOOR,
+          unit: "dB",
+        },
+        alphaL1,
+        alphaSsim,
+        alphaObjective,
+        alphaWeight,
+        objectiveLoss,
+        ssim,
+        windowedSsim,
+        regionalSsim,
+        highFrequency,
+        coverage,
+        max: maxLoss,
+        count: pixelCount,
+        partial_count: partialCount,
+        bytes: outputBytes,
+        reduction: "tile-8x8-from-compact-render",
+        compact_tile_candidates: Boolean(els.tileCullingToggle.checked),
+        reused_render: reusedRender,
+      };
+      return { loss, mse, psnr, alphaL1, alphaSsim, alphaObjective, alphaWeight, objectiveLoss, ssim, windowedSsim, regionalSsim, highFrequency, coverage, reusedRender };
     } finally {
       lossBuffer.destroy();
       readBuffer.destroy();
@@ -9746,6 +13645,7 @@ fn alpha_loss(
     const values = new Float32Array(readBuffer.getMappedRange()).slice();
     readBuffer.unmap();
     let loss = 0;
+    let squaredError = 0;
     let rendered = 0;
     let target = 0;
     let rendered2 = 0;
@@ -9779,6 +13679,7 @@ fn alpha_loss(
       alphaCross += values[index + 12];
       coverage += values[index + 13];
       background += values[index + 14];
+      squaredError += values[index + 15];
       const meanA = values[index + 1] / count;
       const meanB = values[index + 2] / count;
       tileSsim.push(ssimFromMoments(
@@ -9806,6 +13707,8 @@ fn alpha_loss(
       valid_pixel_count: pixels,
       valid_pixel_ratio: pixels / Math.max(1, image.width * image.height),
       loss: mean(loss),
+      mse: squaredError / Math.max(1, pixels * 3),
+      psnr: psnrFromRgbMse(squaredError / Math.max(1, pixels * 3)),
       ssim: ssimFromMoments(
         rgbMean,
         targetMean,
@@ -9847,7 +13750,8 @@ fn alpha_loss(
     );
     const virtualEntries = [];
     try {
-      for (const camera of catalog) {
+      for (let cameraIndex = 0; cameraIndex < catalog.length; cameraIndex += 1) {
+        const camera = catalog[cameraIndex];
         const view = {
           id: camera.id,
           pitchDegrees: camera.pitch_degrees,
@@ -9859,6 +13763,11 @@ fn alpha_loss(
           cameraCovariance3d: Boolean(sampling.three_dgs_multiview),
         };
         virtualEntries.push({ camera: view, metrics: await this.computeVirtualCameraViewMetrics(image, params, view, outputBuffer, readBuffer) });
+        if ((cameraIndex + 1) % 4 === 0 || cameraIndex + 1 === catalog.length) {
+          setTrainingMessage(`Evaluating virtual camera teachers ${cameraIndex + 1} / ${catalog.length}...`);
+          publishState();
+          await nextFrame();
+        }
       }
     } finally {
       outputBuffer.destroy();
@@ -9874,6 +13783,8 @@ fn alpha_loss(
         valid_pixel_count: image.width * image.height,
         valid_pixel_ratio: 1,
         loss: frontMetrics.loss,
+        mse: frontMetrics.mse,
+        psnr: frontMetrics.psnr,
         ssim: frontMetrics.ssim,
         windowedSsim: frontMetrics.windowedSsim,
         local_p10: frontMetrics.regionalSsim?.p10 ?? null,
@@ -9886,8 +13797,14 @@ fn alpha_loss(
     return {
       backend: "webgpu-final-only",
       metric_space: "sRGB signal values",
+      psnr_contract: {
+        channels: "RGB",
+        data_range: 1,
+        mse_floor: PSNR_MSE_FLOOR,
+        unit: "dB",
+      },
       target: "known planar source reprojected per camera",
-      aggregation: "equal-camera macro; p10/min retain weak virtual views",
+      aggregation: "equal-camera macro for SSIM, L1, MSE, and PSNR; p10/min retain weak virtual views",
       front_view: frontEntry.metrics,
       virtual_views: summarizeVirtualCameraMetricSet(virtualEntries),
       all_views: summarizeVirtualCameraMetricSet([frontEntry, ...virtualEntries]),
@@ -10038,30 +13955,93 @@ fn target_luma_pixel(px: i32, py: i32, width: u32, height: u32) -> f32 {
   return dot(rgb, vec3<f32>(0.299, 0.587, 0.114));
 }
 
-fn structure_at(pos: vec2<f32>, width: u32, height: u32) -> vec4<f32> {
+fn structure_tensor_at(pos: vec2<f32>, radius: i32, width: u32, height: u32) -> vec3<f32> {
   let px = i32(round((clamp(pos.x, -1.0, 1.0) * 0.5 + 0.5) * f32(width - 1u)));
   let py = i32(round((clamp(pos.y, -1.0, 1.0) * 0.5 + 0.5) * f32(height - 1u)));
   var jxx = 0.0;
   var jxy = 0.0;
   var jyy = 0.0;
+  let derivativeScale = 0.5 / f32(max(1, radius));
   for (var oy = -1; oy <= 1; oy += 1) {
     for (var ox = -1; ox <= 1; ox += 1) {
-      let gx = 0.5 * (target_luma_pixel(px + ox + 1, py + oy, width, height) - target_luma_pixel(px + ox - 1, py + oy, width, height));
-      let gy = 0.5 * (target_luma_pixel(px + ox, py + oy + 1, width, height) - target_luma_pixel(px + ox, py + oy - 1, width, height));
+      let sx = px + ox * radius;
+      let sy = py + oy * radius;
+      let gx = derivativeScale * (
+        target_luma_pixel(sx + radius, sy, width, height) -
+        target_luma_pixel(sx - radius, sy, width, height)
+      );
+      let gy = derivativeScale * (
+        target_luma_pixel(sx, sy + radius, width, height) -
+        target_luma_pixel(sx, sy - radius, width, height)
+      );
       jxx += gx * gx;
       jxy += gx * gy;
       jyy += gy * gy;
     }
   }
-  jxx /= 9.0;
-  jxy /= 9.0;
-  jyy /= 9.0;
+  return vec3<f32>(jxx, jxy, jyy) / 9.0;
+}
+
+fn structure_at(pos: vec2<f32>, width: u32, height: u32) -> vec4<f32> {
+  let fine = structure_tensor_at(pos, 1, width, height);
+  let tensor = select(
+    fine,
+    fine * 0.55 +
+      structure_tensor_at(pos, 3, width, height) * 0.30 +
+      structure_tensor_at(pos, 7, width, height) * 0.15,
+    config[40] > 3.5
+  );
+  let jxx = tensor.x;
+  let jxy = tensor.y;
+  let jyy = tensor.z;
   let trace = jxx + jyy;
   let separation = sqrt(max(0.0, (jxx - jyy) * (jxx - jyy) + 4.0 * jxy * jxy));
   let coherence = separation / max(trace, 0.00000001);
   let normalAngle = 0.5 * atan2(2.0 * jxy, jxx - jyy);
   let tangentAngle = normalAngle + 1.57079632679;
   return vec4<f32>(atan2(sin(tangentAngle), cos(tangentAngle)), coherence, trace, 0.0);
+}
+
+fn rectangle_directed_taper_theta(
+  pos: vec2<f32>,
+  theta: f32,
+  width: u32,
+  height: u32
+) -> f32 {
+  let flags = u32(round(config[97]));
+  if (
+    config[40] < 0.5 ||
+    config[40] > 1.5 ||
+    config[96] >= config[98] - 0.000001 ||
+    (flags & ${RECTANGLE_FLAG_EDGE_DIRECTED_TAPER}u) == 0u
+  ) {
+    return theta;
+  }
+  let normal = vec2<f32>(-sin(theta), cos(theta));
+  let offset = 8.0 / max(1.0, f32(max(width, height) - 1u));
+  let positiveEnergy = structure_at(pos + normal * offset, width, height).z;
+  let negativeEnergy = structure_at(pos - normal * offset, width, height).z;
+  return select(theta, theta + 3.14159265359, positiveEnergy > negativeEnergy + 0.0000000001);
+}
+
+fn rectangle_structure_detail(structure: vec4<f32>) -> bool {
+  let flags = u32(round(config[97]));
+  return
+    config[40] > 0.5 &&
+    config[40] < 1.5 &&
+    (flags & ${RECTANGLE_FLAG_STRUCTURE_AWARE_RATIO}u) != 0u &&
+    structure.y >= ${RECTANGLE_STRUCTURE_MIN_COHERENCE} &&
+    structure.z >= ${RECTANGLE_STRUCTURE_MIN_ENERGY};
+}
+
+fn oil_structure_guided(structure: vec4<f32>) -> bool {
+  return config[40] > 3.5 && structure.y > 0.12 && structure.z > 0.00008;
+}
+
+fn oil_hierarchy_scale(scale: vec2<f32>, structure: vec4<f32>) -> vec2<f32> {
+  if (config[40] <= 3.5) { return scale; }
+  let detail = clamp(sqrt(max(0.0, structure.z) / 0.0025), 0.0, 1.0);
+  return scale * mix(1.65, 0.62, detail);
 }
 
 fn phase45_structure_energy(pos: vec2<f32>, radius: i32, width: u32, height: u32) -> f32 {
@@ -10828,32 +14808,56 @@ fn apply_grow(@builtin(global_invocation_id) id: vec3u) {
     if (RESIDUAL_ORACLE_ENABLED || RESIDUAL_TILE_CDF_ENABLED) {
       residualPos = error_pixel_position((encoded & SOURCE_MASK) - 1u, width, height);
     }
-    let materiallyWorse = error_at_position(residualPos, width, height) > error_at_position(gridPos, width, height) + 0.04;
     let residualPriority = config[17] > 0.5 || config[18] > 0.5;
-    let useResidual = materiallyWorse && (residualPriority || hash_unit(f32(index) * 29.7 + f32(step) * 0.11) < 0.15);
+    let materiallyWorse =
+      error_at_position(residualPos, width, height) >
+      error_at_position(gridPos, width, height) + 0.04;
+    let useResidual = materiallyWorse &&
+      (residualPriority || hash_unit(f32(index) * 29.7 + f32(step) * 0.11) < 0.15);
     var nextPos = constrain_xy(select(gridPos, residualPos, useResidual));
     var nextScale = max(baseScaleFloor, stageMinScale);
     var nextTheta = 0.0;
     let localStructure = structure_at(nextPos, width, height);
     let localError = error_at_position(nextPos, width, height);
-    let structureGuided = config[19] > 0.5 && localStructure.y > 0.45 && localStructure.z > 0.0004 && localError > 0.02;
-    let adaptiveDetail = config[29] > 0.5 && localStructure.y >= config[31] && localStructure.z > 0.0004 && localError > 0.02;
+    let structureGuided =
+      config[19] > 0.5 &&
+      ((localStructure.y > 0.45 && localStructure.z > 0.0004 && localError > 0.02) || oil_structure_guided(localStructure));
+    let adaptiveDetail =
+      (config[29] > 0.5 && localStructure.y >= config[31] && localStructure.z > 0.0004 && localError > 0.02) ||
+      rectangle_structure_detail(localStructure);
     let surfaceMaxAnisotropy = max(config[55], 1.0);
     let localMaxAnisotropy = select(min(maxAnisotropy, surfaceMaxAnisotropy), maxAnisotropy, adaptiveDetail);
+    nextScale = oil_hierarchy_scale(nextScale, localStructure);
     if (structureGuided) {
       let areaRadius = sqrt(max(0.00000001, nextScale.x * nextScale.y));
       let ratio = min(localMaxAnisotropy, select(1.6, localMaxAnisotropy, config[28] > 0.5 || adaptiveDetail));
       nextScale = vec2<f32>(areaRadius * sqrt(ratio), areaRadius / sqrt(ratio));
-      nextTheta = localStructure.x;
+      nextTheta = rectangle_directed_taper_theta(
+        nextPos,
+        localStructure.x,
+        width,
+        height
+      );
     }
-    nextScale = constrain_scale(nextPos, max(max(min(nextScale, baseScale * 0.9), baseScaleFloor), stageMinScale), nextTheta, localMaxAnisotropy);
+    let reseedScaleCeiling = baseScale * select(0.9, 1.15, config[40] > 3.5);
+    nextScale = constrain_scale(nextPos, max(max(min(nextScale, reseedScaleCeiling), baseScaleFloor), stageMinScale), nextTheta, localMaxAnisotropy);
     nextPos = constrain_position(nextPos, nextScale, nextTheta);
-    let reseedLayer = select(0.0, hash_unit(f32(index) * 0.61803398875) * ${LAYER_CODE_RANGE}, config[35] > 0.5);
+    let randomizedReseedLayer = select(
+      0.0,
+      min(hash_unit(f32(index) * 0.61803398875) * ${LAYER_CODE_RANGE}, ${LAYER_CODE_RANGE}),
+      config[35] > 0.5
+    );
+    // A freshly seeded Oil mark starts in the deepest paint layer. It can only
+    // reach the surface after its source-footprint color has been fitted.
+    let reseedLayer = select(randomizedReseedLayer, 0.0, config[40] > 3.5 && config[65] > 0.5);
     xy[index].center = nextPos;
     xy[index].rawDepth = 0.0;
     xy[index].depthGradient = 0.0;
     transform[index] = vec4<f32>(nextScale, nextTheta, select(1.0, 2.0, adaptiveDetail) + reseedLayer);
-    color[index] = vec4<f32>(target_at(nextPos, width, height), 0.005);
+    color[index] = vec4<f32>(
+      target_at(nextPos, width, height),
+      select(0.005, config[88], config[65] > 0.5)
+    );
     stats[index] = vec4<f32>(0.0);
     stats[capacity + index] = vec4<f32>(0.0);
     atomicAdd(&control[eventBase + 2u], 1u);
@@ -10876,7 +14880,8 @@ fn apply_grow(@builtin(global_invocation_id) id: vec3u) {
   let side = select(-1.0, 1.0, hash_unit(f32(index) * 53.0 + f32(step) * 1.7) > 0.5);
   let major = select(sourceT.y, sourceT.x, splitUseX);
   let minor = max(0.0015, min(sourceT.x, sourceT.y));
-  let jitter = (hash_unit(f32(index) * 71.0 + f32(step) * 2.3) - 0.5) * minor * 0.35;
+  let jitter =
+    (hash_unit(f32(index) * 71.0 + f32(step) * 2.3) - 0.5) * minor * 0.35;
   var nextPos = xy[source].center + axis * major * 0.48 * side + perp * jitter;
   var nextScale = sourceT.xy * 0.98;
   if (mode == 1u) {
@@ -10893,17 +14898,27 @@ fn apply_grow(@builtin(global_invocation_id) id: vec3u) {
   var nextTheta = sourceT.z;
   let localStructure = structure_at(nextPos, width, height);
   let localError = error_at_position(nextPos, width, height);
-  let structureGuided = !tiltTrueSplit && config[19] > 0.5 && localStructure.y > 0.45 && localStructure.z > 0.0004 && localError > 0.02;
-  let adaptiveDetail = config[29] > 0.5 && localStructure.y >= config[31] && localStructure.z > 0.0004 && localError > 0.02;
+  let structureGuided =
+    !tiltTrueSplit &&
+    config[19] > 0.5 &&
+    ((localStructure.y > 0.45 && localStructure.z > 0.0004 && localError > 0.02) || oil_structure_guided(localStructure));
+  let adaptiveDetail =
+    (config[29] > 0.5 && localStructure.y >= config[31] && localStructure.z > 0.0004 && localError > 0.02) ||
+    rectangle_structure_detail(localStructure);
   let inheritedDetail = floor(sourceT.w) >= 2.0;
   let detailTagged = adaptiveDetail || inheritedDetail;
   let surfaceMaxAnisotropy = max(config[55], 1.0);
-  let localMaxAnisotropy = select(min(maxAnisotropy, surfaceMaxAnisotropy), maxAnisotropy, detailTagged);
+  var localMaxAnisotropy = select(min(maxAnisotropy, surfaceMaxAnisotropy), maxAnisotropy, detailTagged);
   if (structureGuided) {
     let areaRadius = sqrt(max(0.00000001, nextScale.x * nextScale.y));
     let ratio = min(localMaxAnisotropy, select(1.6, localMaxAnisotropy, config[28] > 0.5 || adaptiveDetail));
     nextScale = vec2<f32>(areaRadius * sqrt(ratio), areaRadius / sqrt(ratio));
-    nextTheta = localStructure.x;
+    nextTheta = rectangle_directed_taper_theta(
+      nextPos,
+      localStructure.x,
+      width,
+      height
+    );
   }
   if (!tiltTrueSplit) { nextScale = min(nextScale, baseScale * 0.9); }
   let scaleFloor = max(select(baseScaleFloor, vec2<f32>(${MIN_SPLAT_SCALE}), tiltTrueSplit), stageMinScale);
@@ -10934,13 +14949,28 @@ fn apply_grow(@builtin(global_invocation_id) id: vec3u) {
     if (replacementOpacity > 0.99) { atomicAdd(&control[eventBase + 21u], 1u); }
     childOpacity = clamp(replacementOpacity, 0.005, 0.99);
   }
+  if (config[65] > 0.5) {
+    childOpacity = select(
+      config[88],
+      max(childOpacity, config[88]),
+      config[90] > 0.5
+    );
+  }
   let targetColor = target_at(nextPos, width, height);
-  let childColor = select(sourceC.rgb * 0.25 + targetColor * 0.75, sourceC.rgb, tiltTrueSplit);
+  var childColor = select(
+    sourceC.rgb * 0.25 + targetColor * 0.75,
+    sourceC.rgb,
+    tiltTrueSplit
+  );
+  if (config[40] > 3.5 && !tiltTrueSplit) {
+    childColor = targetColor;
+  }
   xy[index].center = nextPos;
   xy[index].rawDepth = xy[source].rawDepth;
   xy[index].depthGradient = 0.0;
-  let inheritedLayer = fract(sourceT.w);
-  transform[index] = vec4<f32>(nextScale, nextTheta, select(1.0, 2.0, detailTagged) + inheritedLayer);
+  let inheritedLayer = min(fract(sourceT.w), ${LAYER_CODE_RANGE} * 0.999999);
+  let childTag = select(1.0, 2.0, detailTagged);
+  transform[index] = vec4<f32>(nextScale, nextTheta, childTag + inheritedLayer);
   color[index] = vec4<f32>(childColor, childOpacity);
   stats[index] = select(sourceStats, sourceStats * 0.5, tiltTrueSplit);
   var childImportance = sourceImportance * 0.5;
@@ -10976,18 +15006,30 @@ fn select_relocation(@builtin(global_invocation_id) id: vec3u) {
   let signal = normalized_stats(g);
   let candidateImportance = importance_score(g);
   let radiusPx = max(t.x, t.y) * max(f32(width), f32(height)) * 1.25;
-  let inactiveMcmc = t.w < 0.5 || c.a < 0.006 || radiusPx < 0.55 || (st.w > 32.0 && signal.y < 0.012 && signal.z < 0.00008);
+  let layerOrder = clamp(min(fract(t.w), ${LAYER_CODE_RANGE}) / ${LAYER_CODE_RANGE}, 0.0, 1.0);
+  let targetColorError = dot(abs(c.rgb - target_at(xy[g].center, width, height)), vec3<f32>(0.33333334));
+  let frontPaintOutlier =
+    config[40] >= 2.0 &&
+    config[85] > 0.5 &&
+    st.w > 32.0 &&
+    layerOrder >= 0.625 &&
+    importance_residual(g) > 0.045 &&
+    targetColorError > 0.075;
+  let deepLowInfluence = config[62] > 0.5 && config[35] > 0.5 && st.w > 32.0 &&
+    layerOrder <= config[63] && candidateImportance < config[64] && importance_residual(g) < 0.035;
+  let inactiveMcmc = t.w < 0.5 || c.a < 0.006 || radiusPx < 0.55 ||
+    (st.w > 32.0 && signal.y < 0.012 && signal.z < 0.00008) || deepLowInfluence || frontPaintOutlier;
   let lowImportanceNoise = config[16] > 0.5 && st.w > 32.0 && candidateImportance < 0.45 && importance_residual(g) < 0.035;
   let candidateStructure = structure_at(xy[g].center, width, height);
   let lowSignificanceSmooth = config[27] > 0.5 && st.w > 32.0 && candidateImportance < 0.75 && importance_residual(g) < 0.02 && candidateStructure.z < 0.0004;
-  let inactiveAdc = t.w < 0.5 || c.a < 0.025 || radiusPx < 0.65 || (st.w > 32.0 && signal.z < 0.00002 && signal.y < 0.025) || lowImportanceNoise || lowSignificanceSmooth;
+  let inactiveAdc = t.w < 0.5 || c.a < 0.025 || radiusPx < 0.65 || (st.w > 32.0 && signal.z < 0.00002 && signal.y < 0.025) || lowImportanceNoise || lowSignificanceSmooth || frontPaintOutlier;
   var inactive = select(inactiveMcmc, inactiveAdc, adcRecycle);
   let phase45DonorRecord = atomicLoad(&control[phase45_donor_base(capacity) + g]);
   if (adcRecycle && config[45] > 0.5) { inactive = (phase45DonorRecord & PHASE45_DONOR_ELIGIBLE) != 0u; }
   let lateRecycle = adcRecycle && u32(step) > u32(config[15]);
   let adcSelectionRate = select(config[50], config[51], lateRecycle);
   let selectedRate = select(0.02, adcSelectionRate, adcRecycle);
-  let selected = hash_unit(f32(g) * 37.0 + step * 0.137) < selectedRate;
+  let selected = frontPaintOutlier || hash_unit(f32(g) * 37.0 + step * 0.137) < selectedRate;
   if (!inactive || !selected) { return; }
   if (adcRecycle && config[16] > 0.5 && candidateImportance > 1.5) {
     atomicAdd(&control[capacity * 2u + 8u], 1u);
@@ -11060,7 +15102,8 @@ fn apply_relocation(@builtin(global_invocation_id) id: vec3u) {
   let axis = vec2<f32>(cos(sourceLongAngle), sin(sourceLongAngle));
   let perp = vec2<f32>(-axis.y, axis.x);
   let side = select(-1.0, 1.0, hash_unit(f32(g) * 53.0 + step * 1.7) > 0.5);
-  let jitter = (hash_unit(f32(g) * 71.0 + step * 2.3) - 0.5) * min(sourceT.x, sourceT.y) * 0.35;
+  let jitter =
+    (hash_unit(f32(g) * 71.0 + step * 2.3) - 0.5) * min(sourceT.x, sourceT.y) * 0.35;
   let major = select(sourceT.y, sourceT.x, useX);
   var nextPos = constrain_xy(xy[source].center + axis * major * select(select(0.52, 0.55, adcRecycle) * side, 0.34, tiltTrueSplit) + perp * select(jitter, 0.0, tiltTrueSplit));
   var splitScale = min(sourceT.xy, baseScale * 0.9);
@@ -11072,19 +15115,29 @@ fn apply_relocation(@builtin(global_invocation_id) id: vec3u) {
   var nextTheta = sourceT.z;
   let localStructure = structure_at(nextPos, width, height);
   let localError = error_at_position(nextPos, width, height);
-  let structureGuided = !tiltTrueSplit && config[19] > 0.5 && localStructure.y > 0.45 && localStructure.z > 0.0004 && localError > 0.02;
-  let adaptiveDetail = config[29] > 0.5 && localStructure.y >= config[31] && localStructure.z > 0.0004 && localError > 0.02;
+  let structureGuided =
+    !tiltTrueSplit &&
+    config[19] > 0.5 &&
+    ((localStructure.y > 0.45 && localStructure.z > 0.0004 && localError > 0.02) || oil_structure_guided(localStructure));
+  let adaptiveDetail =
+    (config[29] > 0.5 && localStructure.y >= config[31] && localStructure.z > 0.0004 && localError > 0.02) ||
+    rectangle_structure_detail(localStructure);
   let inheritedDetail = floor(sourceT.w) >= 2.0;
   let detailTagged = adaptiveDetail || inheritedDetail;
   let surfaceMaxAnisotropy = max(config[55], 1.0);
-  let localMaxAnisotropy = select(min(maxAnisotropy, surfaceMaxAnisotropy), maxAnisotropy, detailTagged);
+  var localMaxAnisotropy = select(min(maxAnisotropy, surfaceMaxAnisotropy), maxAnisotropy, detailTagged);
   if (structureGuided) {
     let areaRadius = sqrt(max(0.00000001, splitScale.x * splitScale.y));
     let ratio = min(localMaxAnisotropy, select(1.6, localMaxAnisotropy, config[28] > 0.5 || adaptiveDetail));
     splitScale = vec2<f32>(areaRadius * sqrt(ratio), areaRadius / sqrt(ratio));
-    nextTheta = localStructure.x;
+    nextTheta = rectangle_directed_taper_theta(
+      nextPos,
+      localStructure.x,
+      width,
+      height
+    );
   }
-  let nextScale = constrain_scale(nextPos, max(max(splitScale, baseScaleFloor), stageMinScale), nextTheta, localMaxAnisotropy);
+  var nextScale = constrain_scale(nextPos, max(max(splitScale, baseScaleFloor), stageMinScale), nextTheta, localMaxAnisotropy);
   nextPos = constrain_position(nextPos, nextScale, nextTheta);
   var replacementSourcePos = xy[source].center;
   var replacementSourceScale = sourceT.xy;
@@ -11101,16 +15154,28 @@ fn apply_relocation(@builtin(global_invocation_id) id: vec3u) {
     if (replacementOpacity > 0.99) { atomicAdd(&control[capacity * 2u + 21u], 1u); }
     childOpacity = clamp(replacementOpacity, 0.005, 0.99);
   }
+  if (config[65] > 0.5) {
+    childOpacity = select(
+      config[88],
+      max(childOpacity, config[88]),
+      config[90] > 0.5
+    );
+  }
   let targetColor = target_at(nextPos, width, height);
   xy[g].center = nextPos;
   xy[g].rawDepth = xy[source].rawDepth;
   xy[g].depthGradient = 0.0;
-  transform[g] = vec4<f32>(nextScale, nextTheta, select(1.0, 2.0, detailTagged) + fract(sourceT.w));
-  let nextColor = select(
+  let inheritedLayer = min(fract(sourceT.w), ${LAYER_CODE_RANGE} * 0.999999);
+  let childTag = select(1.0, 2.0, detailTagged);
+  transform[g] = vec4<f32>(nextScale, nextTheta, childTag + inheritedLayer);
+  var nextColor = select(
     sourceC.rgb * select(0.7, 0.6, adcRecycle) + targetColor * select(0.3, 0.4, adcRecycle),
     sourceC.rgb,
     tiltTrueSplit
   );
+  if (config[40] > 3.5 && !tiltTrueSplit) {
+    nextColor = targetColor;
+  }
   color[g] = vec4<f32>(nextColor, childOpacity);
   stats[g] = select(sourceStats, sourceStats * 0.5, tiltTrueSplit);
   stats[capacity + g] = select(
@@ -11313,10 +15378,14 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
 
   async uploadTrainState(image, params, capacity = params.count, { verifyAllocation = false } = {}) {
     const activeCount = assertSplatCountContract(params, "gpu-upload");
+    this.disposeResultRenderState();
     const capacityError = (kind, message) => Object.assign(new Error(message), { capacityFailure: kind });
     const variants = phase33Variants();
     const { coarseImage, midImage } = makeCurriculumImages(image, variants);
-    const bufferCapacity = Math.max(activeCount, normalizeUiSplatCount(capacity, activeCount));
+    // UI base counts use a step of four, but additive Line capacity can be any
+    // integer. Rounding the effective capacity back to the UI grid could
+    // allocate one slot too few and make the final growth event return false.
+    const bufferCapacity = Math.max(activeCount, normalizeActiveSplatCount(capacity, activeCount));
     const tilePlan = plannedTileIndexCapacity(image, params, bufferCapacity, this.device);
     const allocationPlan = trainingAllocationPlan(image, params, bufferCapacity, this.device, {
       coarseImage,
@@ -11421,6 +15490,8 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
         size: Math.max(4, image.width * image.height * 4),
         usage: GPUBufferUsage.STORAGE | (residualDestinationOracleRequested() ? GPUBufferUsage.COPY_SRC : 0),
       }),
+      errorMapStep: null,
+      errorMapReason: "",
       statsBuffer: allocationDevice.createBuffer({
         size: Math.max(32, bufferCapacity * 2 * 4 * 4),
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
@@ -11471,6 +15542,50 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
         size: Math.max(EXACT_GRADIENT_STRIDE * 4, bufferCapacity * EXACT_GRADIENT_STRIDE * 4),
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
       }),
+      segmentedExactBackward: allocationPlan.segmentedExactBackward,
+      fixedPointExactGradient: allocationPlan.fixedPointExactGradient,
+      fixedPointGradientControlBuffer: allocationPlan.fixedPointExactGradient?.enabled
+        ? allocationDevice.createBuffer({
+            size: FIXED_POINT_EXACT_GRADIENT_CONTROL_BYTES,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+          })
+        : null,
+      fixedPointGradientReadbackBuffer: allocationPlan.fixedPointExactGradient?.enabled
+        ? allocationDevice.createBuffer({
+            size: FIXED_POINT_EXACT_GRADIENT_CONTROL_BYTES,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+          })
+        : null,
+      segmentedPartialGradientBuffer: allocationPlan.segmentedExactBackward?.enabled
+        ? allocationDevice.createBuffer({
+            size: allocationPlan.segmentedExactBackward.partialBytes,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+          })
+        : null,
+      segmentedReferenceCountsBuffer: allocationPlan.segmentedExactBackward?.enabled
+        ? allocationDevice.createBuffer({
+            size: Math.max(4, bufferCapacity * 4),
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+          })
+        : null,
+      segmentedReferenceOffsetsBuffer: allocationPlan.segmentedExactBackward?.enabled
+        ? allocationDevice.createBuffer({
+            size: Math.max(8, (bufferCapacity + 1) * 4),
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+          })
+        : null,
+      segmentedReferenceCursorsBuffer: allocationPlan.segmentedExactBackward?.enabled
+        ? allocationDevice.createBuffer({
+            size: Math.max(4, bufferCapacity * 4),
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+          })
+        : null,
+      segmentedReferencesBuffer: allocationPlan.segmentedExactBackward?.enabled
+        ? allocationDevice.createBuffer({
+            size: Math.max(4, tileIndexCapacity * 4),
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+          })
+        : null,
       exactBackwardTelemetryBuffer: this.performanceProfile.timestampQuery
         ? allocationDevice.createBuffer({
             size: EXACT_BACKWARD_TELEMETRY_BYTES,
@@ -11553,6 +15668,7 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
       candidate.alphaStateBuffer,
       candidate.lossGradientBuffer,
       candidate.exactGradientBuffer,
+      candidate.fixedPointGradientControlBuffer,
       candidate.tileControlBuffer,
       candidate.ssimTileBuffer,
       candidate.optimizerStateBuffer,
@@ -11925,8 +16041,8 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
       const belowHalfCount = ratios.filter((value) => value < 0.5).length;
       const event = {
         step,
-        error_map_step: state.metrics?.last_preview_step ?? 0,
-        error_map_age: Math.max(0, step - (state.metrics?.last_preview_step ?? 0)),
+        error_map_step: this.trainState?.errorMapStep ?? 0,
+        error_map_age: Math.max(0, step - (this.trainState?.errorMapStep ?? 0)),
         tile_size: tileSize,
         tile_count: tileCols * tileRows,
         mode_zero_count: modeZeroSelections.length,
@@ -12177,7 +16293,250 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
     }
   }
 
-  async readImportanceSummary(count) {
+  async ensureHiddenRgbRecolorPipeline() {
+    if (this.hiddenRgbRecolorPipeline) return;
+    const shader = `
+struct RecolorConfig {
+  selectedCount: u32,
+  splatCount: u32,
+  _padding0: u32,
+  _padding1: u32,
+};
+struct AdamState {
+  mGeom: vec4<f32>,
+  vGeom: vec4<f32>,
+  mColor: vec4<f32>,
+  vColor: vec4<f32>,
+  mTheta: vec4<f32>,
+  vTheta: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> config: RecolorConfig;
+@group(0) @binding(1) var<storage, read> selectedIndices: array<u32>;
+@group(0) @binding(2) var<storage, read> targets: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> color: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> optimizerState: array<AdamState>;
+
+@compute @workgroup_size(64)
+fn recolor(@builtin(global_invocation_id) id: vec3<u32>) {
+  let selected = id.x;
+  if (selected >= config.selectedCount) { return; }
+  let splat = selectedIndices[selected];
+  if (splat >= config.splatCount) { return; }
+  let current = color[splat];
+  let teacherColor = targets[selected];
+  color[splat] = vec4<f32>(mix(current.rgb, teacherColor.rgb, clamp(teacherColor.a, 0.0, 1.0)), current.a);
+  optimizerState[splat].mColor = vec4<f32>(0.0);
+  optimizerState[splat].vColor = vec4<f32>(0.0);
+}`;
+    const module = this.device.createShaderModule({ code: shader });
+    const info = await module.getCompilationInfo();
+    const errors = info.messages.filter((message) => message.type === "error");
+    if (errors.length) throw new Error(errors.map((message) => message.message).join(" | "));
+    this.hiddenRgbRecolorPipeline = await this.device.createComputePipelineAsync({
+      layout: "auto",
+      compute: { module, entryPoint: "recolor" },
+    });
+  }
+
+  async recolorTrainStateGpu(indices, targetColors, strength) {
+    const trainState = this.trainState;
+    if (!trainState) throw new Error("Hidden RGB recolor requires active WebGPU training buffers.");
+    const selectedCount = indices.length;
+    if (!selectedCount || targetColors.length !== selectedCount) {
+      return { recolored: false, selected: 0, gpu_ms: 0 };
+    }
+    await this.ensureHiddenRgbRecolorPipeline();
+    const started = performance.now();
+    const packedTargets = new Float32Array(selectedCount * 4);
+    for (let index = 0; index < selectedCount; index += 1) {
+      packedTargets[index * 4] = targetColors[index][0];
+      packedTargets[index * 4 + 1] = targetColors[index][1];
+      packedTargets[index * 4 + 2] = targetColors[index][2];
+      packedTargets[index * 4 + 3] = strength;
+    }
+    const configBuffer = makeBuffer(
+      this.device,
+      new Uint32Array([selectedCount, trainState.count, 0, 0]),
+      GPUBufferUsage.UNIFORM,
+    );
+    const selectedBuffer = makeBuffer(this.device, new Uint32Array(indices), GPUBufferUsage.STORAGE);
+    const targetBuffer = makeBuffer(this.device, packedTargets, GPUBufferUsage.STORAGE);
+    try {
+      const encoder = this.device.createCommandEncoder();
+      for (const colorBuffer of trainState.colorBuffers) {
+        const bindGroup = this.device.createBindGroup({
+          layout: this.hiddenRgbRecolorPipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: configBuffer } },
+            { binding: 1, resource: { buffer: selectedBuffer } },
+            { binding: 2, resource: { buffer: targetBuffer } },
+            { binding: 3, resource: { buffer: colorBuffer } },
+            { binding: 4, resource: { buffer: trainState.optimizerStateBuffer } },
+          ],
+        });
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(this.hiddenRgbRecolorPipeline);
+        pass.setBindGroup(0, bindGroup);
+        this.dispatchLinear(pass, Math.ceil(selectedCount / 64));
+        pass.end();
+      }
+      this.device.queue.submit([encoder.finish()]);
+      await this.device.queue.onSubmittedWorkDone();
+      trainState.bindGroupCache?.clear?.();
+      return { recolored: true, selected: selectedCount, gpu_ms: performance.now() - started };
+    } finally {
+      destroyBuffers(configBuffer, selectedBuffer, targetBuffer);
+    }
+  }
+
+  async ensureDeepPruneCompactionPipelines() {
+    if (this.deepPruneParamCompactPipeline && this.deepPruneStateCompactPipeline) return;
+    const parameterShader = `
+struct CompactConfig { oldCount: u32, newCount: u32, capacity: u32, _padding: u32, };
+struct SplatPosition { center: vec2<f32>, rawDepth: f32, depthGradient: f32, };
+@group(0) @binding(0) var<uniform> config: CompactConfig;
+@group(0) @binding(1) var<storage, read> keepIndices: array<u32>;
+@group(0) @binding(2) var<storage, read> sourceXy: array<SplatPosition>;
+@group(0) @binding(3) var<storage, read> sourceTransform: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> sourceColor: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read_write> outputXy: array<SplatPosition>;
+@group(0) @binding(6) var<storage, read_write> outputTransform: array<vec4<f32>>;
+@group(0) @binding(7) var<storage, read_write> outputColor: array<vec4<f32>>;
+
+@compute @workgroup_size(64)
+fn compact_parameters(@builtin(global_invocation_id) id: vec3u) {
+  let destination = id.x;
+  if (destination >= config.newCount) { return; }
+  let source = keepIndices[destination];
+  if (source >= config.oldCount) { return; }
+  outputXy[destination] = sourceXy[source];
+  outputTransform[destination] = sourceTransform[source];
+  outputColor[destination] = sourceColor[source];
+}`;
+    const stateShader = `
+struct CompactConfig { oldCount: u32, newCount: u32, capacity: u32, _padding: u32, };
+struct AdamState {
+  mGeom: vec4<f32>,
+  vGeom: vec4<f32>,
+  mColor: vec4<f32>,
+  vColor: vec4<f32>,
+  mTheta: vec4<f32>,
+  vTheta: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> config: CompactConfig;
+@group(0) @binding(1) var<storage, read> keepIndices: array<u32>;
+@group(0) @binding(2) var<storage, read> sourceAdam: array<AdamState>;
+@group(0) @binding(3) var<storage, read> sourceStats: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> outputAdam: array<AdamState>;
+@group(0) @binding(5) var<storage, read_write> outputStats: array<vec4<f32>>;
+
+@compute @workgroup_size(64)
+fn compact_state(@builtin(global_invocation_id) id: vec3u) {
+  let destination = id.x;
+  if (destination >= config.newCount) { return; }
+  let source = keepIndices[destination];
+  if (source >= config.oldCount) { return; }
+  outputAdam[destination] = sourceAdam[source];
+  outputStats[destination] = sourceStats[source];
+  outputStats[config.newCount + destination] = sourceStats[config.capacity + source];
+}`;
+    const compile = async (code, entryPoint) => {
+      const module = this.device.createShaderModule({ code });
+      const info = await module.getCompilationInfo();
+      const errors = info.messages.filter((message) => message.type === "error");
+      if (errors.length) throw new Error(errors.map((message) => message.message).join(" | "));
+      return this.device.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint } });
+    };
+    [this.deepPruneParamCompactPipeline, this.deepPruneStateCompactPipeline] = await Promise.all([
+      compile(parameterShader, "compact_parameters"),
+      compile(stateShader, "compact_state"),
+    ]);
+  }
+
+  async compactTrainStateGpu(keepIndices) {
+    const trainState = this.trainState;
+    if (!trainState) throw new Error("Deep prune requires active WebGPU training buffers.");
+    const oldCount = trainState.count;
+    const newCount = keepIndices.length;
+    if (newCount <= 0 || newCount >= oldCount) return { compacted: false, oldCount, newCount: oldCount, gpu_ms: 0 };
+    await this.ensureDeepPruneCompactionPipelines();
+    const started = performance.now();
+    const configBuffer = makeBuffer(
+      this.device,
+      new Uint32Array([oldCount, newCount, trainState.capacity, 0]),
+      GPUBufferUsage.UNIFORM,
+    );
+    const keepBuffer = makeBuffer(this.device, new Uint32Array(keepIndices), GPUBufferUsage.STORAGE);
+    const createOutput = (size) => this.device.createBuffer({
+      size: Math.max(4, size),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const outputXy = createOutput(newCount * 16);
+    const outputTransform = createOutput(newCount * 16);
+    const outputColor = createOutput(newCount * 16);
+    const outputAdam = createOutput(newCount * 96);
+    const outputStats = createOutput(newCount * 2 * 16);
+    const front = trainState.front;
+    try {
+      const parameterBindGroup = this.device.createBindGroup({
+        layout: this.deepPruneParamCompactPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: configBuffer } },
+          { binding: 1, resource: { buffer: keepBuffer } },
+          { binding: 2, resource: { buffer: trainState.xyBuffers[front] } },
+          { binding: 3, resource: { buffer: trainState.transformBuffers[front] } },
+          { binding: 4, resource: { buffer: trainState.colorBuffers[front] } },
+          { binding: 5, resource: { buffer: outputXy } },
+          { binding: 6, resource: { buffer: outputTransform } },
+          { binding: 7, resource: { buffer: outputColor } },
+        ],
+      });
+      const stateBindGroup = this.device.createBindGroup({
+        layout: this.deepPruneStateCompactPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: configBuffer } },
+          { binding: 1, resource: { buffer: keepBuffer } },
+          { binding: 2, resource: { buffer: trainState.optimizerStateBuffer } },
+          { binding: 3, resource: { buffer: trainState.statsBuffer } },
+          { binding: 4, resource: { buffer: outputAdam } },
+          { binding: 5, resource: { buffer: outputStats } },
+        ],
+      });
+      const encoder = this.device.createCommandEncoder();
+      const parameterPass = encoder.beginComputePass();
+      parameterPass.setPipeline(this.deepPruneParamCompactPipeline);
+      parameterPass.setBindGroup(0, parameterBindGroup);
+      this.dispatchLinear(parameterPass, newCount);
+      parameterPass.end();
+      const statePass = encoder.beginComputePass();
+      statePass.setPipeline(this.deepPruneStateCompactPipeline);
+      statePass.setBindGroup(0, stateBindGroup);
+      this.dispatchLinear(statePass, newCount);
+      statePass.end();
+      for (const target of trainState.xyBuffers) encoder.copyBufferToBuffer(outputXy, 0, target, 0, newCount * 16);
+      for (const target of trainState.transformBuffers) encoder.copyBufferToBuffer(outputTransform, 0, target, 0, newCount * 16);
+      for (const target of trainState.colorBuffers) encoder.copyBufferToBuffer(outputColor, 0, target, 0, newCount * 16);
+      encoder.copyBufferToBuffer(outputAdam, 0, trainState.optimizerStateBuffer, 0, newCount * 96);
+      encoder.copyBufferToBuffer(outputStats, 0, trainState.statsBuffer, 0, newCount * 16);
+      encoder.copyBufferToBuffer(
+        outputStats,
+        newCount * 16,
+        trainState.statsBuffer,
+        trainState.capacity * 16,
+        newCount * 16,
+      );
+      this.device.queue.submit([encoder.finish()]);
+      await this.device.queue.onSubmittedWorkDone();
+      trainState.count = newCount;
+      trainState.tileReady = false;
+      trainState.bindGroupCache?.clear?.();
+      return { compacted: true, oldCount, newCount, gpu_ms: performance.now() - started };
+    } finally {
+      destroyBuffers(configBuffer, keepBuffer, outputXy, outputTransform, outputColor, outputAdam, outputStats);
+    }
+  }
+
+  async readImportanceData(count) {
     if (!this.trainState?.statsBuffer || count <= 0) return null;
     const bytes = count * 4 * 4;
     const readBuffer = this.device.createBuffer({
@@ -12194,6 +16553,9 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
       const coverage = [];
       const influence = [];
       const residual = [];
+      const normalizedInfluence = new Float32Array(count);
+      const integratedInfluenceBySplat = new Float32Array(count);
+      const observedCoverage = new Float32Array(count);
       let nonfiniteCount = 0;
       for (let i = 0; i < values.length; i += 4) {
         if (![values[i], values[i + 1], values[i + 2], values[i + 3]].every(Number.isFinite)) nonfiniteCount += 1;
@@ -12203,6 +16565,9 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
         coverage.push(observed);
         influence.push(integratedInfluence);
         residual.push(residualMass / Math.max(observed, 1));
+        normalizedInfluence[i / 4] = integratedInfluence / Math.max(observed, 1);
+        observedCoverage[i / 4] = observed;
+        integratedInfluenceBySplat[i / 4] = integratedInfluence;
       }
       const summarize = (items) => {
         const sorted = items.sort((a, b) => a - b);
@@ -12215,10 +16580,25 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
           maximum: sorted[sorted.length - 1] ?? null,
         };
       };
-      return { count, nonfinite_count: nonfiniteCount, coverage: summarize(coverage), influence: summarize(influence), residual: summarize(residual) };
+      return {
+        normalizedInfluence,
+        integratedInfluence: integratedInfluenceBySplat,
+        observedCoverage,
+        summary: {
+          count,
+          nonfinite_count: nonfiniteCount,
+          coverage: summarize(coverage),
+          influence: summarize(influence),
+          residual: summarize(residual),
+        },
+      };
     } finally {
       readBuffer.destroy();
     }
+  }
+
+  async readImportanceSummary(count) {
+    return (await this.readImportanceData(count))?.summary || null;
   }
 
   trainingBuffers() {
@@ -12245,6 +16625,13 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
       this.trainState.alphaStateBuffer,
       this.trainState.lossGradientBuffer,
       this.trainState.exactGradientBuffer,
+      this.trainState.fixedPointGradientControlBuffer,
+      this.trainState.fixedPointGradientReadbackBuffer,
+      this.trainState.segmentedPartialGradientBuffer,
+      this.trainState.segmentedReferenceCountsBuffer,
+      this.trainState.segmentedReferenceOffsetsBuffer,
+      this.trainState.segmentedReferenceCursorsBuffer,
+      this.trainState.segmentedReferencesBuffer,
       this.trainState.exactBackwardTelemetryBuffer,
       this.trainState.exactBackwardTelemetryReadbackBuffer,
       this.trainState.ssimTileBuffer,
@@ -12316,6 +16703,7 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
     gofDensity = false,
   } = {}) {
     await this.ensureRenderGradientPipelines();
+    if (params.discreteLayersEnabled) await this.ensureDiscreteLayerPipelines();
     const variants = phase33Variants();
     const phase37 = phase37Variants();
     const phase38 = phase38Variants();
@@ -12355,7 +16743,10 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
         ? this.trainState.midTargetAlphaBuffer
         : this.trainState.targetAlphaBuffer;
     const qualityVariants = qualityRecoveryVariants();
-    const useExactBackward = qualityVariants.exactBackward || !this.renderGradientPipeline;
+    const useExactBackward =
+      qualityVariants.exactBackward ||
+      algorithmUsesPaintKernel() ||
+      !this.renderGradientPipeline;
     const layerSettings = layerOptimizationSettings(
       currentStep,
       requestedSteps,
@@ -12472,7 +16863,23 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
       trainingStage,
       variants.stageMinScaleRatio,
     );
+    config[81] = params.discreteLayersEnabled ? 1 : 0;
+    config[82] = Math.max(MIN_DISCRETE_LAYER_COUNT, Math.min(MAX_DISCRETE_LAYER_COUNT, Math.round(params.discreteLayerCount || DEFAULT_DISCRETE_LAYER_COUNT)));
+    config[83] = Math.max(0, Math.min(config[82] - 1, Math.round(params.discreteLayerMoveRadius ?? DEFAULT_DISCRETE_LAYER_MOVE_RADIUS)));
+    config[84] = params.layerAwareAccumulationEnabled ? 1 : 0;
+    configurePaintKernel(config, params);
     const sourceDomainActive = config[72] > 0.5;
+    const segmentedExactBackwardActive = Boolean(
+      useExactBackward &&
+      !sourceDomainActive &&
+      els.tileCullingToggle.checked &&
+      this.trainState.segmentedExactBackward?.enabled,
+    );
+    const fixedPointExactGradientActive = Boolean(
+      useExactBackward &&
+      !segmentedExactBackwardActive &&
+      this.trainState.fixedPointExactGradient?.enabled,
+    );
     let errorScopeOpen = false;
     const profileWallStarted = profileSample ? performance.now() : 0;
     let profileEncodeSubmitMs = 0;
@@ -12482,6 +16889,7 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
     let profileReadbackCount = 0;
     let profileReadbackBytes = 0;
     let profileCandidateStats = null;
+    let profileFixedPointGradientStats = null;
     if (effectiveSync) {
       this.device.pushErrorScope("validation");
       errorScopeOpen = true;
@@ -12578,15 +16986,59 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
           { binding: 4, resource: { buffer: this.trainState.tileOffsetsBuffer } },
           { binding: 5, resource: { buffer: this.trainState.tileIndicesBuffer } },
           { binding: 6, resource: { buffer: this.trainState.lossGradientBuffer } },
-          { binding: 7, resource: { buffer: this.trainState.exactGradientBuffer } },
+          ...(segmentedExactBackwardActive
+            ? []
+            : [{ binding: 7, resource: { buffer: this.trainState.exactGradientBuffer } }]),
           { binding: 8, resource: { buffer: this.trainState.alphaStateBuffer } },
+          ...(segmentedExactBackwardActive
+            ? [{ binding: 9, resource: { buffer: this.trainState.segmentedPartialGradientBuffer } }]
+            : fixedPointExactGradientActive
+              ? [{ binding: 9, resource: { buffer: this.trainState.fixedPointGradientControlBuffer } }]
+              : []),
         ], sourceDomainActive ? "source" : "alpha") : null;
+      const segmentedReferenceCountBindGroup = segmentedExactBackwardActive
+        ? cachedBindGroup("segmented-ref-count", this.segmentedReferenceCountPipeline, [
+            { binding: 0, resource: { buffer: this.trainState.configBuffer } },
+            { binding: 1, resource: { buffer: this.trainState.tileOffsetsBuffer } },
+            { binding: 2, resource: { buffer: this.trainState.tileIndicesBuffer } },
+            { binding: 3, resource: { buffer: this.trainState.segmentedReferenceCountsBuffer } },
+          ])
+        : null;
+      const segmentedReferencePrefixBindGroup = segmentedExactBackwardActive
+        ? cachedBindGroup("segmented-ref-prefix", this.segmentedReferencePrefixPipeline, [
+            { binding: 0, resource: { buffer: this.trainState.configBuffer } },
+            { binding: 3, resource: { buffer: this.trainState.segmentedReferenceCountsBuffer } },
+            { binding: 4, resource: { buffer: this.trainState.segmentedReferenceOffsetsBuffer } },
+          ])
+        : null;
+      const segmentedReferenceFillBindGroup = segmentedExactBackwardActive
+        ? cachedBindGroup("segmented-ref-fill", this.segmentedReferenceFillPipeline, [
+            { binding: 0, resource: { buffer: this.trainState.configBuffer } },
+            { binding: 1, resource: { buffer: this.trainState.tileOffsetsBuffer } },
+            { binding: 2, resource: { buffer: this.trainState.tileIndicesBuffer } },
+            { binding: 4, resource: { buffer: this.trainState.segmentedReferenceOffsetsBuffer } },
+            { binding: 5, resource: { buffer: this.trainState.segmentedReferenceCursorsBuffer } },
+            { binding: 6, resource: { buffer: this.trainState.segmentedReferencesBuffer } },
+          ])
+        : null;
+      const segmentedGradientReduceBindGroup = segmentedExactBackwardActive
+        ? cachedBindGroup("segmented-gradient-reduce", this.segmentedGradientReducePipeline, [
+            { binding: 0, resource: { buffer: this.trainState.configBuffer } },
+            { binding: 1, resource: { buffer: this.trainState.segmentedReferenceOffsetsBuffer } },
+            { binding: 2, resource: { buffer: this.trainState.segmentedReferencesBuffer } },
+            { binding: 3, resource: { buffer: this.trainState.segmentedPartialGradientBuffer } },
+            { binding: 4, resource: { buffer: this.trainState.exactGradientBuffer } },
+          ])
+        : null;
       const virtualOrderPenaltyBindGroup = useExactBackward && tiltStep.enabled && tiltStep.orderPenaltyWeight > 0
         ? cachedBindGroup("virtual-order", this.virtualOrderPenaltyPipeline, [
               { binding: 0, resource: { buffer: this.trainState.configBuffer } },
               { binding: 2, resource: { buffer: this.trainState.transformBuffers[front] } },
               { binding: 3, resource: { buffer: this.trainState.colorBuffers[front] } },
               { binding: 4, resource: { buffer: this.trainState.exactGradientBuffer } },
+              ...(fixedPointExactGradientActive
+                ? [{ binding: 5, resource: { buffer: this.trainState.fixedPointGradientControlBuffer } }]
+                : []),
             ])
         : null;
       const exactBackwardTelemetryBindGroup = useExactBackward && profileSample && !sourceDomainActive ? cachedBindGroup("exact-telemetry", this.exactBackwardTelemetryPipeline, [
@@ -12609,6 +17061,46 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
           { binding: 9, resource: { buffer: this.trainState.exactGradientBuffer } },
           { binding: 10, resource: { buffer: this.trainState.tileControlBuffer } },
         ]) : null;
+      const discreteLayerPassDue = Boolean(
+        params.discreteLayersEnabled &&
+        params.discreteLayerMoveRadius > 0 &&
+        applyOptimizer &&
+        (
+          (
+            currentStep === requestedSteps &&
+            normalizedKernelShape(params.kernelShape) !== "opaque-brush"
+          ) ||
+          (
+            normalizedKernelShape(params.kernelShape) === "opaque-brush" &&
+            currentStep >= experimentalDensifySteps(requestedSteps) &&
+            illustrativeOilSurfaceRecoveryDue(
+              currentStep,
+              requestedSteps,
+              params.deepPruneInterval || LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL,
+            )
+          )
+        )
+      );
+      const discreteLayerEntries = discreteLayerPassDue ? [
+        { binding: 0, resource: { buffer: this.trainState.configBuffer } },
+        { binding: 1, resource: { buffer: this.trainState.xyBuffers[front] } },
+        { binding: 2, resource: { buffer: this.trainState.transformBuffers[front] } },
+        { binding: 3, resource: { buffer: this.trainState.tileOffsetsBuffer } },
+        { binding: 4, resource: { buffer: this.trainState.tileIndicesBuffer } },
+        { binding: 5, resource: { buffer: this.trainState.exactGradientBuffer } },
+        { binding: 6, resource: { buffer: this.trainState.targetBuffer } },
+        { binding: 7, resource: { buffer: this.trainState.colorBuffers[front] } },
+      ] : null;
+      const discreteLayerAssignBindGroup = discreteLayerPassDue
+        ? cachedBindGroup("discrete-layer-assign", this.discreteLayerAssignPipeline, discreteLayerEntries)
+        : null;
+      const discreteLayerCommitBindGroup = discreteLayerPassDue
+        ? cachedBindGroup("discrete-layer-commit", this.discreteLayerCommitPipeline, [
+            { binding: 0, resource: { buffer: this.trainState.configBuffer } },
+            { binding: 2, resource: { buffer: this.trainState.transformBuffers[front] } },
+            { binding: 5, resource: { buffer: this.trainState.exactGradientBuffer } },
+          ])
+        : null;
       const renderPass = encoder.beginComputePass(this.profilePassDescriptor(profileSample, "render"));
       renderPass.setPipeline(renderChoice.pipeline);
       renderPass.setBindGroup(0, renderBindGroup);
@@ -12638,6 +17130,37 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
           telemetryPass.dispatchWorkgroups(Math.ceil(workImage.width / 8), Math.ceil(workImage.height / 8));
           telemetryPass.end();
         }
+        if (segmentedExactBackwardActive) {
+          encoder.clearBuffer(this.trainState.segmentedReferenceCountsBuffer);
+          encoder.clearBuffer(this.trainState.segmentedReferenceCursorsBuffer);
+          const referenceCountPass = encoder.beginComputePass(
+            this.profilePassDescriptor(profileSample, "segmented-reference-count"),
+          );
+          referenceCountPass.setPipeline(this.segmentedReferenceCountPipeline);
+          referenceCountPass.setBindGroup(0, segmentedReferenceCountBindGroup);
+          this.dispatchLinear(
+            referenceCountPass,
+            Math.ceil(this.trainState.tileIndexCapacity / 64),
+          );
+          referenceCountPass.end();
+          const referencePrefixPass = encoder.beginComputePass(
+            this.profilePassDescriptor(profileSample, "segmented-reference-prefix"),
+          );
+          referencePrefixPass.setPipeline(this.segmentedReferencePrefixPipeline);
+          referencePrefixPass.setBindGroup(0, segmentedReferencePrefixBindGroup);
+          referencePrefixPass.dispatchWorkgroups(1);
+          referencePrefixPass.end();
+          const referenceFillPass = encoder.beginComputePass(
+            this.profilePassDescriptor(profileSample, "segmented-reference-fill"),
+          );
+          referenceFillPass.setPipeline(this.segmentedReferenceFillPipeline);
+          referenceFillPass.setBindGroup(0, segmentedReferenceFillBindGroup);
+          this.dispatchLinear(
+            referenceFillPass,
+            Math.ceil(this.trainState.tileIndexCapacity / 64),
+          );
+          referenceFillPass.end();
+        }
         const backwardPass = encoder.beginComputePass(this.profilePassDescriptor(profileSample, "exact-backward"));
         backwardPass.setPipeline(exactBackwardPipeline);
         backwardPass.setBindGroup(0, exactBackwardBindGroup);
@@ -12650,6 +17173,15 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
           );
         }
         backwardPass.end();
+        if (segmentedExactBackwardActive) {
+          const segmentedReducePass = encoder.beginComputePass(
+            this.profilePassDescriptor(profileSample, "segmented-gradient-reduce"),
+          );
+          segmentedReducePass.setPipeline(this.segmentedGradientReducePipeline);
+          segmentedReducePass.setBindGroup(0, segmentedGradientReduceBindGroup);
+          this.dispatchLinear(segmentedReducePass, params.count);
+          segmentedReducePass.end();
+        }
         if (virtualOrderPenaltyBindGroup) {
           const orderPenaltyPass = encoder.beginComputePass(this.profilePassDescriptor(profileSample, "virtual-order-penalty"));
           orderPenaltyPass.setPipeline(this.virtualOrderPenaltyPipeline);
@@ -12672,6 +17204,18 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
         else optimizerPass.dispatchWorkgroups(Math.ceil(params.count / 64));
         optimizerPass.end();
       }
+      if (discreteLayerPassDue) {
+        const assignPass = encoder.beginComputePass(this.profilePassDescriptor(profileSample, "discrete-layer-assign"));
+        assignPass.setPipeline(this.discreteLayerAssignPipeline);
+        assignPass.setBindGroup(0, discreteLayerAssignBindGroup);
+        this.dispatchLinear(assignPass, Math.ceil(params.count / 64));
+        assignPass.end();
+        const commitPass = encoder.beginComputePass(this.profilePassDescriptor(profileSample, "discrete-layer-commit"));
+        commitPass.setPipeline(this.discreteLayerCommitPipeline);
+        commitPass.setBindGroup(0, discreteLayerCommitBindGroup);
+        this.dispatchLinear(commitPass, Math.ceil(params.count / 64));
+        commitPass.end();
+      }
       if (profileSample && useExactBackward && !sourceDomainActive) {
         encoder.copyBufferToBuffer(
           this.trainState.exactBackwardTelemetryBuffer,
@@ -12679,6 +17223,15 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
           this.trainState.exactBackwardTelemetryReadbackBuffer,
           0,
           EXACT_BACKWARD_TELEMETRY_BYTES,
+        );
+      }
+      if (profileSample && fixedPointExactGradientActive) {
+        encoder.copyBufferToBuffer(
+          this.trainState.fixedPointGradientControlBuffer,
+          0,
+          this.trainState.fixedPointGradientReadbackBuffer,
+          0,
+          FIXED_POINT_EXACT_GRADIENT_CONTROL_BYTES,
         );
       }
       if (profileSample?.queryCount) {
@@ -12756,6 +17309,28 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
           };
           profileReadbackMs += performance.now() - telemetryStarted;
         }
+        if (fixedPointExactGradientActive) {
+          const fixedPointStarted = performance.now();
+          const fixedPointReadback = this.trainState.fixedPointGradientReadbackBuffer;
+          await fixedPointReadback.mapAsync(
+            GPUMapMode.READ,
+            0,
+            FIXED_POINT_EXACT_GRADIENT_CONTROL_BYTES,
+          );
+          const fixedPointValues = new Uint32Array(
+            fixedPointReadback.getMappedRange(0, FIXED_POINT_EXACT_GRADIENT_CONTROL_BYTES),
+          ).slice();
+          fixedPointReadback.unmap();
+          profileReadbackCount += 1;
+          profileReadbackBytes += FIXED_POINT_EXACT_GRADIENT_CONTROL_BYTES;
+          profileFixedPointGradientStats = {
+            active: true,
+            scale: FIXED_POINT_EXACT_GRADIENT_SCALE,
+            safety_clamps: fixedPointValues[0],
+            maximum_abs_quantized_contribution: fixedPointValues[1],
+          };
+          profileReadbackMs += performance.now() - fixedPointStarted;
+        }
         const stages = Object.fromEntries(profileSample.stages.map((stage) => [
           stage.name,
           Number(timestamps[stage.endOfPassWriteIndex] - timestamps[stage.beginningOfPassWriteIndex]) / 1e6,
@@ -12769,6 +17344,7 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
           stages_ms: stages,
           total_profiled_ms: Object.values(stages).reduce((sum, value) => sum + value, 0),
           exact_backward_candidates: profileCandidateStats,
+          fixed_point_exact_gradient: profileFixedPointGradientStats,
           encode_submit_wall_ms: profileEncodeSubmitMs,
           sync_wait_wall_ms: profileSyncWaitMs,
           profile_readback_wall_ms: profileReadbackMs,
@@ -12791,6 +17367,24 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
         source_domain_jacobian_weighting: sourceDomainActive,
         sgld_noise_suppressed: Boolean(suppressSgldNoise),
         exact_tile_intersection: this.exactTileIntersectionEnabled,
+        shape_aware_paint_culling: this.shapeAwarePaintCullingEnabled,
+        projected_virtual_exact_culling: this.projectedVirtualExactCullingEnabled,
+        segmented_exact_backward: {
+          ...this.trainState.segmentedExactBackward,
+          active: segmentedExactBackwardActive,
+        },
+        fixed_point_exact_gradient: {
+          ...this.trainState.fixedPointExactGradient,
+          active: fixedPointExactGradientActive,
+          scale: FIXED_POINT_EXACT_GRADIENT_SCALE,
+          profile: profileFixedPointGradientStats,
+        },
+        inverse_scale_optimization: {
+          requested: this.inverseScaleOptimizationRequested,
+          active: Boolean(this.inverseScaleOptimizationRequested),
+          parameter: this.inverseScaleOptimizationRequested ? "inverse-scale" : "log-scale",
+          renderer_unchanged: true,
+        },
         opacity_aware_support: this.opacityAwareSupportMode,
         render_gradient_optimizer: true,
         dssim_weight: DEFAULT_DSSIM_WEIGHT,
@@ -12820,6 +17414,11 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
         layer_update_rate: layerSettings.rate,
         layer_update_enabled: layerSettings.enabled,
         layer_update_due: layerSettings.due,
+        discrete_layers: Boolean(params.discreteLayersEnabled),
+        discrete_layer_count: params.discreteLayersEnabled ? params.discreteLayerCount : 0,
+        discrete_layer_move_radius: params.discreteLayersEnabled ? params.discreteLayerMoveRadius : 0,
+        layer_aware_accumulation: Boolean(params.layerAwareAccumulationEnabled),
+        discrete_overlap_assignment_due: discreteLayerPassDue,
         virtual_depth_update_interval: boundedDepthEnabled ? Math.max(1, Math.round(virtualDepthUpdateInterval)) : 0,
         virtual_depth_update_due: Boolean(boundedDepthEnabled && virtualDepthUpdateDue),
         virtual_tilt: {
@@ -12986,10 +17585,8 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
   async trainStepsGpu(image, params, learningRates, steps, { virtualCameraSampling = null } = {}) {
     const batchSteps = steps.slice(0, MAX_TRAIN_BATCH_SIZE);
     if (batchSteps.length === 0) return null;
-    if (virtualCameraSampling?.enabled) {
-      throw new Error("Adaptive GPU batches are currently limited to Planar Gaussian training.");
-    }
     const encoder = this.device.createCommandEncoder();
+    const virtualCameraSamples = [];
     this.device.pushErrorScope("validation");
     let errorScopeOpen = true;
     try {
@@ -13001,6 +17598,12 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
           batchEncoder: encoder,
           batchConfigSlot: slot,
         });
+        if (this.lastTrainStats?.virtual_camera_sample) {
+          virtualCameraSamples.push({
+            ...this.lastTrainStats.virtual_camera_sample,
+            step: batchSteps[slot],
+          });
+        }
       }
       this.device.queue.submit([encoder.finish()]);
       await this.device.queue.onSubmittedWorkDone();
@@ -13015,6 +17618,7 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
           batch_size: batchSteps.length,
           batch_first_step: batchSteps[0],
           batch_last_step: batchSteps[batchSteps.length - 1],
+          virtual_camera_samples: virtualCameraSamples,
         };
       }
       return this.lastTrainStats;
@@ -13059,13 +17663,13 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
         const packedTag = transforms[i * 4 + 3];
         params.detailTags[i] = Math.floor(packedTag);
         params.depthOrder[i] = packedLayerOrder(packedTag);
+        const minor = Math.max(MIN_SPLAT_SCALE, Math.min(transforms[i * 4], transforms[i * 4 + 1]));
+        const anisotropy = Math.max(transforms[i * 4], transforms[i * 4 + 1]) / minor;
         if (Math.floor(packedTag) > 1.5) {
           detailSplatCount += 1;
-          const minor = Math.max(MIN_SPLAT_SCALE, Math.min(transforms[i * 4], transforms[i * 4 + 1]));
-          detailAnisotropyMax = Math.max(detailAnisotropyMax, Math.max(transforms[i * 4], transforms[i * 4 + 1]) / minor);
+          detailAnisotropyMax = Math.max(detailAnisotropyMax, anisotropy);
         } else {
-          const minor = Math.max(MIN_SPLAT_SCALE, Math.min(transforms[i * 4], transforms[i * 4 + 1]));
-          surfaceAnisotropyMax = Math.max(surfaceAnisotropyMax, Math.max(transforms[i * 4], transforms[i * 4 + 1]) / minor);
+          surfaceAnisotropyMax = Math.max(surfaceAnisotropyMax, anisotropy);
         }
       }
       if (state.metrics) {
@@ -13140,7 +17744,11 @@ function displayRgbaParity(a, b) {
     }
     if (pixelMaximum > 1) premultipliedMismatchPixels += 1;
   }
-  const displayEquivalent = alphaMaximum === 0 && premultipliedMaximum <= 1;
+  // The training buffer and the standalone render target quantize the same
+  // float alpha through different 8-bit paths. Accept one code-value of
+  // round-off in both alpha and premultiplied color, while retaining the
+  // export block for any visually meaningful divergence.
+  const displayEquivalent = alphaMaximum <= 1 && premultipliedMaximum <= 1;
   return {
     exact: displayEquivalent,
     display_equivalent: displayEquivalent,
@@ -13217,7 +17825,9 @@ function trainingColorSpaceAudit(image, trainState, trainingRgba, standaloneRgba
 }
 
 function layerTelemetryEnabled() {
-  return QA_RUNTIME_ENABLED && globalThis.__flatPhotoLayerTelemetry === true;
+  return QA_RUNTIME_ENABLED && (
+    globalThis.__flatPhotoLayerTelemetry === true || layerEfficiencyDiagnosticsRequested()
+  );
 }
 
 function lastEventAtStep(events, step) {
@@ -13374,15 +17984,16 @@ function localOverlapPairOrders(geometry, count) {
   return pairs;
 }
 
-async function recordLayerTelemetry(step) {
+async function recordLayerTelemetry(step, run = null) {
+  assertTrainingRun(run);
   if (!layerTelemetryEnabled() || !state.webgpu.renderer?.trainState) return;
   const previousRecord = state.metrics.layer_telemetry[state.metrics.layer_telemetry.length - 1];
   if (previousRecord?.step === step) return;
   const count = state.params.count;
-  const [snapshot, geometry] = await Promise.all([
+  const [snapshot, geometry] = await awaitTrainingRun(run, Promise.all([
     state.webgpu.renderer.capturePresentedStateRgba(),
     state.webgpu.renderer.readLayerTelemetryGeometry(count),
-  ]);
+  ]));
   if (!snapshot || !geometry) return;
   const depth = new Float32Array(count);
   for (let index = 0; index < count; index += 1) {
@@ -13434,6 +18045,21 @@ async function recordLayerTelemetry(step) {
   const triggers = [];
   if (!previous || previous.stage !== stage) triggers.push("stage-change");
   if (densify) triggers.push("growth");
+  if (layerEfficiencyDiagnosticsRequested()) {
+    const steps = Math.max(1, state.metrics?.steps_requested || step || 1);
+    const checkpointBucket = Math.min(4, Math.floor(step / Math.max(1, steps / 4)));
+    const checkpoints = state.layerEfficiencyCheckpoints || [];
+    if (checkpoints.at(-1)?.bucket !== checkpointBucket || step >= steps) {
+      const deepCount = Math.max(1, Math.ceil(count * layerEfficiencyVariants().deepFraction));
+      checkpoints.push({
+        step,
+        bucket: checkpointBucket,
+        splats: count,
+        deepest_indices: order.slice(0, deepCount),
+      });
+      state.layerEfficiencyCheckpoints = checkpoints.slice(-5);
+    }
+  }
   state.metrics.layer_telemetry.push({
     step,
     stage,
@@ -13470,6 +18096,100 @@ async function recordLayerTelemetry(step) {
     pairOrders,
     snapshot: { ...snapshot, luma: frameStats.luma, signedDelta: frameStats.signedDelta },
     stage,
+  };
+}
+
+function summarizeLayerEfficiency(params, attribution, tileDiagnostics, checkpoints, initialCount) {
+  if (!params?.depthOrder || !attribution || !tileDiagnostics) {
+    return {
+      supported: false,
+      reason: !attribution ? "hidden-rgb-attribution-unavailable" : "tile-diagnostics-unavailable",
+    };
+  }
+  const deepFraction = layerEfficiencyVariants().deepFraction;
+  const deepThreshold = deepFraction;
+  const layerCount = 10;
+  const bins = Array.from({ length: layerCount }, (_, index) => ({
+    layer: index,
+    splats: 0,
+    initial_splats: 0,
+    positive_harm: 0,
+    contribution_mass: 0,
+    deep_occluded_pixel_hits: 0,
+    deep_occluded_weight_mass: 0,
+    tile_references: 0,
+  }));
+  const attributionByIndex = new Map(attribution.rows.map((row) => [row.index, row]));
+  let totalHarm = 0;
+  let deepHarm = 0;
+  let totalContribution = 0;
+  let deepContribution = 0;
+  let totalDeepHits = 0;
+  let deepestDeepHits = 0;
+  let totalTileReferences = 0;
+  let deepTileReferences = 0;
+  const finalDeep = new Set();
+  for (let index = 0; index < params.count; index += 1) {
+    const layer = Math.max(0, Math.min(1, params.depthOrder[index]));
+    const bin = bins[Math.min(layerCount - 1, Math.floor(layer * layerCount))];
+    const row = attributionByIndex.get(index);
+    const harm = row?.positive_leave_one_out_l1_harm || 0;
+    const contribution = row?.contribution_mass || 0;
+    const deepHits = row?.deep_occluded_pixel_hits || 0;
+    const deepWeight = row?.deep_occluded_weight_mass || 0;
+    const tileReferences = tileDiagnostics.per_splat_reference_count[index] || 0;
+    bin.splats += 1;
+    if (index < initialCount) bin.initial_splats += 1;
+    bin.positive_harm += harm;
+    bin.contribution_mass += contribution;
+    bin.deep_occluded_pixel_hits += deepHits;
+    bin.deep_occluded_weight_mass += deepWeight;
+    bin.tile_references += tileReferences;
+    totalHarm += harm;
+    totalContribution += contribution;
+    totalDeepHits += deepHits;
+    totalTileReferences += tileReferences;
+    if (layer <= deepThreshold) {
+      finalDeep.add(index);
+      deepHarm += harm;
+      deepContribution += contribution;
+      deepestDeepHits += deepHits;
+      deepTileReferences += tileReferences;
+    }
+  }
+  const persistence = (checkpoints || []).map((checkpoint) => {
+    const prior = new Set(checkpoint.deepest_indices || []);
+    let retained = 0;
+    for (const index of finalDeep) if (prior.has(index)) retained += 1;
+    return {
+      step: checkpoint.step,
+      splats: checkpoint.splats,
+      final_deep_retained_ratio: retained / Math.max(1, Math.min(finalDeep.size, prior.size)),
+    };
+  });
+  const persistentDeepRatio = persistence.length > 1
+    ? persistence.slice(0, -1).reduce((sum, item) => sum + item.final_deep_retained_ratio, 0) / (persistence.length - 1)
+    : null;
+  const deepHarmRatio = deepHarm / Math.max(1e-12, totalHarm);
+  return {
+    supported: true,
+    contract: "QA-only depth attribution; no training or export contract changes",
+    deep_fraction: deepFraction,
+    deep_harm_ratio: deepHarmRatio,
+    deep_contribution_ratio: deepContribution / Math.max(1e-12, totalContribution),
+    deep_occluded_hit_ratio: deepestDeepHits / Math.max(1, totalDeepHits),
+    deep_tile_reference_ratio: deepTileReferences / Math.max(1, totalTileReferences),
+    persistent_deep_ratio: persistentDeepRatio,
+    relocation_gate_passed: deepHarmRatio >= 0.4 && persistentDeepRatio !== null && persistentDeepRatio >= 0.5,
+    relocation_candidate_enabled: layerEfficiencyVariants().deepRelocation,
+    bins,
+    persistence,
+    tile_quantization: tileDiagnostics.quantization,
+    tile_quantization_gate: {
+      ten_layers_passed: (tileDiagnostics.quantization?.[10]?.estimated_comparison_reduction_ratio || 0) >= 0.5,
+      five_layers_passed: (tileDiagnostics.quantization?.[5]?.estimated_comparison_reduction_ratio || 0) >= 0.5,
+      note: "comparison reduction is theoretical; no runtime speed claim without an end-to-end A/B",
+    },
   };
 }
 
@@ -13532,9 +18252,10 @@ function packTransforms(params) {
     transform[i * 4 + 1] = params.scale[i * 2 + 1];
     transform[i * 4 + 2] = params.theta?.[i] || 0;
     const tag = Math.max(1, Math.floor(params.detailTags?.[i] || 1));
-    const layer = params.layerOrderEnabled
+    let layer = params.layerOrderEnabled
       ? Math.max(0, Math.min(1, params.depthOrder?.[i] ?? (1 - i / Math.max(1, params.count - 1))))
       : 0;
+    if (params.discreteLayersEnabled) layer = quantizeLayerOrder(layer, params.discreteLayerCount);
     transform[i * 4 + 3] = tag + layer * LAYER_CODE_RANGE;
   }
   return transform;
@@ -13551,7 +18272,9 @@ function selectedLearningRates() {
     scale: DEFAULT_LR_SCALE,
     position: clampNumber(els.positionLearningRate.value, LIMITS.lrMin, LIMITS.lrDefaultMax, DEFAULT_POSITION_LR),
     color: clampNumber(els.colorLearningRate.value, LIMITS.lrMin, LIMITS.lrDefaultMax, DEFAULT_COLOR_LR),
-    opacity: clampNumber(els.opacityLearningRate.value, LIMITS.lrMin, LIMITS.opacityLrMax, DEFAULT_OPACITY_LR),
+    opacity: algorithmUsesLayeredOpaqueBrush()
+      ? 0
+      : clampNumber(els.opacityLearningRate.value, LIMITS.lrMin, LIMITS.opacityLrMax, DEFAULT_OPACITY_LR),
     scaleParam: clampNumber(els.scaleLearningRate.value, LIMITS.lrMin, LIMITS.scaleLrMax, DEFAULT_SCALE_LR),
     rotation: clampNumber(els.rotationLearningRate.value, LIMITS.lrMin, LIMITS.lrDefaultMax, DEFAULT_ROTATION_LR),
     thetaAlign: clampNumber(els.thetaAlignRate.value, LIMITS.lrMin, LIMITS.thetaAlignLrMax, DEFAULT_THETA_ALIGN_LR),
@@ -13580,6 +18303,13 @@ function trainSyncInterval() {
   return Math.max(1, Math.min(64, Math.round(interval)));
 }
 
+function effectiveTrainSyncInterval(activeSplats, baseInterval = trainSyncInterval()) {
+  const count = Math.max(0, Math.round(Number(activeSplats) || 0));
+  if (count >= VERY_HIGH_SPLAT_SYNC_THRESHOLD) return Math.min(baseInterval, 1);
+  if (count >= HIGH_SPLAT_SYNC_THRESHOLD) return Math.min(baseInterval, 2);
+  return baseInterval;
+}
+
 function plannedAdaptiveGpuBatch({
   step,
   steps,
@@ -13592,12 +18322,13 @@ function plannedAdaptiveGpuBatch({
   growthSteps,
   growthSettings,
   runLayerSettings,
+  deepPruneSettings,
+  hiddenRgbSettings,
   virtualCameraSampling,
 }) {
   if (
     performanceVariants().gpuSchedulingMode !== "adaptive" ||
     previewRefresh === "frame" ||
-    virtualCameraSampling?.enabled ||
     structuralStep ||
     qaHashPending ||
     performanceProfileLabels(step, steps).length > 0 ||
@@ -13631,23 +18362,39 @@ function plannedAdaptiveGpuBatch({
       candidate > densifyWarmupSteps(densitySteps) &&
       candidate <= growthSteps &&
       (candidate % growthSettings.densifyInterval === 0 || candidate === growthSteps);
+    const brushSurfaceRecoveryDue =
+      normalizedKernelShape(state.params?.kernelShape) === "opaque-brush" &&
+      illustrativeOilSurfaceRecoveryDue(
+        candidate,
+        steps,
+        state.params?.deepPruneInterval || LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL,
+      );
     const relocationDue =
       growthSettings.densityEventsEnabled &&
       growthSettings.mcmcRelocationEnabled &&
       candidate > densifyWarmupSteps(densitySteps) &&
-      candidate <= Math.floor(densitySteps * 0.85) &&
-      candidate % EXPERIMENTAL_REFINE_EVERY === 0;
+      (
+        (
+          candidate <= Math.floor(densitySteps * 0.85) &&
+          candidate % EXPERIMENTAL_REFINE_EVERY === 0
+        ) ||
+        brushSurfaceRecoveryDue
+      );
     const layerDue = layerOptimizationSettings(
       candidate,
       steps,
       candidateStage,
       runLayerSettings,
     ).due;
+    const pruneDue = deepPruneDue(candidate, steps, deepPruneSettings);
+    const recolorDue = hiddenRgbRecolorDue(candidate, steps, hiddenRgbSettings);
     if (
       candidateStage !== startStage ||
       densityDue ||
       relocationDue ||
       layerDue ||
+      pruneDue ||
+      recolorDue ||
       performanceProfileLabels(candidate, steps).length > 0 ||
       virtualTiltStepSpec(candidate, candidateStage, steps).enabled
     ) break;
@@ -13673,13 +18420,32 @@ function setInputControlsDisabled(disabled) {
     els.capacityMode,
     els.stepCount,
     els.previewRefresh,
+    els.liveQualityMetrics,
     els.tileCullingToggle,
     els.trainLayerOrder,
+    els.layerAwareAccumulation,
+    els.pruneLowContributionDeepSplats,
+    els.deepPruneInterval,
+    els.hiddenRgbRecolor,
+    els.hiddenRgbRecolorInterval,
+    els.hiddenRgbRecolorFraction,
+    els.hiddenRgbRecolorStrength,
+    els.discreteLayers,
+    els.discreteLayerCount,
+    els.discreteLayerMoveRadius,
     els.layerUpdateInterval,
     els.positionLearningRate,
     els.colorLearningRate,
     els.opacityLearningRate,
     els.alphaLossWeight,
+    els.opaquePaintOpacity,
+    els.layeredBrushOpacity,
+    els.rectangleTopRatio,
+    els.rectangleTopRatioMax,
+    els.rectanglePreserveArea,
+    els.rectangleEdgeDirectedTaper,
+    els.rectangleStructureAwareRatio,
+    els.rectangleAsymmetricSoftness,
     els.opacitySupportAggressive,
     els.adaptiveGpuThroughput,
     els.virtualBoundedDepth,
@@ -13726,15 +18492,138 @@ function syncExperimentalPerformanceControls() {
   els.adaptiveGpuThroughput.disabled = state.running;
 }
 
+function syncAlgorithmRequirements() {
+  const opaqueLayered = algorithmUsesOpaqueLayeredPaint();
+  const brushSelected = algorithmUsesLayeredOpaqueBrush();
+  const rectangleSelected = algorithmUsesRectangleKernel();
+  document.documentElement.dataset.opaquePaintSettings = "visible";
+  const pruneLabel = els.pruneLowContributionDeepSplats.closest("label");
+  if (brushSelected) {
+    if (!els.discreteLayerMoveRadius.dataset.nonBrushValue) {
+      els.discreteLayerMoveRadius.dataset.nonBrushValue =
+        els.discreteLayerMoveRadius.value || String(DEFAULT_DISCRETE_LAYER_MOVE_RADIUS);
+    }
+    els.discreteLayerMoveRadius.value = String(LAYERED_OPAQUE_BRUSH_LAYER_MOVE_RADIUS);
+  } else if (els.discreteLayerMoveRadius.dataset.nonBrushValue) {
+    els.discreteLayerMoveRadius.value = els.discreteLayerMoveRadius.dataset.nonBrushValue;
+    delete els.discreteLayerMoveRadius.dataset.nonBrushValue;
+  }
+  for (const [control, fallback] of [
+    [els.opacityLearningRate, DEFAULT_OPACITY_LR],
+    [els.alphaLossWeight, DEFAULT_ALPHA_LOSS_WEIGHT],
+  ]) {
+    if (brushSelected) {
+      if (!control.dataset.nonOpaqueValue) control.dataset.nonOpaqueValue = control.value || String(fallback);
+      control.value = "0";
+    } else if (control.dataset.nonOpaqueValue) {
+      control.value = control.dataset.nonOpaqueValue;
+      delete control.dataset.nonOpaqueValue;
+    }
+  }
+  if (opaqueLayered) {
+    if (!els.discreteLayerCount.dataset.nonOpaqueValue) {
+      els.discreteLayerCount.dataset.nonOpaqueValue =
+        els.discreteLayerCount.value || String(DEFAULT_DISCRETE_LAYER_COUNT);
+    }
+    if (!els.deepPruneInterval.dataset.nonOpaqueValue) {
+      els.deepPruneInterval.dataset.nonOpaqueValue =
+        els.deepPruneInterval.value || String(DEFAULT_DEEP_PRUNE_INTERVAL);
+    }
+    if (!els.pruneLowContributionDeepSplats.dataset.nonOpaqueChecked) {
+      els.pruneLowContributionDeepSplats.dataset.nonOpaqueChecked =
+        String(els.pruneLowContributionDeepSplats.checked);
+    }
+    els.trainLayerOrder.checked = true;
+    els.layerAwareAccumulation.checked = true;
+    els.discreteLayers.checked = true;
+    els.pruneLowContributionDeepSplats.checked = true;
+    els.discreteLayerCount.value = String(LAYERED_OPAQUE_BRUSH_LAYER_COUNT);
+    els.deepPruneInterval.value = String(LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL);
+  } else {
+    if (els.discreteLayerCount.dataset.nonOpaqueValue) {
+      els.discreteLayerCount.value = els.discreteLayerCount.dataset.nonOpaqueValue;
+      delete els.discreteLayerCount.dataset.nonOpaqueValue;
+    }
+    if (els.deepPruneInterval.dataset.nonOpaqueValue) {
+      els.deepPruneInterval.value = els.deepPruneInterval.dataset.nonOpaqueValue;
+      delete els.deepPruneInterval.dataset.nonOpaqueValue;
+    }
+    if (els.pruneLowContributionDeepSplats.dataset.nonOpaqueChecked) {
+      els.pruneLowContributionDeepSplats.checked =
+        els.pruneLowContributionDeepSplats.dataset.nonOpaqueChecked === "true";
+      delete els.pruneLowContributionDeepSplats.dataset.nonOpaqueChecked;
+    }
+  }
+  if (pruneLabel) {
+    pruneLabel.title = opaqueLayered
+      ? "Opaque paint algorithms use 8 layers and remove low-influence splats from the rear 75% every 250 iterations."
+      : "Every configured interval during P2 and P3, compact low-contribution splats from the rear half of the learned layer order. P2 removes up to 2.5% per event and P3 uses a 1% detail-safe cap.";
+  }
+  els.opacityLearningRate.disabled = state.running || brushSelected;
+  els.alphaLossWeight.disabled = state.running || brushSelected;
+  els.adaptiveGridInitializationFraction.disabled = state.running || algorithmUsesPaintKernel();
+  els.adaptiveGridInitializationFraction.title = algorithmUsesPaintKernel()
+    ? "Paint algorithms use deterministic image-importance BSP placement."
+    : "Moves this percentage of the initial grid centers toward multiscale image structure on WebGPU before iteration 1.";
+  els.opaquePaintOpacity.disabled = state.running || !rectangleSelected;
+  els.opaquePaintOpacity.title =
+    "Minimum learned opacity for Rectangle Splats; individual opacity may train above this floor.";
+  els.layeredBrushOpacity.disabled = state.running || !brushSelected;
+  els.layeredBrushOpacity.title =
+    "Fixed opacity for Layered Opaque Brush paint splats; independent from Rectangle Splats.";
+  els.rectangleTopRatio.disabled = state.running || !rectangleSelected;
+  els.rectangleTopRatioMax.disabled = state.running || !rectangleSelected;
+  els.rectangleTopRatio.title = rectangleSelected
+    ? "Minimum parallel-edge width divided by the splat long edge."
+    : "Available for Rectangle Splats.";
+  els.rectangleTopRatioMax.title = rectangleSelected
+    ? "Maximum parallel-edge width divided by the splat long edge."
+    : "Available for Rectangle Splats.";
+  for (const control of [
+    els.rectanglePreserveArea,
+    els.rectangleEdgeDirectedTaper,
+    els.rectangleStructureAwareRatio,
+    els.rectangleAsymmetricSoftness,
+  ]) {
+    control.disabled = state.running || !rectangleSelected;
+  }
+  for (const control of [els.stageGrowthP1, els.stageGrowthP2, els.stageGrowthP3]) {
+    control.disabled = state.running || !els.stageAwareGrowth.checked;
+  }
+}
+
 function syncLayerOrderDependency() {
+  syncAlgorithmRequirements();
   if (els.trainLayerOrder.checked) els.tileCullingToggle.checked = true;
   els.tileCullingToggle.disabled = state.running || els.trainLayerOrder.checked;
   els.layerUpdateInterval.disabled = state.running || !els.trainLayerOrder.checked;
+  const discreteAvailable = els.trainLayerOrder.checked && !algorithmUsesVirtualCameras();
+  const opaqueLayered = algorithmUsesOpaqueLayeredPaint();
+  els.trainLayerOrder.disabled = state.running || opaqueLayered;
+  els.layerAwareAccumulation.disabled = state.running || !discreteAvailable || opaqueLayered;
+  els.pruneLowContributionDeepSplats.disabled = state.running || !discreteAvailable || opaqueLayered;
+  els.deepPruneInterval.disabled = state.running || !discreteAvailable || !els.pruneLowContributionDeepSplats.checked || opaqueLayered;
+  els.discreteLayers.disabled = state.running || !discreteAvailable || opaqueLayered;
+  els.discreteLayerCount.disabled = state.running || !discreteAvailable || opaqueLayered || (!els.discreteLayers.checked && !els.layerAwareAccumulation.checked);
+  els.discreteLayerMoveRadius.disabled = state.running || !discreteAvailable || !els.discreteLayers.checked;
+  const recolor = hiddenRgbRecolorSettings();
+  els.hiddenRgbRecolor.disabled = state.running || !recolor.supported;
+  els.hiddenRgbRecolorInterval.disabled = state.running || !recolor.supported || !els.hiddenRgbRecolor.checked;
+  els.hiddenRgbRecolorFraction.disabled = state.running || !recolor.supported || !els.hiddenRgbRecolor.checked;
+  els.hiddenRgbRecolorStrength.disabled = state.running || !recolor.supported || !els.hiddenRgbRecolor.checked;
+  els.hiddenRgbRecolor.title = recolor.supported
+    ? ""
+    : "Hidden RGB recolor requires Planar Gaussian and at least 9 WebGPU storage buffers per shader stage.";
 }
 
 function updateVirtualCameraCoverageEstimate() {
   if (!state.image) {
     els.virtualCameraCoverageEstimate.textContent = "Teacher coverage: load an image to estimate.";
+    delete document.documentElement.dataset.virtualCameraCoverageEstimate;
+    return null;
+  }
+  if (!algorithmUsesVirtualCameras()) {
+    els.virtualCameraCoverageEstimate.textContent = "Teacher coverage is evaluated only for GS Virtual Camera Sampling.";
     delete document.documentElement.dataset.virtualCameraCoverageEstimate;
     return null;
   }
@@ -13783,6 +18672,10 @@ function pausedRuntimeControls() {
 
 function setPausedRuntimeControlsEnabled(enabled) {
   for (const element of pausedRuntimeControls()) element.disabled = !enabled;
+  if (algorithmUsesLayeredOpaqueBrush()) {
+    els.opacityLearningRate.disabled = true;
+    els.alphaLossWeight.disabled = true;
+  }
   document.documentElement.dataset.pausedRuntimeControls = String(enabled);
 }
 
@@ -13800,6 +18693,7 @@ function syncRuntimeMetrics(learningRates, previewRefresh) {
   state.metrics.growth_schedule.stage_aware = runStageAware;
   state.metrics.growth_schedule.signal_threshold = growth.growthSignalThreshold;
   state.metrics.learning_rates = {
+    ...state.metrics.learning_rates,
     position: learningRates.position,
     color: learningRates.color,
     opacity: learningRates.opacity,
@@ -13824,8 +18718,9 @@ function syncRuntimeMetrics(learningRates, previewRefresh) {
   data.runtimeAppliedPreviewRefresh = previewRefresh;
 }
 
-async function presentTrainingPreview(step) {
-  if (layerTelemetryEnabled()) await recordLayerTelemetry(step);
+async function presentTrainingPreview(step, run = null) {
+  assertTrainingRun(run);
+  if (layerTelemetryEnabled()) await awaitTrainingRun(run, recordLayerTelemetry(step, run));
   const renderer = state.webgpu.renderer;
   const virtualCameraSample = renderer?.lastTrainStats?.virtual_camera_sample;
   if (virtualCameraSample?.kind === "virtual") {
@@ -13836,15 +18731,15 @@ async function presentTrainingPreview(step) {
         ? renderer.trainState?.midImage || state.image
         : state.image;
     if (els.tileCullingToggle.checked) {
-      await renderer.prepareTileLists(previewImage, state.params, { sync: true });
+      await awaitTrainingRun(run, renderer.prepareTileLists(previewImage, state.params, { sync: true }));
     }
-    await renderer.refreshRenderState(previewImage, state.params);
+    await awaitTrainingRun(run, renderer.refreshRenderState(previewImage, state.params));
     state.metrics.virtual_camera_sampling.preview_front_restores += 1;
   }
   let presented = false;
   if (els.outsidePreviewToggle.checked && !state.running && state.webgpu.renderer) {
     const buffers = state.webgpu.renderer.currentTrainBuffers(state.params);
-    await state.webgpu.renderer.render(state.image, state.params, buffers);
+    await awaitTrainingRun(run, state.webgpu.renderer.render(state.image, state.params, buffers));
     presented = true;
   } else {
     state.previewPadding = previewPaddingSpec(state.image, state.params, false);
@@ -13859,17 +18754,18 @@ async function presentTrainingPreview(step) {
   return true;
 }
 
-async function resolveTileOverflowRetry(parameterHashBefore = null) {
+async function resolveTileOverflowRetry(parameterHashBefore = null, run = null) {
+  assertTrainingRun(run);
   const renderer = state.webgpu.renderer;
   if (!els.tileCullingToggle.checked || !renderer?.trainState?.tileReady) return 0;
-  const tileCounters = await renderer.readTileCounters();
+  const tileCounters = await awaitTrainingRun(run, renderer.readTileCounters());
   if (!tileCounters) return 0;
   state.metrics.tile_counters = tileCounters;
   const noopSteps = Math.max(0, Math.floor(Number(tileCounters.noop_steps) || 0));
   if (tileCounters.overflow === 0 && noopSteps === 0) return 0;
 
   if (parameterHashBefore !== null) {
-    const parameterHashAfter = await renderer.hashTrainParameters(state.params);
+    const parameterHashAfter = await awaitTrainingRun(run, renderer.hashTrainParameters(state.params));
     const hashMatches = parameterHashAfter === parameterHashBefore;
     state.metrics.tile_retry_parameter_hash = {
       before: parameterHashBefore,
@@ -13883,7 +18779,7 @@ async function resolveTileOverflowRetry(parameterHashBefore = null) {
 
   const previousCapacity = tileCounters.capacity;
   const expanded = tileCounters.overflow > 0
-    ? await renderer.growTileIndexCapacity(tileCounters.total)
+    ? await awaitTrainingRun(run, renderer.growTileIndexCapacity(tileCounters.total))
     : true;
   if (!expanded) {
     const rec = state.recommendation || updateMemoryRecommendation();
@@ -13905,7 +18801,7 @@ async function resolveTileOverflowRetry(parameterHashBefore = null) {
   }
 
   const retrySteps = Math.max(1, noopSteps);
-  await renderer.clearTileNoopCounter();
+  await awaitTrainingRun(run, renderer.clearTileNoopCounter());
   state.metrics.tile_retry_steps += retrySteps;
   state.metrics.tile_retry_events.push({
     after_step: state.metrics.steps_done,
@@ -13924,6 +18820,7 @@ function densityMetricSnapshot(metrics = null) {
   const regional = metrics?.regionalSsim || state.metrics?.final_regional_ssim;
   return {
     step: metrics ? (state.metrics?.steps_done ?? 0) : (coverage?.step ?? state.metrics?.last_preview_step ?? 0),
+    psnr: Number.isFinite(metrics?.psnr) ? metrics.psnr : state.metrics?.final_psnr ?? null,
     global_ssim: Number.isFinite(metrics?.ssim) ? metrics.ssim : state.metrics?.final_global_ssim ?? null,
     local_p10: Number.isFinite(regional?.p10) ? regional.p10 : regional?.p10 ?? null,
     alpha_ssim: Number.isFinite(metrics?.alphaSsim) ? metrics.alphaSsim : state.metrics?.final_alpha_ssim ?? null,
@@ -13934,6 +18831,36 @@ function densityMetricSnapshot(metrics = null) {
   };
 }
 
+async function refreshTrainingResidualSignal(step, reason, run = null) {
+  assertTrainingRun(run);
+  const renderer = state.webgpu.renderer;
+  if (!renderer?.trainState || !state.image || !state.params) {
+    throw new Error("Training residual refresh requires active WebGPU state.");
+  }
+  const started = performance.now();
+  const report = await awaitTrainingRun(run, renderer.refreshTrainingResidualMap(
+    state.image,
+    state.params,
+    { step, reason },
+  ));
+  const telemetry = state.metrics?.training_residual_map;
+  if (telemetry) {
+    telemetry.refresh_count += 1;
+    if (reason === "growth") telemetry.growth_refreshes += 1;
+    if (reason === "relocation") telemetry.relocation_refreshes += 1;
+    telemetry.last_step = step;
+    telemetry.last_reason = reason;
+    telemetry.last_wall_ms = performance.now() - started;
+    if (telemetry.events.length < 160) {
+      telemetry.events.push({
+        ...report,
+        wall_ms: telemetry.last_wall_ms,
+      });
+    }
+  }
+  return report;
+}
+
 function linkDensityEventMetricSnapshot(step, metrics) {
   const snapshot = densityMetricSnapshot(metrics);
   for (const event of state.metrics?.densify_events || []) {
@@ -13941,7 +18868,154 @@ function linkDensityEventMetricSnapshot(step, metrics) {
   }
 }
 
-async function updatePreview(step, final = false, { present = true } = {}) {
+async function applyDeepPrune(step, steps, run = null) {
+  assertTrainingRun(run);
+  const renderer = state.webgpu.renderer;
+  const params = state.params;
+  if (!params?.pruneLowContributionDeepSplatsEnabled || state.metrics?.stopped || !renderer?.trainState) {
+    return false;
+  }
+  if ((state.metrics?.deep_layer_prune_events || []).some((event) => event.step === step)) {
+    return false;
+  }
+  await awaitTrainingRun(run, renderer.readTrainedColors(params));
+  assertFiniteParams(params, "mid-deep-prune-readback");
+  const importanceData = await awaitTrainingRun(run, renderer.readImportanceData(params.count));
+  if (importanceData?.summary) state.metrics.importance_stats = importanceData.summary;
+  const removedTotal = state.metrics?.deep_layer_prune_removed_total || 0;
+  const phase = deepPruneStage(step, steps);
+  const opaqueLayered = Boolean(params.opaqueLayered);
+  const eventPruneFraction = opaqueLayered
+    ? step === steps
+      ? LAYERED_OPAQUE_BRUSH_FINAL_PRUNE_FRACTION
+      : phase === "P2"
+        ? LAYERED_OPAQUE_BRUSH_P2_PRUNE_FRACTION
+        : LAYERED_OPAQUE_BRUSH_P3_PRUNE_FRACTION
+    : phase === "P2"
+      ? layerEfficiencyVariants().deepPruneP2Fraction
+      : layerEfficiencyVariants().deepPruneP3Fraction;
+  const plan = lowContributionDeepPrunePlan(
+    params,
+    importanceData,
+    eventPruneFraction,
+    opaqueLayered ? LAYERED_OPAQUE_BRUSH_DEEP_FRACTION : layerEfficiencyVariants().deepFraction,
+    layerEfficiencyVariants().deepPruneAlphaGamma,
+    opaqueLayered ? "depth" : layerEfficiencyVariants().deepPruneSelectionMode,
+    state.image,
+  );
+  const report = { ...plan };
+  delete report.keepIndices;
+  delete report.pruneIndices;
+  report.phase = phase;
+  report.step = step;
+  report.interval = params.deepPruneInterval || DEFAULT_DEEP_PRUNE_INTERVAL;
+  report.policy = opaqueLayered ? "opaque-hidden-layer-prune" : "standard-deep-prune";
+  report.final_sweep = opaqueLayered && step === steps;
+  report.metrics_before = null;
+  report.metrics_evaluation = "deferred-to-final";
+  if (!plan.applied) {
+    state.metrics.deep_layer_prune = report;
+    return false;
+  }
+  const compactResult = await awaitTrainingRun(run, renderer.compactTrainStateGpu(plan.keepIndices));
+  if (!compactResult.compacted) {
+    report.applied = false;
+    report.reason = "gpu-compaction-skipped";
+    state.metrics.deep_layer_prune = report;
+    return false;
+  }
+  state.params = compactSplatParams(params, plan.keepIndices);
+  updateTrainingRunOwnership(run, { params: state.params });
+  if (els.tileCullingToggle.checked) {
+    await awaitTrainingRun(run, renderer.prepareTileLists(state.image, state.params, { sync: true }));
+  }
+  report.gpu_compaction_ms = compactResult.gpu_ms;
+  report.optimizer_state_preserved = true;
+  report.metrics_after = null;
+  state.metrics.deep_layer_prune_removed_total = removedTotal + plan.removed;
+  state.metrics.deep_layer_prune_events.push(report);
+  state.metrics.deep_layer_prune = report;
+  state.metrics.num_gaussians = state.params.count;
+  state.metrics.params_revision = (state.metrics.params_revision || 0) + 1;
+  state.metrics.cpu_mirror_step = step;
+  state.metrics.cpu_mirror_count = state.params.count;
+  return true;
+}
+
+async function applyHiddenRgbRecolor(step, steps, settings, run = null) {
+  assertTrainingRun(run);
+  const renderer = state.webgpu.renderer;
+  const params = state.params;
+  if (!settings?.enabled || state.metrics?.stopped || !renderer?.trainState) return false;
+  if ((state.metrics?.hidden_rgb_recolor_events || []).some((event) => event.step === step)) return false;
+  await awaitTrainingRun(run, renderer.readTrainedColors(params));
+  assertFiniteParams(params, "mid-hidden-rgb-recolor-readback");
+  const diagnostics = await awaitTrainingRun(run, renderer.computeOverlapDiagnostics(
+    state.image,
+    params,
+    { scales: [0.25], hiddenRgb: true },
+  ));
+  const attribution = diagnostics?.hidden_rgb_attribution || null;
+  const plan = hiddenRgbRecolorPlan(state.image, params, attribution, settings);
+  const report = { ...plan, step, phase: deepPruneStage(step, steps), interval: settings.interval };
+  delete report.indices;
+  delete report.targets;
+  if (!plan.applied) {
+    state.metrics.hidden_rgb_recolor = report;
+    state.metrics.hidden_rgb_recolor_events.push(report);
+    eventLog(`${report.phase} Hidden RGB recolor skipped: ${plan.reason}`);
+    return false;
+  }
+  report.metrics_before = null;
+  report.metrics_evaluation = "deferred-to-final";
+  report.hidden_rgb_positive_harm = attribution?.total_positive_harm ?? null;
+  const result = await awaitTrainingRun(run, renderer.recolorTrainStateGpu(plan.indices, plan.targets, settings.strength));
+  if (!result.recolored) {
+    report.applied = false;
+    report.reason = "gpu-recolor-skipped";
+    state.metrics.hidden_rgb_recolor = report;
+    state.metrics.hidden_rgb_recolor_events.push(report);
+    return false;
+  }
+  for (let selected = 0; selected < plan.indices.length; selected += 1) {
+    const index = plan.indices[selected];
+    const target = plan.targets[selected];
+    for (let channel = 0; channel < 3; channel += 1) {
+      const offset = index * 3 + channel;
+      params.rgb[offset] += (target[channel] - params.rgb[offset]) * settings.strength;
+    }
+  }
+  if (els.tileCullingToggle.checked) await awaitTrainingRun(run, renderer.prepareTileLists(state.image, params, { sync: true }));
+  report.gpu_ms = result.gpu_ms;
+  report.optimizer_color_moments_reset = true;
+  report.geometry_unchanged = true;
+  report.opacity_unchanged = true;
+  report.splat_count_unchanged = true;
+  report.metrics_after = null;
+  state.metrics.hidden_rgb_recolor_count_total += plan.selected;
+  state.metrics.hidden_rgb_recolor_events.push(report);
+  state.metrics.hidden_rgb_recolor = report;
+  state.metrics.params_revision = (state.metrics.params_revision || 0) + 1;
+  state.metrics.cpu_mirror_step = step;
+  state.metrics.cpu_mirror_count = params.count;
+  const trainingStage = renderer.lastTrainStats?.training_stage;
+  const stageImage = trainingStage === "coarse"
+    ? renderer.trainState.coarseImage
+    : trainingStage === "mid"
+      ? renderer.trainState.midImage
+      : null;
+  if (stageImage) {
+    if (els.tileCullingToggle.checked) await awaitTrainingRun(run, renderer.prepareTileLists(stageImage, params, { sync: true }));
+    await awaitTrainingRun(run, renderer.refreshRenderState(stageImage, params));
+    state.metrics.preview_resolution_restores += 1;
+  }
+  log(`${report.phase} Hidden RGB recolor updated ${plan.selected}/${params.count} splats; strength=${(settings.strength * 100).toFixed(0)}% gpu=${result.gpu_ms.toFixed(2)}ms`);
+  eventLog(`${report.phase} Hidden RGB recolor ${plan.selected} splats`);
+  return true;
+}
+
+async function updatePreview(step, final = false, { present = true, readOnlyPeriodic = false } = {}, run = null) {
+  assertTrainingRun(run);
   const backend = selectedBackend();
   if (!backend.startsWith("webgpu")) throw new Error(`WebGPU required: ${state.webgpu.reason}`);
   const safety = safetyFailure(computeBudgetFor(Number(els.trainSize.value), state.params.count, state.metrics?.steps_requested || 1), "metrics");
@@ -13949,21 +19023,26 @@ async function updatePreview(step, final = false, { present = true } = {}) {
     setSafetyStop(safety);
     throw new Error(`${safety.reason}: metrics/readback skipped before budget overflow`);
   }
-  if (layerTelemetryEnabled()) await recordLayerTelemetry(step);
-  const reuseMetricRender = Boolean(
-    !final &&
-    performanceVariants().metricTileReuse &&
-    state.webgpu.renderer?.canReuseMetricRender(state.image)
+  if (layerTelemetryEnabled()) await awaitTrainingRun(run, recordLayerTelemetry(step, run));
+  const reusableMetricRender = Boolean(
+    !final && state.webgpu.renderer?.canReuseMetricRender(state.image)
   );
-  if (els.tileCullingToggle.checked && state.webgpu.renderer?.trainState) {
+  if (readOnlyPeriodic && !reusableMetricRender) {
+    throw new Error("Periodic metrics require the existing full-resolution training render.");
+  }
+  const reuseMetricRender = Boolean(
+    reusableMetricRender &&
+    (readOnlyPeriodic || performanceVariants().metricTileReuse)
+  );
+  if (!readOnlyPeriodic && els.tileCullingToggle.checked && state.webgpu.renderer?.trainState) {
     const includeTileDistribution = Boolean(
       performanceProfileRequested() &&
       performanceProfileLabels(step, state.metrics?.steps_requested || step).length > 0
     );
     if (!reuseMetricRender) {
-      await state.webgpu.renderer.prepareTileLists(state.image, state.params, { sync: true });
+      await awaitTrainingRun(run, state.webgpu.renderer.prepareTileLists(state.image, state.params, { sync: true }));
     }
-    let tileCounters = await state.webgpu.renderer.readTileCounters({ includeDistribution: includeTileDistribution });
+    let tileCounters = await awaitTrainingRun(run, state.webgpu.renderer.readTileCounters({ includeDistribution: includeTileDistribution }));
     const reserveRatio = tileCounters ? tileCounters.total / Math.max(1, tileCounters.capacity) : 0;
     const qaOverflowPending =
       qaTileOverflowFixtureEnabled() &&
@@ -13978,12 +19057,12 @@ async function updatePreview(step, final = false, { present = true } = {}) {
       !qaOverflowPending && tileCounters && (tileCounters.overflow > 0 || reserveRatio >= 0.8),
     );
     const expandedTileReserve = shouldExpandTileReserve
-      ? await state.webgpu.renderer.growTileIndexCapacity(tileCounters.total, { proactive: tileCounters.overflow === 0 })
+      ? await awaitTrainingRun(run, state.webgpu.renderer.growTileIndexCapacity(tileCounters.total, { proactive: tileCounters.overflow === 0 }))
       : false;
     if (expandedTileReserve) {
       const previousCapacity = tileCounters.capacity;
-      await state.webgpu.renderer.prepareTileLists(state.image, state.params, { sync: true });
-      tileCounters = await state.webgpu.renderer.readTileCounters({ includeDistribution: includeTileDistribution });
+      await awaitTrainingRun(run, state.webgpu.renderer.prepareTileLists(state.image, state.params, { sync: true }));
+      tileCounters = await awaitTrainingRun(run, state.webgpu.renderer.readTileCounters({ includeDistribution: includeTileDistribution }));
       log(`tile index capacity expanded ${previousCapacity} -> ${tileCounters.capacity} for ${tileCounters.total} references`);
       eventLog(`tile index capacity expanded ${previousCapacity} -> ${tileCounters.capacity}`);
     }
@@ -14009,10 +19088,18 @@ async function updatePreview(step, final = false, { present = true } = {}) {
       }
     }
   }
-  const trainBuffers = state.webgpu.renderer?.currentTrainBuffers(state.params);
+  let trainBuffers = state.webgpu.renderer?.currentTrainBuffers(state.params);
   if (final && state.webgpu.renderer?.trainState) {
-    await state.webgpu.renderer.readTrainedColors(state.params);
+    const cpuMirrorAlreadyCurrent =
+      state.metrics?.cpu_mirror_step === step &&
+      state.metrics?.cpu_mirror_count === state.params.count;
+    if (!cpuMirrorAlreadyCurrent) {
+      await awaitTrainingRun(run, state.webgpu.renderer.readTrainedColors(state.params));
+    }
     assertFiniteParams(state.params, "final-readback");
+    if (previewInvariantHashEnabled()) {
+      state.metrics.final_parameter_hash = hashParams(state.params);
+    }
     if (final) {
       state.metrics.thin_line_metrics = computeThinLineMetrics(state.image, state.params);
       state.metrics.tilt_risk = summarizeTiltRisk(state.params, state.image);
@@ -14031,17 +19118,17 @@ async function updatePreview(step, final = false, { present = true } = {}) {
     // Padded preview is display-only and never runs while the optimizer owns the live buffers.
     const outsidePreviewActive = present && els.outsidePreviewToggle.checked && !state.running;
     if (outsidePreviewActive) {
-      await state.webgpu.renderer.render(state.image, state.params, trainBuffers);
+      await awaitTrainingRun(run, state.webgpu.renderer.render(state.image, state.params, trainBuffers));
     }
-    metrics = await state.webgpu.renderer.computeMetrics(
+    metrics = await awaitTrainingRun(run, state.webgpu.renderer.computeMetrics(
       state.image,
       state.params,
       trainBuffers,
       { reuseCurrentRender: reuseMetricRender },
-    );
+    ));
     const previousMetricReuse = state.metrics.metric_tile_reuse || {};
     state.metrics.metric_tile_reuse = {
-      requested: performanceVariants().metricTileReuse,
+      requested: readOnlyPeriodic || performanceVariants().metricTileReuse,
       last_applied: Boolean(metrics.reusedRender),
       applied_count: (previousMetricReuse.applied_count || 0) + (metrics.reusedRender ? 1 : 0),
       fallback_count: (previousMetricReuse.fallback_count || 0) + (metrics.reusedRender ? 0 : 1),
@@ -14057,9 +19144,9 @@ async function updatePreview(step, final = false, { present = true } = {}) {
         : null;
     if (restoreStageImage && !metrics.reusedRender) {
       if (els.tileCullingToggle.checked) {
-        await state.webgpu.renderer.prepareTileLists(restoreStageImage, state.params, { sync: true });
+        await awaitTrainingRun(run, state.webgpu.renderer.prepareTileLists(restoreStageImage, state.params, { sync: true }));
       }
-      await state.webgpu.renderer.refreshRenderState(restoreStageImage, state.params);
+      await awaitTrainingRun(run, state.webgpu.renderer.refreshRenderState(restoreStageImage, state.params));
       state.metrics.preview_resolution_restores += 1;
     }
     if (present && !outsidePreviewActive) state.webgpu.renderer.presentTrainState(state.image);
@@ -14070,6 +19157,8 @@ async function updatePreview(step, final = false, { present = true } = {}) {
     }
     const finiteMetrics = [
       metrics.loss,
+      metrics.mse,
+      metrics.psnr,
       metrics.alphaL1,
       metrics.alphaSsim,
       metrics.alphaObjective,
@@ -14087,41 +19176,96 @@ async function updatePreview(step, final = false, { present = true } = {}) {
     if (final) {
       if (state.metrics.virtual_camera_sampling?.enabled) {
         setTrainingMessage(`Evaluating ${state.metrics.virtual_camera_sampling.virtual_camera_count} virtual camera teachers on WebGPU...`);
-        state.metrics.virtual_camera_evaluation = await state.webgpu.renderer.computeVirtualCameraEvaluation(
+        state.metrics.virtual_camera_evaluation = await awaitTrainingRun(run, state.webgpu.renderer.computeVirtualCameraEvaluation(
           state.image,
           state.params,
           metrics,
+        ));
+      }
+      const explicitFinalAudit = finalRenderAuditEnabled();
+      state.metrics.overlap_diagnostics =
+        !algorithmUsesPaintKernel() &&
+        (explicitFinalAudit || layerEfficiencyDiagnosticsRequested())
+        ? await awaitTrainingRun(run, state.webgpu.renderer.computeOverlapDiagnostics(state.image, state.params))
+        : null;
+      if (!algorithmUsesPaintKernel() && layerEfficiencyDiagnosticsRequested()) {
+        if (els.tileCullingToggle.checked) {
+          await awaitTrainingRun(run, state.webgpu.renderer.prepareTileLists(state.image, state.params, { sync: true }));
+        }
+        const tileDiagnostics = await awaitTrainingRun(run, state.webgpu.renderer.readLayerTileDiagnostics(state.params));
+        state.metrics.layer_efficiency = summarizeLayerEfficiency(
+          state.params,
+          state.metrics.overlap_diagnostics?.hidden_rgb_attribution || null,
+          tileDiagnostics,
+          state.layerEfficiencyCheckpoints,
+          state.metrics.initial_splats,
         );
       }
-      state.metrics.overlap_diagnostics = await state.webgpu.renderer.computeOverlapDiagnostics(state.image, state.params);
       if (QA_RUNTIME_ENABLED && state.metrics.virtual_camera_sampling?.enabled) {
-        state.metrics.oblique_overlap_diagnostics = await state.webgpu.renderer.computeObliqueDiagnostics(state.image, state.params);
+        state.metrics.oblique_overlap_diagnostics = await awaitTrainingRun(run, state.webgpu.renderer.computeObliqueDiagnostics(state.image, state.params));
       }
-      const trainingFrame = await state.webgpu.renderer.capturePresentedStateRgba();
+      // Export is result-bound, so product finalization verifies the training
+      // surface against the standalone renderer once. This is the only product
+      // full-frame quality readback beyond final metrics.
+      const trainingFrame = await awaitTrainingRun(run, state.webgpu.renderer.capturePresentedStateRgba());
       if (!trainingFrame || trainingFrame.width !== state.image.width || trainingFrame.height !== state.image.height) {
         throw new Error("Final training RGBA readback has the wrong resolution.");
       }
-      const standaloneRgba = await state.webgpu.renderer.captureFrameRgba(state.image, state.params);
+      const standaloneRgba = await awaitTrainingRun(run, state.webgpu.renderer.captureFrameRgba(
+        state.image,
+        state.params,
+        trainBuffers,
+      ));
       state.metrics.render_surface_parity = {
         ...displayRgbaParity(trainingFrame.rgba, standaloneRgba),
         source: "training-pixel-state-vs-standalone-rgba",
         width: trainingFrame.width,
         height: trainingFrame.height,
       };
-      state.metrics.color_space_audit = trainingColorSpaceAudit(
-        state.image,
-        state.webgpu.renderer.trainState,
-        trainingFrame.rgba,
-        standaloneRgba,
-      );
-      state.metrics.importance_stats = await state.webgpu.renderer.readImportanceSummary(state.params.count);
-      if (state.metrics.importance_stats?.nonfinite_count > 0) {
-        throw runtimeSafetyError("safety_stop_nonfinite_importance", "final-importance-readback", {
-          nonfinite_stats: state.metrics.importance_stats.nonfinite_count,
-        });
+      if (explicitFinalAudit) {
+        const auditParams = state.params;
+        if (auditParams.layerAwareAccumulationEnabled) {
+          auditParams.layerAwareAccumulationEnabled = false;
+          try {
+            const ordinaryAlphaRgba = await awaitTrainingRun(run, state.webgpu.renderer.captureFrameRgba(
+              state.image,
+              auditParams,
+              trainBuffers,
+            ));
+            state.metrics.layer_aware_render_parity = {
+              ...displayRgbaParity(ordinaryAlphaRgba, standaloneRgba),
+              source: "same-params-standard-alpha-off-vs-layer-aware-on",
+            };
+          } finally {
+            auditParams.layerAwareAccumulationEnabled = true;
+          }
+        } else {
+          state.metrics.layer_aware_render_parity = null;
+        }
+        state.metrics.color_space_audit = trainingColorSpaceAudit(
+          state.image,
+          state.webgpu.renderer.trainState,
+          trainingFrame.rgba,
+          standaloneRgba,
+        );
+        if (!state.metrics.importance_stats) {
+          state.metrics.importance_stats = await awaitTrainingRun(run, state.webgpu.renderer.readImportanceSummary(state.params.count));
+        }
+        if (state.metrics.importance_stats?.nonfinite_count > 0) {
+          throw runtimeSafetyError("safety_stop_nonfinite_importance", "final-importance-readback", {
+            nonfinite_stats: state.metrics.importance_stats.nonfinite_count,
+          });
+        }
+      } else {
+        state.metrics.layer_aware_render_parity = null;
+        state.metrics.color_space_audit = {
+          contract: "front and virtual teachers use the same sRGB signal values",
+          skipped: true,
+          reason: "extended-color-audit-is-qa-only",
+        };
       }
     }
-    const densityCounters = await state.webgpu.renderer.readDensityCounters();
+    const densityCounters = await awaitTrainingRun(run, state.webgpu.renderer.readDensityCounters());
     if (densityCounters) {
       const previous = state.metrics.last_density_counters || emptyFusionEvents();
       const relocated = densityCounters.mcmc_teleport - (previous.mcmc_teleport || 0);
@@ -14176,6 +19320,7 @@ async function updatePreview(step, final = false, { present = true } = {}) {
       state.metrics.performance_trace,
     );
   } catch (error) {
+    if (error.trainingRunCancelled || (run && !ownsTrainingRun(run))) throw error;
     if (error.safetyStop) throw error;
     state.lastGpuLoss = null;
     state.metrics.webgpu_compute_loss = false;
@@ -14183,6 +19328,8 @@ async function updatePreview(step, final = false, { present = true } = {}) {
     throw new Error(`WebGPU preview/metrics failed: ${error.message}`);
   }
   state.metrics.losses.push(metrics.loss);
+  state.metrics.rgb_mse.push(metrics.mse);
+  state.metrics.psnr.push(metrics.psnr);
   state.metrics.alpha_losses.push(metrics.alphaL1);
   state.metrics.alpha_ssim.push(metrics.alphaSsim);
   state.metrics.objective_losses.push(metrics.objectiveLoss);
@@ -14191,6 +19338,8 @@ async function updatePreview(step, final = false, { present = true } = {}) {
   state.metrics.windowed_ssim.push(metrics.windowedSsim);
   state.metrics.regional_ssim_p10.push(metrics.regionalSsim.p10);
   state.metrics.final_l1 = metrics.loss;
+  state.metrics.final_rgb_mse = metrics.mse;
+  state.metrics.final_psnr = metrics.psnr;
   state.metrics.final_alpha_l1 = metrics.alphaL1;
   state.metrics.final_alpha_ssim = metrics.alphaSsim;
   state.metrics.final_alpha_objective = metrics.alphaObjective;
@@ -14210,6 +19359,10 @@ async function updatePreview(step, final = false, { present = true } = {}) {
   if (state.metrics.initial_global_ssim !== null) {
     const delta = metrics.ssim - state.metrics.initial_global_ssim;
     state.metrics.global_ssim_trend = delta > 0.0005 ? "up" : delta < -0.0005 ? "down" : "flat";
+  }
+  if (state.metrics.initial_psnr !== null) {
+    const delta = metrics.psnr - state.metrics.initial_psnr;
+    state.metrics.psnr_trend = delta > 0.05 ? "up" : delta < -0.05 ? "down" : "flat";
   }
   const boundary = cpuMirrorCurrent ? boundaryLeakStats(state.params) : null;
   const outsideRender = cpuMirrorCurrent ? outsideRenderFootprintStats(state.params) : null;
@@ -14239,6 +19392,8 @@ async function updatePreview(step, final = false, { present = true } = {}) {
     state.metrics.trend_checkpoints.push({
       step,
       loss: metrics.loss,
+      rgb_mse: metrics.mse,
+      psnr: metrics.psnr,
       alpha_l1: metrics.alphaL1,
       alpha_ssim: metrics.alphaSsim,
       alpha_objective: metrics.alphaObjective,
@@ -14276,12 +19431,12 @@ async function updatePreview(step, final = false, { present = true } = {}) {
   if (final) {
     const label = state.metrics?.stopped ? "stopped" : "finished";
     const worst = metrics.regionalSsim.worst_region;
-    log(`${label} loss=${metrics.loss.toFixed(6)} alpha_l1=${metrics.alphaL1.toFixed(6)} alpha_ssim=${metrics.alphaSsim.toFixed(6)} objective=${metrics.objectiveLoss.toFixed(6)} global_ssim=${metrics.ssim.toFixed(6)} windowed_ssim=${metrics.windowedSsim.toFixed(6)} local_p10=${metrics.regionalSsim.p10.toFixed(6)} worst_region=${worst?.column ?? "-"},${worst?.row ?? "-"}`);
+    log(`${label} loss=${metrics.loss.toFixed(6)} psnr=${metrics.psnr.toFixed(2)}dB alpha_l1=${metrics.alphaL1.toFixed(6)} alpha_ssim=${metrics.alphaSsim.toFixed(6)} objective=${metrics.objectiveLoss.toFixed(6)} global_ssim=${metrics.ssim.toFixed(6)} windowed_ssim=${metrics.windowedSsim.toFixed(6)} local_p10=${metrics.regionalSsim.p10.toFixed(6)} worst_region=${worst?.column ?? "-"},${worst?.row ?? "-"}`);
     const virtualEvaluation = state.metrics.virtual_camera_evaluation;
     if (virtualEvaluation) {
       const virtual = virtualEvaluation.virtual_views;
       const allViews = virtualEvaluation.all_views;
-      log(`virtual teacher evaluation cameras=${virtual.camera_count} virtual_ssim=${virtual.rgb_ssim_macro?.toFixed(6) ?? "-"} virtual_p10=${virtual.rgb_ssim_p10?.toFixed(6) ?? "-"} all_view_ssim=${allViews.rgb_ssim_macro?.toFixed(6) ?? "-"} all_view_p10=${allViews.rgb_ssim_p10?.toFixed(6) ?? "-"}`);
+      log(`virtual teacher evaluation cameras=${virtual.camera_count} virtual_psnr=${virtual.rgb_psnr_macro?.toFixed(2) ?? "-"}dB virtual_ssim=${virtual.rgb_ssim_macro?.toFixed(6) ?? "-"} virtual_p10=${virtual.rgb_ssim_p10?.toFixed(6) ?? "-"} all_view_psnr=${allViews.rgb_psnr_macro?.toFixed(2) ?? "-"}dB all_view_ssim=${allViews.rgb_ssim_macro?.toFixed(6) ?? "-"} all_view_p10=${allViews.rgb_ssim_p10?.toFixed(6) ?? "-"}`);
     }
   }
   return metrics.loss;
@@ -14293,20 +19448,23 @@ async function startTraining() {
     setStatus("no image");
     return false;
   }
-  if (state.running || state.startPending) return false;
+  if (state.running || state.startPending || state.webGpuRecoveryPending) return false;
+  const run = beginTrainingRun();
   state.startPending = true;
+  setInputControlsDisabled(true);
   setTrainingMessage(state.previewRefreshPending ? "Waiting for the preview to finish..." : "Preparing WebGPU training...");
   publishState();
   try {
     if (state.previewRefreshPending) {
       eventLog("Train requested while preview refresh was pending; waiting for the preview contract.");
-      await state.previewRefreshPromise;
+      await awaitTrainingRun(run, state.previewRefreshPromise);
     }
-    if (!state.image || state.running) return false;
-    await selectedAlgorithm().train();
-    return true;
+    if (!ownsTrainingRun(run) || !state.image || state.running) return false;
+    await awaitTrainingRun(run, selectedAlgorithm().train(run));
+    return ownsTrainingRun(run);
   } catch (error) {
-    state.webgpu.renderer?.disposeTrainState();
+    if (error.trainingRunCancelled || !ownsTrainingRun(run)) return false;
+    run.renderer?.disposeTrainState();
     state.running = false;
     state.paused = false;
     setInputControlsDisabled(false);
@@ -14317,25 +19475,39 @@ async function startTraining() {
     eventLog(`training start failed: ${error.message}`);
     return false;
   } finally {
-    state.startPending = false;
-    publishState();
+    if (state.trainingRun === run) {
+      state.startPending = false;
+      state.trainingRun = null;
+      publishState();
+    }
   }
 }
 
-async function trainPlanarGaussian() {
-  return trainGaussianAlgorithm(false);
+async function trainPlanarGaussian(run) {
+  return trainGaussianAlgorithm(false, run);
 }
 
-async function trainGsVirtualCameraSampling() {
-  return trainGaussianAlgorithm(true);
+async function trainRectangleSplats(run) {
+  return trainGaussianAlgorithm(false, run);
 }
 
-async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
+async function trainLayeredOpaqueBrush(run) {
+  return trainGaussianAlgorithm(false, run);
+}
+
+async function trainGsVirtualCameraSampling(run) {
+  return trainGaussianAlgorithm(true, run);
+}
+
+async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginTrainingRun()) {
+  assertTrainingRun(run);
   if (!state.image || state.running) return;
   const algorithm = selectedAlgorithm();
+  syncAlgorithmRequirements();
   if (Boolean(algorithm.capabilities.virtualCameras) !== Boolean(virtualCameraSamplingEnabled)) {
     throw new Error(`Training entry does not match selected algorithm: ${algorithm.id}`);
   }
+  cancelCompletedResultGpuRecovery();
   destroyTiltViewer({ restoreCanvas: true });
   activateDetailTab("training");
   if (!state.webgpu.supported || !state.webgpu.renderer) {
@@ -14345,7 +19517,8 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
     log(`WebGPU required; training not started: ${state.webgpu.reason}`);
     return;
   }
-  const performanceSelection = state.webgpu.renderer.configureExperimentalPerformance();
+  const renderer = run.renderer;
+  const performanceSelection = renderer.configureExperimentalPerformance();
   document.documentElement.dataset.opacityAwareSupport = performanceSelection.opacityAwareSupportMode;
   document.documentElement.dataset.adaptiveGpuThroughput = String(performanceSelection.adaptiveGpuThroughput);
   if (
@@ -14368,6 +19541,8 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
     }
   }
   const resizedForTraining = resizeLoadedImageToMaxSide(Number(els.trainSize.value));
+  updateTrainingRunOwnership(run, { image: state.image });
+  assertTrainingRun(run);
   if (resizedForTraining) {
     syncTrainSizeUi();
     log(`applied training image size ${state.image.width}x${state.image.height}`);
@@ -14377,7 +19552,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
   const preflightFailure = safetyFailure(preflight, "start");
   const wantsHighCapacityProbe =
     els.capacityMode.value === "auto-probe" &&
-    Number(els.finalSplatCount.value) > CAPACITY_PROBE_FAST_PATH_MAX;
+    Number(preflight.effectiveFinalSplats || els.finalSplatCount.value) > CAPACITY_PROBE_FAST_PATH_MAX;
   if (preflightFailure && (!wantsHighCapacityProbe || preflightFailure.reason === "safety_stop_hard_limit")) {
     setSafetyStop(preflightFailure);
     setStatus("safety stopped");
@@ -14386,12 +19561,14 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
     return;
   }
   if (preflightFailure) log(`Auto probe will search below the rejected ${els.finalSplatCount.value} splat request.`);
+  resetEvaluationStatusForNewTraining();
   state.running = true;
   state.previewGeneration += 1;
   state.paused = false;
   resetTrainingTiming(false);
   state.runtimeSettingsRevision = 0;
   state.layerTelemetryState = null;
+  state.layerEfficiencyCheckpoints = [];
   state.stopRequested = false;
   clearSplatAdjustmentBaseline();
   updateDownloads(false);
@@ -14402,20 +19579,53 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
   setPausedRuntimeControlsEnabled(false);
   setTrainingMessage("Training on WebGPU...");
 
-  const initialCount = normalizeUiSplatCount(
+  const baseInitialCount = normalizeUiSplatCount(
     els.initialSplatCount.value,
     DEFAULT_INITIAL_SPLATS,
     CAPACITY_PROBE_FAST_PATH_MAX,
   );
-  let finalCount = Math.max(initialCount, normalizeUiSplatCount(els.finalSplatCount.value, DEFAULT_FINAL_SPLATS));
+  const baseFinalCount = Math.max(
+    baseInitialCount,
+    normalizeUiSplatCount(els.finalSplatCount.value, DEFAULT_FINAL_SPLATS),
+  );
   const steps = requestedSteps;
   let learningRates = selectedLearningRates();
+  if (algorithmUsesPaintKernel(algorithm)) {
+    learningRates = {
+      ...learningRates,
+      boundarySigma: Math.min(learningRates.boundarySigma, RECTANGLE_KERNEL_EXTENT),
+    };
+  }
   let previewRefresh = selectedPreviewRefresh();
+  const runLiveQualityMetrics = liveQualityMetricsEnabled();
+  const runQaPeriodicMetrics = qaPeriodicTrainingEvaluationEnabled();
+  const runPeriodicEvaluation = periodicTrainingEvaluationEnabled();
   const runStageAwareGrowth = phase39Variants().stageAwareGrowth;
   const runStageGrowthShares = phase39Variants().stageGrowthShares;
   const runLayerSettings = phase46Variants();
+  const runDiscreteLayerSettings = discreteLayerSettings();
+  const runHiddenRgbRecolorSettings = hiddenRgbRecolorSettings();
+  let initialCount = baseInitialCount;
+  let finalCount = baseFinalCount;
+  const runRectanglePaintOpacity = selectedOpaquePaintOpacity();
+  const runLayeredBrushOpacity = selectedLayeredBrushOpacity();
+  const runOpaquePaintOpacity = algorithmUsesLayeredOpaqueBrush(algorithm)
+    ? runLayeredBrushOpacity
+    : runRectanglePaintOpacity;
+  const runRectangleTopRatio = selectedRectangleTopRatio();
+  const runRectangleTopRatioMax =
+    selectedRectangleTopRatioMax(runRectangleTopRatio);
+  const runRectangleShape = selectedRectangleShapeSettings();
   const runVirtualCameraSampling = virtualCameraSamplingVariants(virtualCameraSamplingEnabled);
-  const runAdaptiveGridInitialization = adaptiveGridInitializationVariants(virtualCameraSamplingEnabled);
+  const adaptiveGridRequest = adaptiveGridInitializationVariants(virtualCameraSamplingEnabled);
+  const runAdaptiveGridInitialization = algorithmUsesPaintKernel(algorithm)
+    ? {
+        ...adaptiveGridRequest,
+        requested: false,
+        enabled: false,
+        reason: "image-importance-bsp-initialization",
+      }
+    : adaptiveGridRequest;
   const runVirtualCameraOrbitRadius = runVirtualCameraSampling.enabled && runVirtualCameraSampling.autoCameraDistance
     ? sharedTiltOrbitRadius(
       state.image.width,
@@ -14425,6 +19635,21 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
       runVirtualCameraSampling.fovDegrees,
     )
     : runVirtualCameraSampling.cameraDistance;
+  const runVirtualCameraCatalog = runVirtualCameraSampling.enabled
+    ? virtualCameraCatalog(
+      state.image.width,
+      state.image.height,
+      runVirtualCameraOrbitRadius,
+      runVirtualCameraSampling,
+    )
+    : [];
+  const runVirtualTeacherCoverage = runVirtualCameraSampling.enabled
+    ? virtualCameraCoverageStats(
+      state.image.width,
+      state.image.height,
+      runVirtualCameraSampling,
+    )
+    : null;
   const gpuDensifyEnabled = true;
   const gpuRelocationEnabled = true;
   const useAutoCapacityProbe = els.capacityMode.value === "auto-probe" && finalCount > CAPACITY_PROBE_FAST_PATH_MAX;
@@ -14435,14 +19660,26 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
     attempts: [],
     fastPath: finalCount <= CAPACITY_PROBE_FAST_PATH_MAX,
   };
-  els.initialSplatCount.value = String(initialCount);
-  els.finalSplatCount.value = String(finalCount);
+  els.initialSplatCount.value = String(baseInitialCount);
+  els.finalSplatCount.value = String(baseFinalCount);
   els.stageGrowthP1.value = (runStageGrowthShares.p1 * 100).toFixed(2);
   els.stageGrowthP2.value = (runStageGrowthShares.p2 * 100).toFixed(2);
   els.stageGrowthP3.value = (runStageGrowthShares.p3 * 100).toFixed(2);
   els.stepCount.value = String(steps);
   els.previewRefresh.value = previewRefresh;
   els.layerUpdateInterval.value = String(runLayerSettings.layerUpdateInterval);
+  els.deepPruneInterval.value = String(runDiscreteLayerSettings.deepPruneInterval);
+  els.hiddenRgbRecolorInterval.value = String(runHiddenRgbRecolorSettings.interval);
+  els.hiddenRgbRecolorFraction.value = String(runHiddenRgbRecolorSettings.fraction * 100);
+  els.hiddenRgbRecolorStrength.value = String(runHiddenRgbRecolorSettings.strength * 100);
+  els.opaquePaintOpacity.value = String(runRectanglePaintOpacity);
+  els.layeredBrushOpacity.value = String(runLayeredBrushOpacity);
+  els.rectangleTopRatio.value = String(runRectangleTopRatio);
+  els.rectangleTopRatioMax.value = String(runRectangleTopRatioMax);
+  els.rectanglePreserveArea.checked = runRectangleShape.preserveArea;
+  els.rectangleEdgeDirectedTaper.checked = runRectangleShape.edgeDirectedTaper;
+  els.rectangleStructureAwareRatio.checked = runRectangleShape.structureAwareRatio;
+  els.rectangleAsymmetricSoftness.checked = runRectangleShape.asymmetricSoftness;
   els.positionLearningRate.value = String(learningRates.position);
   els.colorLearningRate.value = String(learningRates.color);
   els.opacityLearningRate.value = String(learningRates.opacity);
@@ -14457,10 +19694,56 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
   if (budget.overBudget) {
     log(`settings exceed safety budget ${budget.estimatedMB}MB > ${budget.budgetMB}MB; recommended ${budget.recommendedTrainSize}px ${budget.recommendedFinalSplats} splats`);
   }
-  const initialization = runAdaptiveGridInitialization.requested
-    ? "image-rgb-grid-adaptive-placement"
-    : "image-rgb-grid";
-  state.params = algorithm.initialize(state.image, initialCount);
+  const initialization = algorithmUsesPaintKernel(algorithm)
+    ? "image-rgb-importance-bsp"
+    : runAdaptiveGridInitialization.requested
+      ? "image-rgb-grid-adaptive-placement"
+      : "image-rgb-grid";
+  state.params = algorithm.initialize(state.image, baseInitialCount);
+  initialCount = state.params.count;
+  finalCount = Math.max(initialCount, finalCount);
+  state.params.layerAwareAccumulationEnabled = runDiscreteLayerSettings.accumulationEnabled;
+  state.params.pruneLowContributionDeepSplatsEnabled = runDiscreteLayerSettings.deepPruneEnabled;
+  state.params.deepPruneInterval = runDiscreteLayerSettings.deepPruneInterval;
+  state.params.hiddenRgbRecolorEnabled = runHiddenRgbRecolorSettings.enabled;
+  state.params.hiddenRgbRecolorInterval = runHiddenRgbRecolorSettings.interval;
+  state.params.hiddenRgbRecolorFraction = runHiddenRgbRecolorSettings.fraction;
+  state.params.hiddenRgbRecolorStrength = runHiddenRgbRecolorSettings.strength;
+  state.params.discreteLayersEnabled = runDiscreteLayerSettings.enabled;
+  state.params.discreteLayerCount = runDiscreteLayerSettings.count;
+  state.params.discreteLayerMoveRadius = runDiscreteLayerSettings.moveRadius;
+  if (algorithmUsesOpaqueLayeredPaint(algorithm)) {
+    state.params.opaqueLayered = true;
+    state.params.rectangleTopRatio = algorithmUsesRectangleKernel(algorithm)
+      ? runRectangleTopRatio
+      : DEFAULT_RECTANGLE_TOP_RATIO;
+    state.params.rectangleTopRatioMax = algorithmUsesRectangleKernel(algorithm)
+      ? runRectangleTopRatioMax
+      : DEFAULT_RECTANGLE_TOP_RATIO_MAX;
+    state.params.rectanglePreserveArea = algorithmUsesRectangleKernel(algorithm)
+      ? runRectangleShape.preserveArea
+      : DEFAULT_RECTANGLE_PRESERVE_AREA;
+    state.params.rectangleEdgeDirectedTaper = algorithmUsesRectangleKernel(algorithm)
+      ? runRectangleShape.edgeDirectedTaper
+      : DEFAULT_RECTANGLE_EDGE_DIRECTED_TAPER;
+    state.params.rectangleStructureAwareRatio = algorithmUsesRectangleKernel(algorithm)
+      ? runRectangleShape.structureAwareRatio
+      : DEFAULT_RECTANGLE_STRUCTURE_AWARE_RATIO;
+    state.params.rectangleAsymmetricSoftness = algorithmUsesRectangleKernel(algorithm)
+      ? runRectangleShape.asymmetricSoftness
+      : DEFAULT_RECTANGLE_ASYMMETRIC_SOFTNESS;
+    state.params.fixedOpacity = runOpaquePaintOpacity;
+    state.params.opacity.fill(runOpaquePaintOpacity);
+    state.params.layerOrderEnabled = true;
+    state.params.layerAwareAccumulationEnabled = true;
+    state.params.discreteLayersEnabled = true;
+    state.params.discreteLayerCount = LAYERED_OPAQUE_BRUSH_LAYER_COUNT;
+    state.params.discreteLayerMoveRadius = algorithmUsesLayeredOpaqueBrush(algorithm)
+      ? LAYERED_OPAQUE_BRUSH_LAYER_MOVE_RADIUS
+      : 0;
+    state.params.pruneLowContributionDeepSplatsEnabled = true;
+    state.params.deepPruneInterval = LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL;
+  }
   state.params.virtualDepthEnabled = Boolean(runVirtualCameraSampling.enabled && runVirtualCameraSampling.boundedDepth);
   state.params.virtualDepthThickness = runVirtualCameraSampling.depthThickness;
   if (!state.params.virtualDepth || state.params.virtualDepth.length !== state.params.count) {
@@ -14493,10 +19776,11 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
       candidate_count: runAdaptiveGridInitialization.candidateCount,
       backend: "webgpu-compute",
     },
+    initialization_bsp: state.params.initializationStats || null,
     initial_splats: initialCount,
     final_splats: finalCount,
     num_gaussians: initialCount,
-    default_output: "ply",
+    default_output: algorithm.exports.includes("ply") ? "ply" : "png",
     steps_requested: steps,
     steps_done: 0,
     preview_refresh: previewRefresh,
@@ -14522,16 +19806,48 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
       detailCoherence: learningRates.detailCoherence,
       trainLayerOrder: Boolean(els.trainLayerOrder.checked),
       layerUpdateInterval: runLayerSettings.layerUpdateInterval,
+      layerAwareAccumulation: runDiscreteLayerSettings.accumulationEnabled,
+      pruneLowContributionDeepSplats: runDiscreteLayerSettings.deepPruneEnabled,
+      deepPruneInterval: runDiscreteLayerSettings.deepPruneInterval,
+      hiddenRgbRecolor: runHiddenRgbRecolorSettings.enabled,
+      hiddenRgbRecolorInterval: runHiddenRgbRecolorSettings.interval,
+      hiddenRgbRecolorFraction: runHiddenRgbRecolorSettings.fraction,
+      hiddenRgbRecolorStrength: runHiddenRgbRecolorSettings.strength,
+      illustrativeOil: algorithmUsesLayeredOpaqueBrush(algorithm),
+      illustrativeOilVersion: state.params.illustrativeOilVersion || 0,
+      illustrativeOilFamilyStats: state.params.illustrativeOilFamilyStats || null,
+      fixedSplatOpacity: algorithmUsesOpaqueLayeredPaint(algorithm) ? runOpaquePaintOpacity : null,
+      rectangleMinimumPaintOpacity:
+        algorithmUsesRectangleKernel(algorithm) ? runRectanglePaintOpacity : null,
+      layeredBrushFixedOpacity:
+        algorithmUsesLayeredOpaqueBrush(algorithm) ? runLayeredBrushOpacity : null,
+      discreteLayers: runDiscreteLayerSettings.enabled,
+      discreteLayerCount: runDiscreteLayerSettings.count,
+      discreteLayerMoveRadius: runDiscreteLayerSettings.moveRadius,
     },
-    initial_param_snapshot: snapshotParams(state.params),
+    live_quality_metrics: runLiveQualityMetrics,
+    initial_param_snapshot: runQaPeriodicMetrics
+      ? snapshotParams(state.params)
+      : null,
     initial_orientation: initialOrientationStats(state.params, state.image),
     param_delta: null,
     train_sync_interval: trainSyncInterval(),
+    train_sync_policy: {
+      mode: "adaptive-high-splat-backpressure",
+      high_splat_threshold: HIGH_SPLAT_SYNC_THRESHOLD,
+      very_high_splat_threshold: VERY_HIGH_SPLAT_SYNC_THRESHOLD,
+      effective_interval: trainSyncInterval(),
+      readback_added: false,
+    },
     gpu_scheduling: {
       adaptive_throughput: performanceSelection.adaptiveGpuThroughput,
+      adaptive_gpu_batch: performanceSelection.adaptiveGpuBatch,
       mode: performanceSelection.gpuSchedulingMode,
       async_presentation: performanceSelection.asyncPresentation,
       metric_tile_reuse: performanceSelection.metricTileReuse,
+      segmented_exact_backward: performanceSelection.segmentedExactBackward,
+      fixed_point_exact_gradient: performanceSelection.fixedPointExactGradient,
+      inverse_scale_optimization: performanceSelection.inverseScaleOptimization,
     },
     backend: selectedBackend(),
     webgpu_supported: state.webgpu.supported,
@@ -14559,8 +19875,21 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
     webgpu_refine_requested: gpuRelocationEnabled,
     webgpu_refine: false,
     loss_backend: "webgpu-compute",
+    quality_metric_contract: {
+      signal_space: "sRGB signal values",
+      rgb_data_range: [0, 1],
+      l1: "mean absolute error over RGB channels",
+      psnr: "10*log10(1/MSE_RGB), with MSE averaged over RGB channels",
+      psnr_unit: "dB",
+      psnr_mse_floor: PSNR_MSE_FLOOR,
+      ssim: "mean-RGB signal for global, windowed, and local p10 structure metrics",
+    },
     initial_l1: null,
     final_l1: null,
+    initial_rgb_mse: null,
+    final_rgb_mse: null,
+    initial_psnr: null,
+    final_psnr: null,
     initial_alpha_l1: null,
     final_alpha_l1: null,
     initial_alpha_ssim: null,
@@ -14601,7 +19930,11 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
     fusion_refine_events: [],
     webgpu_relocation_events: [],
     webgpu_refine_events: [],
-    representation: "oriented-2d-gaussian",
+    representation: algorithmUsesLayeredOpaqueBrush(algorithm)
+      ? "oriented-2d-layered-opaque-superellipse"
+      : algorithmUsesRectangleKernel(algorithm)
+        ? "oriented-2d-soft-rectangle"
+        : "oriented-2d-gaussian",
     density_counters: null,
     last_density_counters: null,
     render_aware_density: true,
@@ -14636,26 +19969,11 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
       seed: runVirtualCameraSampling.seed,
       fov_degrees: runVirtualCameraSampling.fovDegrees,
       orbit_radius: runVirtualCameraOrbitRadius,
-      teacher_coverage: virtualCameraCoverageStats(
-        state.image.width,
-        state.image.height,
-        runVirtualCameraSampling,
-      ),
+      teacher_coverage: runVirtualTeacherCoverage,
       target: [0, 0, 0],
-      cameras: virtualCameraCatalog(
-        state.image.width,
-        state.image.height,
-        runVirtualCameraOrbitRadius,
-        runVirtualCameraSampling,
-      ),
+      cameras: runVirtualCameraCatalog,
       camera_counts: Object.fromEntries(
-        virtualCameraCatalog(
-          state.image.width,
-          state.image.height,
-          runVirtualCameraOrbitRadius,
-          runVirtualCameraSampling,
-        )
-          .map((camera) => [camera.id, 0]),
+        runVirtualCameraCatalog.map((camera) => [camera.id, 0]),
       ),
       active_camera_id: "front",
       preview_camera_id: "front",
@@ -14703,6 +20021,8 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
     tile_retry_parameter_hash: null,
     qa_tile_index_capacity: qaTileIndexCapacityOverride(),
     train_layer_order: Boolean(els.trainLayerOrder.checked),
+    discrete_layers: runDiscreteLayerSettings.enabled,
+    discrete_layer_count: runDiscreteLayerSettings.count,
     layer_update_interval: runLayerSettings.layerUpdateInterval,
     layer_update_rate: runLayerSettings.layerUpdateRate,
     layer_stage_aware_rate: runLayerSettings.stageAwareRate,
@@ -14712,11 +20032,31 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
     layer_update_last_step: null,
     layer_telemetry_enabled: layerTelemetryEnabled(),
     layer_telemetry: [],
+    layer_efficiency: null,
+    deep_layer_prune: null,
+    deep_layer_prune_events: [],
+    deep_layer_prune_removed_total: 0,
+    deep_layer_prune_interval: runDiscreteLayerSettings.deepPruneInterval,
+    hidden_rgb_recolor: null,
+    hidden_rgb_recolor_events: [],
+    hidden_rgb_recolor_count_total: 0,
+    hidden_rgb_recolor_settings: {
+      requested: runHiddenRgbRecolorSettings.requested,
+      supported: runHiddenRgbRecolorSettings.supported,
+      enabled: runHiddenRgbRecolorSettings.enabled,
+      available_storage_buffers: runHiddenRgbRecolorSettings.availableStorageBuffers,
+      interval: runHiddenRgbRecolorSettings.interval,
+      fraction: runHiddenRgbRecolorSettings.fraction,
+      strength: runHiddenRgbRecolorSettings.strength,
+    },
     experimental_prefix_preserved: true,
     trend_checkpoints: [],
     ssim_trend: "",
     global_ssim_trend: "",
+    psnr_trend: "",
     losses: [],
+    rgb_mse: [],
+    psnr: [],
     alpha_losses: [],
     alpha_ssim: [],
     objective_losses: [],
@@ -14751,9 +20091,23 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
       adc_specialization_retired: true,
       mcmc_relocation_enabled: phase39Variants().mcmcRelocationEnabled,
     },
+    training_residual_map: {
+      mode: "webgpu-training-signal",
+      evaluation_independent: true,
+      cpu_readbacks: 0,
+      refresh_count: 0,
+      growth_refreshes: 0,
+      relocation_refreshes: 0,
+      last_step: null,
+      last_reason: "",
+      last_wall_ms: null,
+      events: [],
+    },
     stopped: false,
     started_at: new Date().toISOString(),
   };
+  updateTrainingRunOwnership(run, { params: state.params, metrics: state.metrics });
+  assertTrainingRun(run);
   syncRuntimeMetrics(learningRates, previewRefresh);
   publishState();
 
@@ -14761,7 +20115,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
   try {
     let allocationResult = null;
     if (useAutoCapacityProbe) {
-      allocationResult = await state.webgpu.renderer.probeTrainingCapacity(state.image, state.params, finalCount);
+      allocationResult = await awaitTrainingRun(run, renderer.probeTrainingCapacity(state.image, state.params, finalCount));
       finalCount = allocationResult.capacity;
       els.finalSplatCount.value = String(finalCount);
       state.metrics.final_splats = finalCount;
@@ -14773,12 +20127,12 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
         attempts: allocationResult.attempts,
       };
     } else {
-      await state.webgpu.renderer.uploadTrainState(
+      await awaitTrainingRun(run, renderer.uploadTrainState(
         state.image,
         state.params,
         finalCount,
         { verifyAllocation: finalCount > CAPACITY_PROBE_FAST_PATH_MAX },
-      );
+      ));
       state.metrics.capacity_probe = {
         mode: els.capacityMode.value,
         requested: finalCount,
@@ -14787,23 +20141,28 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
         attempts: [],
       };
     }
-    const adaptiveInitialization = await state.webgpu.renderer.applyAdaptiveGridInitialization(
+    const adaptiveInitialization = await awaitTrainingRun(run, renderer.applyAdaptiveGridInitialization(
       state.image,
       state.params,
       runAdaptiveGridInitialization,
-    );
+    ));
     state.metrics.initialization_adaptive = adaptiveInitialization;
-    if (adaptiveInitialization.applied) {
-      await state.webgpu.renderer.readTrainedColors(state.params);
+    const periodicEvaluation = runPeriodicEvaluation;
+    if (adaptiveInitialization.applied && runQaPeriodicMetrics) {
+      await awaitTrainingRun(run, renderer.readTrainedColors(state.params));
       state.metrics.initial_param_snapshot = snapshotParams(state.params);
       state.metrics.initial_orientation = initialOrientationStats(state.params, state.image);
       log(
         `adaptive initialization applied fraction=${adaptiveInitialization.fraction.toFixed(2)} candidates=${adaptiveInitialization.candidate_count} moved~${adaptiveInitialization.moved_splats_estimate}`,
       );
+    } else if (adaptiveInitialization.applied) {
+      log(
+        `adaptive initialization applied on WebGPU without CPU parameter readback; fraction=${adaptiveInitialization.fraction.toFixed(2)}`,
+      );
     } else if (adaptiveInitialization.requested) {
       log(`adaptive initialization skipped: ${adaptiveInitialization.reason}`);
     }
-    const allocatedMemory = state.webgpu.renderer.trainingMemorySnapshot();
+    const allocatedMemory = renderer.trainingMemorySnapshot();
     state.metrics.gpu_training_memory = {
       accounting: "app-created-buffers",
       exact_device_vram: false,
@@ -14817,19 +20176,16 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
       reserved_bytes_after_release: null,
     };
     log(`GPU training buffers reserved ${formatMB(allocatedMemory.reservedBytes)}; active estimate ${formatMB(allocatedMemory.activeBytes)}`);
-    await updatePreview(0, false);
-    state.metrics.initial_l1 = state.metrics.final_l1;
-    state.metrics.initial_alpha_l1 = state.metrics.final_alpha_l1;
-    state.metrics.initial_alpha_ssim = state.metrics.final_alpha_ssim;
-    state.metrics.initial_alpha_objective = state.metrics.final_alpha_objective;
-    state.metrics.initial_objective_loss = state.metrics.final_objective_loss;
-    state.metrics.initial_ssim = state.metrics.final_ssim;
-    state.metrics.initial_global_ssim = state.metrics.final_global_ssim;
-    state.metrics.initial_windowed_ssim = state.metrics.final_windowed_ssim;
-    state.metrics.initial_regional_ssim = state.metrics.final_regional_ssim;
-    state.metrics.initial_high_frequency = state.metrics.final_high_frequency;
+    state.metrics.training_evaluation = {
+      mode: periodicEvaluation ? "periodic-read-only" : "final-only",
+      source: runLiveQualityMetrics ? "ui" : runQaPeriodicMetrics ? "qa" : "off",
+      periodic_full_image_evaluations: 0,
+      initial_full_image_evaluation: false,
+      first_read_only_step: null,
+      skipped_non_full_evaluations: 0,
+    };
     log(
-      `training start algorithm=${state.metrics.algorithm} backend=${state.metrics.backend} initial_loss=${state.metrics.initial_l1.toFixed(6)} initial_alpha_l1=${state.metrics.initial_alpha_l1.toFixed(6)} initial_objective=${state.metrics.initial_objective_loss.toFixed(6)} initial_global_ssim=${state.metrics.initial_global_ssim.toFixed(6)} initial_windowed_ssim=${state.metrics.initial_ssim.toFixed(6)} initial_local_p10=${state.metrics.initial_regional_ssim.p10.toFixed(6)} growth=${state.metrics.growth_schedule.percentage}% threshold=${state.metrics.growth_schedule.signal_threshold} cap=${finalCount}`,
+      `training start algorithm=${state.metrics.algorithm} backend=${state.metrics.backend} metrics=${periodicEvaluation ? "periodic-read-only" : "final-only"} growth=${state.metrics.growth_schedule.percentage}% threshold=${state.metrics.growth_schedule.signal_threshold} cap=${finalCount}`,
     );
 
     const metricInterval = Math.max(1, Math.min(DEFAULT_MAX_METRIC_INTERVAL, state.recommendation?.metricInterval || Math.floor(steps / 60)));
@@ -14855,11 +20211,17 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
       let stepPresentationMs = 0;
       let presentation = "none";
       while (state.paused && !state.stopRequested) {
-        await nextFrame();
+        await awaitTrainingRun(run, nextFrame());
       }
       const stepWallStarted = performance.now();
       if (appliedRuntimeSettingsRevision !== state.runtimeSettingsRevision) {
         learningRates = selectedLearningRates();
+        if (algorithmUsesPaintKernel()) {
+          learningRates = {
+            ...learningRates,
+            boundarySigma: Math.min(learningRates.boundarySigma, RECTANGLE_KERNEL_EXTENT),
+          };
+        }
         previewRefresh = selectedPreviewRefresh();
         syncRuntimeMetrics(learningRates, previewRefresh);
         appliedRuntimeSettingsRevision = state.runtimeSettingsRevision;
@@ -14917,7 +20279,8 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
           break;
         }
         const densityStarted = performance.now();
-        growthResult = await state.webgpu.renderer.growExperimentalGpu(state.image, state.params, requestedTargetCount, step, steps);
+        await refreshTrainingResidualSignal(step, "growth", run);
+        growthResult = await awaitTrainingRun(run, renderer.growExperimentalGpu(state.image, state.params, requestedTargetCount, step, steps));
         densityGpuMs = performance.now() - densityStarted;
         stepDensityMs += densityGpuMs;
         state.metrics.density_gpu_ms += densityGpuMs;
@@ -14927,6 +20290,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
         if (growthResult.grown) {
           targetCount = growthResult.count;
           state.params = growParamPlaceholders(state.params, targetCount);
+          updateTrainingRunOwnership(run, { params: state.params });
           state.metrics.webgpu_densify = true;
           state.metrics.num_gaussians = state.params.count;
           if (state.params.count >= finalCount && state.metrics.growth_schedule.cap_reached_step === null) {
@@ -14988,20 +20352,39 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
           state.metrics.residual_destination_oracle = state.webgpu.renderer.residualDestinationOracleSummary();
         }
       }
+      const brushSurfaceRecoveryDueAtStep =
+        normalizedKernelShape(state.params?.kernelShape) === "opaque-brush" &&
+        illustrativeOilSurfaceRecoveryDue(
+          step,
+          steps,
+          state.params?.deepPruneInterval || LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL,
+        );
       const relocationDueAtStep =
         growthSettings.densityEventsEnabled &&
         growthSettings.mcmcRelocationEnabled &&
         gpuRelocationEnabled &&
         step > densifyWarmupSteps(densitySteps) &&
-        step <= Math.floor(densitySteps * 0.85) &&
-        step % EXPERIMENTAL_REFINE_EVERY === 0;
-      const structuralStep = densifyDue || relocationDueAtStep;
+        (
+          (
+            step <= Math.floor(densitySteps * 0.85) &&
+            step % EXPERIMENTAL_REFINE_EVERY === 0
+          ) ||
+          brushSurfaceRecoveryDueAtStep
+        );
+      const deepPruneDueAtStep = deepPruneDue(step, steps, runDiscreteLayerSettings);
+      const hiddenRgbRecolorDueAtStep = hiddenRgbRecolorDue(step, steps, runHiddenRgbRecolorSettings);
+      const structuralStep = densifyDue || relocationDueAtStep || deepPruneDueAtStep || hiddenRgbRecolorDueAtStep;
+      const effectiveSyncInterval = effectiveTrainSyncInterval(
+        state.params.count,
+        state.metrics.train_sync_interval,
+      );
+      state.metrics.train_sync_policy.effective_interval = effectiveSyncInterval;
       const qaHashPending = qaTileOverflowFixtureEnabled() && !state.metrics.tile_retry_parameter_hash?.matches;
       const gpuBatchSize = plannedAdaptiveGpuBatch({
         step,
         steps,
         desiredSize: gpuBatchTuning.size,
-        metricInterval,
+        metricInterval: steps + 1,
         previewRefresh,
         structuralStep,
         qaHashPending,
@@ -15009,29 +20392,34 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
         growthSteps,
         growthSettings,
         runLayerSettings,
+        deepPruneSettings: runDiscreteLayerSettings,
+        hiddenRgbSettings: runHiddenRgbRecolorSettings,
         virtualCameraSampling: runVirtualCameraSampling,
       });
       const shouldSyncTrain = performanceSelection.gpuSchedulingMode === "adaptive"
         ? true
-        : qaHashPending || structuralStep || step % state.metrics.train_sync_interval === 0 || step % metricInterval === 0 || step === steps;
+        : qaHashPending ||
+          structuralStep ||
+          step % effectiveSyncInterval === 0 ||
+          step === steps;
       const parameterHashBefore = qaHashPending
-        ? await state.webgpu.renderer.hashTrainParameters(state.params)
+        ? await awaitTrainingRun(run, renderer.hashTrainParameters(state.params))
         : null;
       const trainStarted = performance.now();
       if (gpuBatchSize > 1) {
         const batchSteps = Array.from({ length: gpuBatchSize }, (_, index) => step + index);
-        await state.webgpu.renderer.trainStepsGpu(
+        await awaitTrainingRun(run, renderer.trainStepsGpu(
           state.image,
           state.params,
           learningRates,
           batchSteps,
           { virtualCameraSampling: runVirtualCameraSampling },
-        );
+        ));
       } else {
-        await state.webgpu.renderer.trainStepGpu(state.image, state.params, learningRates, {
+        await awaitTrainingRun(run, renderer.trainStepGpu(state.image, state.params, learningRates, {
           sync: shouldSyncTrain,
           virtualCameraSampling: runVirtualCameraSampling,
-        });
+        }));
       }
       stepTrainMs = performance.now() - trainStarted;
       gpuBatchTuning.submittedBatches += 1;
@@ -15054,9 +20442,16 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
       step = completedStep;
       state.metrics.webgpu_train_executed = true;
       state.metrics.webgpu_train_update = Boolean(state.webgpu.renderer.lastTrainStats?.updated);
-      const virtualCameraSample = state.webgpu.renderer.lastTrainStats?.virtual_camera_sample || null;
+      const virtualCameraSamples = state.webgpu.renderer.lastTrainStats?.virtual_camera_samples?.length
+        ? state.webgpu.renderer.lastTrainStats.virtual_camera_samples
+        : state.webgpu.renderer.lastTrainStats?.virtual_camera_sample
+          ? [{
+              ...state.webgpu.renderer.lastTrainStats.virtual_camera_sample,
+              step,
+            }]
+          : [];
       if (shouldSyncTrain) {
-        const retrySteps = await resolveTileOverflowRetry(parameterHashBefore);
+        const retrySteps = await resolveTileOverflowRetry(parameterHashBefore, run);
         if (retrySteps > 0) {
           state.metrics.webgpu_train_update = false;
           const resumedStep = Math.max(0, step - retrySteps);
@@ -15075,8 +20470,9 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
           continue;
         }
       }
-      if (virtualCameraSample) {
-        const previousCameraId = state.virtualCameraByStep[step];
+      for (const virtualCameraSample of virtualCameraSamples) {
+        const sampleStep = Math.max(1, Math.round(virtualCameraSample.step || step));
+        const previousCameraId = state.virtualCameraByStep[sampleStep];
         if (previousCameraId && previousCameraId !== virtualCameraSample.cameraId) {
           state.metrics.virtual_camera_sampling.camera_counts[previousCameraId] = Math.max(
             0,
@@ -15084,7 +20480,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
           );
         }
         if (previousCameraId !== virtualCameraSample.cameraId) {
-          state.virtualCameraByStep[step] = virtualCameraSample.cameraId;
+          state.virtualCameraByStep[sampleStep] = virtualCameraSample.cameraId;
           state.metrics.virtual_camera_sampling.camera_counts[virtualCameraSample.cameraId] =
             (state.metrics.virtual_camera_sampling.camera_counts[virtualCameraSample.cameraId] || 0) + 1;
         }
@@ -15107,7 +20503,8 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
       const relocationDue = relocationDueAtStep;
       if (relocationDue) {
         const relocationStarted = performance.now();
-        const relocatedOnGpu = await state.webgpu.renderer.relocateExperimentalGpu(state.image, state.params, step, learningRates);
+        await refreshTrainingResidualSignal(step, "relocation", run);
+        const relocatedOnGpu = await awaitTrainingRun(run, renderer.relocateExperimentalGpu(state.image, state.params, step, learningRates));
         stepRelocationMs = performance.now() - relocationStarted;
         state.metrics.relocation_gpu_ms += stepRelocationMs;
         if (relocatedOnGpu) {
@@ -15116,12 +20513,36 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
           if (state.webgpu.renderer.trainState) state.webgpu.renderer.trainState.tileReady = false;
         }
       }
+      if (deepPruneDueAtStep) {
+        if (step === steps) {
+          setStatus("finalizing");
+          setTrainingMessage(`Finalizing ${state.params.count.toLocaleString()} splats on WebGPU...`);
+          publishState();
+          await awaitTrainingRun(run, nextFrame());
+        }
+        await applyDeepPrune(step, steps, run);
+      }
+      if (hiddenRgbRecolorDueAtStep) {
+        await applyHiddenRgbRecolor(step, steps, runHiddenRgbRecolorSettings, run);
+      }
       if (state.stopRequested) {
         state.metrics.stopped = true;
         log(`stopped at step ${step}`);
         break;
       }
-      if (step % metricInterval === 0 || step === steps || traceProfileLabels.length > 0) {
+      const periodicEvaluationDue = Boolean(
+        periodicEvaluation &&
+        step < steps &&
+        (step % metricInterval === 0 || traceProfileLabels.length > 0)
+      );
+      const periodicReadOnlyReady = Boolean(
+        periodicEvaluationDue &&
+        state.webgpu.renderer?.canReuseMetricRender(state.image)
+      );
+      if (periodicEvaluationDue && !periodicReadOnlyReady) {
+        state.metrics.training_evaluation.skipped_non_full_evaluations += 1;
+      }
+      if (periodicReadOnlyReady) {
         const presentationStarted = performance.now();
         presentation = "metrics";
         const metricsFailure = safetyFailure(computeBudgetFor(Number(els.trainSize.value), state.params.count, steps), "metrics");
@@ -15138,21 +20559,39 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
           setSafetyStop(metricsFailure);
           break;
         }
-        await updatePreview(step, false);
-        if (!performanceSelection.asyncPresentation) await nextFrame();
+        await updatePreview(step, false, { present: false, readOnlyPeriodic: true }, run);
+        if (state.metrics.training_evaluation) {
+          state.metrics.training_evaluation.periodic_full_image_evaluations += 1;
+          if (state.metrics.training_evaluation.first_read_only_step === null) {
+            state.metrics.training_evaluation.first_read_only_step = step;
+            state.metrics.initial_l1 = state.metrics.final_l1;
+            state.metrics.initial_rgb_mse = state.metrics.final_rgb_mse;
+            state.metrics.initial_psnr = state.metrics.final_psnr;
+            state.metrics.initial_alpha_l1 = state.metrics.final_alpha_l1;
+            state.metrics.initial_alpha_ssim = state.metrics.final_alpha_ssim;
+            state.metrics.initial_alpha_objective = state.metrics.final_alpha_objective;
+            state.metrics.initial_objective_loss = state.metrics.final_objective_loss;
+            state.metrics.initial_ssim = state.metrics.final_ssim;
+            state.metrics.initial_global_ssim = state.metrics.final_global_ssim;
+            state.metrics.initial_windowed_ssim = state.metrics.final_windowed_ssim;
+            state.metrics.initial_regional_ssim = state.metrics.final_regional_ssim;
+            state.metrics.initial_high_frequency = state.metrics.final_high_frequency;
+          }
+        }
+        if (!performanceSelection.asyncPresentation) await awaitTrainingRun(run, nextFrame());
         stepPresentationMs = performance.now() - presentationStarted;
       } else if (shouldPresentTrainingStep(step, previewRefresh)) {
         const presentationStarted = performance.now();
         presentation = "preview";
-        if (!(await presentTrainingPreview(step))) throw new Error("WebGPU live preview state is unavailable");
-        if (!performanceSelection.asyncPresentation) await nextFrame();
+        if (!(await presentTrainingPreview(step, run))) throw new Error("WebGPU live preview state is unavailable");
+        if (!performanceSelection.asyncPresentation) await awaitTrainingRun(run, nextFrame());
         stepPresentationMs = performance.now() - presentationStarted;
       } else if (step % 32 === 0) {
         const presentationStarted = performance.now();
         presentation = "status";
         els.stepText.textContent = `${step} / ${state.metrics.steps_requested}`;
         publishState();
-        if (!performanceSelection.asyncPresentation) await nextFrame();
+        if (!performanceSelection.asyncPresentation) await awaitTrainingRun(run, nextFrame());
         stepPresentationMs = performance.now() - presentationStarted;
       }
       if (step % metricInterval === 0 || step === steps) {
@@ -15192,6 +20631,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
           presentation,
           profile_labels: [...traceProfileLabels],
           sync: shouldSyncTrain,
+          sync_interval: effectiveSyncInterval,
           tile_builds: state.webgpu.renderer?.lastTrainStats?.tile_builds ?? null,
           tile_candidates: state.metrics.tile_counters?.total ?? null,
           tile_capacity: state.metrics.tile_counters?.capacity ?? null,
@@ -15209,11 +20649,22 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
       recordTrainingTiming(step, performance.now() - stepWallStarted);
     }
     if (!state.metrics.safety_stop) {
-      await updatePreview(state.metrics.steps_done, true);
+      const finalizationStarted = performance.now();
+      setStatus("finalizing");
+      setTrainingMessage(`Finalizing ${state.params.count.toLocaleString()} splats on WebGPU...`);
+      publishState();
+      await awaitTrainingRun(run, nextFrame());
+      await updatePreview(state.metrics.steps_done, true, {}, run);
+      state.metrics.training_evaluation.final_full_image_evaluations = 1;
+      await awaitTrainingRun(run, renderer.preserveResultRenderState(state.image, state.params));
+      await awaitTrainingRun(run, nextFrame());
       captureSplatAdjustmentBaseline();
+      state.metrics.finalization_wall_ms = performance.now() - finalizationStarted;
+      state.metrics.final_diagnostic_sample_limit = MAX_FINAL_DIAGNOSTIC_SAMPLES;
     }
     state.metrics.finished_at = new Date().toISOString();
   } catch (error) {
+    if (error.trainingRunCancelled || !ownsTrainingRun(run)) return;
     if (error.safetyStop) {
       state.metrics.stopped = true;
     } else {
@@ -15223,26 +20674,28 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
     const rec = state.recommendation || updateMemoryRecommendation();
     log(`WebGPU training stopped: ${error.message}; estimate=${rec.estimatedMB}MB recommended=${rec.recommendedTrainSize}px/${rec.recommendedFinalSplats} splats`);
   } finally {
-    const memoryBeforeRelease = state.webgpu.renderer?.trainingMemorySnapshot?.() || { activeBytes: 0, reservedBytes: 0 };
+    const runOwnsGlobalState = ownsTrainingRun(run);
+    const memoryBeforeRelease = renderer?.trainingMemorySnapshot?.() || { activeBytes: 0, reservedBytes: 0 };
     const reservedBeforeRelease = memoryBeforeRelease.reservedBytes || 0;
-    if (state.metrics?.gpu_training_memory) {
-      state.metrics.gpu_training_memory.active_bytes_before_release = Math.round(memoryBeforeRelease.activeBytes);
-      state.metrics.gpu_training_memory.reserved_bytes_before_release = Math.round(memoryBeforeRelease.reservedBytes);
-      state.metrics.gpu_training_memory.peak_active_bytes = Math.max(
-        state.metrics.gpu_training_memory.peak_active_bytes,
+    if (runOwnsGlobalState && run.metrics?.gpu_training_memory) {
+      run.metrics.gpu_training_memory.active_bytes_before_release = Math.round(memoryBeforeRelease.activeBytes);
+      run.metrics.gpu_training_memory.reserved_bytes_before_release = Math.round(memoryBeforeRelease.reservedBytes);
+      run.metrics.gpu_training_memory.peak_active_bytes = Math.max(
+        run.metrics.gpu_training_memory.peak_active_bytes,
         Math.round(memoryBeforeRelease.activeBytes),
       );
-      state.metrics.gpu_training_memory.peak_reserved_bytes = Math.max(
-        state.metrics.gpu_training_memory.peak_reserved_bytes,
+      run.metrics.gpu_training_memory.peak_reserved_bytes = Math.max(
+        run.metrics.gpu_training_memory.peak_reserved_bytes,
         Math.round(memoryBeforeRelease.reservedBytes),
       );
     }
-    state.webgpu.renderer?.disposeTrainState();
-    const memoryAfterRelease = state.webgpu.renderer?.trainingMemorySnapshot?.() || { activeBytes: 0, reservedBytes: 0 };
-    if (state.metrics?.gpu_training_memory) {
-      state.metrics.gpu_training_memory.active_bytes_after_release = Math.round(memoryAfterRelease.activeBytes);
-      state.metrics.gpu_training_memory.reserved_bytes_after_release = Math.round(memoryAfterRelease.reservedBytes);
+    renderer?.disposeTrainState();
+    const memoryAfterRelease = renderer?.trainingMemorySnapshot?.() || { activeBytes: 0, reservedBytes: 0 };
+    if (runOwnsGlobalState && run.metrics?.gpu_training_memory) {
+      run.metrics.gpu_training_memory.active_bytes_after_release = Math.round(memoryAfterRelease.activeBytes);
+      run.metrics.gpu_training_memory.reserved_bytes_after_release = Math.round(memoryAfterRelease.reservedBytes);
     }
+    if (!runOwnsGlobalState) return;
     if (reservedBeforeRelease > 0) log(`GPU training buffers released ${formatMB(reservedBeforeRelease)}`);
     state.running = false;
     state.paused = false;
@@ -15255,7 +20708,11 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled) {
     setInputControlsDisabled(false);
     renderSplatInspector();
     const deviceLost = !state.webgpu.supported && String(state.webgpu.reason).startsWith("device lost:");
-    if (trainingError || deviceLost) {
+    if (state.webGpuRecoveryPending) {
+      setStatus("recovering gpu");
+      setTrainingMessage("Training result preserved. Restoring the GPU preview...", "info");
+      updateDownloads(false);
+    } else if (trainingError || deviceLost) {
       setStatus("error");
       setTrainingMessage(`Training failed: ${trainingError?.message || state.webgpu.reason}`, "error");
       updateDownloads(false);
@@ -15308,8 +20765,11 @@ function togglePause() {
 
 function resetTrainingState() {
   if (!state.image || state.running) return;
+  invalidateTrainingRun("training reset");
+  cancelCompletedResultGpuRecovery();
   destroyTiltViewer({ restoreCanvas: true });
   state.webgpu.renderer?.disposeTrainState();
+  state.webgpu.renderer?.disposeResultRenderState();
   state.params = null;
   state.metrics = null;
   state.previewPadding = previewPaddingSpec(state.image, null, false);
@@ -15318,6 +20778,7 @@ function resetTrainingState() {
   state.lastGpuLoss = null;
   els.stepText.textContent = "0 / 0";
   els.lossText.textContent = "-";
+  els.psnrText.textContent = "-";
   els.ssimText.textContent = "-";
   els.regionalSsimText.textContent = "-";
   els.boundaryText.textContent = "-";
@@ -15335,9 +20796,12 @@ function resetTrainingState() {
 
 function clearImage() {
   if (state.running) return;
+  invalidateTrainingRun("image cleared");
+  cancelCompletedResultGpuRecovery();
   destroyTiltViewer({ restoreCanvas: true });
   state.imageLoadGeneration += 1;
   state.webgpu.renderer?.disposeTrainState();
+  state.webgpu.renderer?.disposeResultRenderState();
   state.image?.sourceBitmap?.close?.();
   state.image = null;
   state.params = null;
@@ -15345,7 +20809,6 @@ function clearImage() {
   state.paused = false;
   state.stopRequested = false;
   state.lastGpuLoss = null;
-  state.lastPreview = null;
   state.previewMode = "original";
   state.previewPadding = { x: 0, y: 0, width: 640, height: 420, bytes: 0 };
   els.fileInput.value = "";
@@ -15361,6 +20824,7 @@ function clearImage() {
   fitCanvases();
   els.stepText.textContent = "0 / 0";
   els.lossText.textContent = "-";
+  els.psnrText.textContent = "-";
   els.ssimText.textContent = "-";
   els.regionalSsimText.textContent = "-";
   els.boundaryText.textContent = "-";
@@ -15372,6 +20836,7 @@ function clearImage() {
   updateDownloads(false);
   updateMemoryRecommendation();
   updateVirtualCameraCoverageEstimate();
+  syncAlgorithmRequirements();
   setStatus("idle");
   setTrainingMessage("Ready.");
   eventLog("image cleared");
@@ -15388,9 +20853,15 @@ function nextFrame() {
 }
 
 function updateDownloads(enabled) {
-  state.exportReady = Boolean(enabled);
+  const requested = Boolean(enabled);
+  const coverage = requested ? exportCoverageStatus() : null;
+  state.exportReady = Boolean(requested && coverage?.ok);
   if (state.exportReady && !state.exporting && !state.exportMessage.startsWith("Exported")) {
-    state.exportMessage = "Ready to export.";
+    state.exportMessage = coverage?.warning
+      ? `Ready to export with warning: ${coverage.message}.`
+      : "Ready to export.";
+  } else if (requested && !state.exporting && coverage && !coverage.ok) {
+    state.exportMessage = `Export unavailable: ${coverage.message}.`;
   } else if (!state.exportReady && !state.exporting) {
     state.exportMessage = "Finish training before export.";
   }
@@ -15416,7 +20887,11 @@ function currentSplatPngSpec() {
     ...splatAlphaRenderOptions(),
     outside: Boolean(els.outsidePreviewToggle?.checked),
   };
-  const shape = renderOptions.splatShape === "rectangle" ? "rectangle" : "gaussian";
+  const shape = renderOptions.splatShape === "opaque-brush"
+    ? "opaque-brush"
+    : ["rectangle", "box"].includes(renderOptions.splatShape)
+      ? "rectangle"
+      : "gaussian";
   return {
     filename: `image2splatpaint-splats-${shape}.png`,
     shape,
@@ -15426,23 +20901,31 @@ function currentSplatPngSpec() {
 
 function updateExportPanel() {
   const enabled = state.exportReady && !state.exporting;
-  const algorithm = selectedAlgorithm();
-  const plyPlan = state.params && state.image
+  const algorithm = displayedResultAlgorithm();
+  const plySupported = algorithmSupportsExport("ply", algorithm);
+  const pngSupported = algorithmSupportsExport("png", algorithm);
+  const plyPlan = plySupported && state.params && state.image
     ? plyExportMemoryPlan(state.params, state.image, { download: true })
     : null;
-  const plyEnabled = enabled && algorithm.exports.includes("ply") && Boolean(plyPlan?.ok);
-  els.savePngButton.disabled = !enabled || !algorithm.exports.includes("png");
+  const plyEnabled = enabled && plySupported && Boolean(plyPlan?.ok);
+  const pngEnabled = enabled && pngSupported;
+  els.savePngButton.disabled = !pngEnabled;
   els.savePlyButton.disabled = !plyEnabled;
   els.savePngButton.textContent = state.exporting ? "Saving..." : "Save Splat PNG";
   els.savePlyButton.textContent = state.exporting ? "Exporting..." : "Export PLY";
-  els.exportDescription.textContent = EXPORT_FORMATS.ply.description;
+  els.exportDescription.textContent = algorithm.capabilities.kernelShape === "opaque-brush"
+    ? "Layered Opaque Brush exports exactly as PNG. Standard Gaussian Splatting PLY cannot represent the opaque superellipse kernel."
+    : algorithm.capabilities.kernelShape === "rectangle"
+      ? "Rectangle Splats export exactly as PNG. Standard Gaussian Splatting PLY cannot represent the rectangular kernel."
+      : EXPORT_FORMATS.ply.description;
   els.exportCount.textContent = state.params ? state.params.count.toLocaleString() : "-";
   els.exportStatus.textContent = enabled && plyPlan && !plyPlan.ok
     ? `PNG is ready. PLY needs ${plyPlan.estimatedPeakMB} MB peak memory; ${plyPlan.reason}.`
     : state.exportMessage;
   const data = document.documentElement.dataset;
   data.exportReady = String(enabled);
-  data.pngExportReady = String(enabled);
+  data.exportResultAlgorithm = algorithm.id;
+  data.pngExportReady = String(pngEnabled);
   data.plyExportReady = String(plyEnabled);
   data.plyExportPeakMb = plyPlan?.estimatedPeakMB || "";
   data.plyExportBudgetMb = plyPlan?.budgetMB || "";
@@ -15550,10 +21033,12 @@ async function makeSplatPreviewPngBlob() {
     throw new Error("No trained splat result to export.");
   }
   const spec = currentSplatPngSpec();
+  const displayParams = state.params;
+  const renderBuffers = state.webgpu.renderer.currentResultBuffers(displayParams);
   const capture = await state.webgpu.renderer.captureRenderedRgba(
     state.image,
-    state.params,
-    null,
+    displayParams,
+    renderBuffers,
     spec.renderOptions,
   );
   const { rgba, width, height } = capture;
@@ -15686,7 +21171,11 @@ function plyExportMemoryPlan(
 ) {
   const count = Math.max(0, Number(params?.count) || 0);
   const parameterBytes = parameterArrayBytes(params);
-  const baselineBytes = baseline === true ? count * CPU_PARAMETER_ROW_BYTES : parameterArrayBytes(baseline);
+  const baselineBytes = baseline === params
+    ? 0
+    : baseline === true
+      ? count * CPU_PARAMETER_ROW_BYTES
+      : parameterArrayBytes(baseline);
   const imageBytes = (image?.rgb?.byteLength || 0) + (image?.alpha?.byteLength || 0);
   const readbackBytes = count * GPU_READBACK_ROW_BYTES;
   const headerBytes = params && image ? new TextEncoder().encode(plyHeaderText(params, image)).byteLength : 1024;
@@ -15869,18 +21358,27 @@ function tiltRiskProfileForSplat(params, image, index, angleDegrees = DEFAULT_TI
 
 function summarizeTiltRisk(params, image) {
   const angleDegrees = phase39Variants().tiltSplitAngleDegrees;
-  const profiles = Array.from({ length: params.count }, (_, index) => tiltRiskProfileForSplat(params, image, index, angleDegrees));
+  const sampling = finalDiagnosticSampling(params.count);
+  const profiles = [];
+  for (let index = 0; index < params.count; index += sampling.stride) {
+    profiles.push(tiltRiskProfileForSplat(params, image, index, angleDegrees));
+  }
   const support = profiles.map((profile) => profile.supportDepth).sort((a, b) => a - b);
   const percentile = (fraction) => support.length
     ? support[Math.min(support.length - 1, Math.round((support.length - 1) * fraction))]
     : 0;
   const risky = profiles.filter((profile) => profile.risk > 0).sort((a, b) => b.risk - a.risk);
+  const riskyRatio = risky.length / Math.max(1, profiles.length);
   return {
     angle_degrees: angleDegrees,
     depth_threshold: PLY_LAYER_DEPTH_SPAN,
     color_threshold: DEFAULT_TILT_SPLIT_COLOR_THRESHOLD,
-    risky_count: risky.length,
-    risky_ratio: risky.length / Math.max(1, params.count),
+    source_count: sampling.sourceCount,
+    sample_count: sampling.sampleCount,
+    sample_stride: sampling.stride,
+    risky_sample_count: risky.length,
+    risky_count: Math.min(sampling.sourceCount, Math.round(riskyRatio * sampling.sourceCount)),
+    risky_ratio: riskyRatio,
     support_depth_p95: percentile(0.95),
     support_depth_p99: percentile(0.99),
     support_depth_max: support.at(-1) || 0,
@@ -15974,6 +21472,7 @@ function makePly(params = state.params, image = state.image) {
 function currentTiltRevision() {
   if (!state.params || !state.image) return "";
   return [
+    state.splatAdjustmentEpoch,
     state.metrics?.params_revision ?? 0,
     state.metrics?.final_readback_step ?? -1,
     state.metrics?.steps_done ?? -1,
@@ -15993,9 +21492,9 @@ function tiltViewerRuntime() {
 }
 
 function tiltViewerReady() {
+  const resultAlgorithm = trainedResultAlgorithm();
   return Boolean(
-    algorithmUsesVirtualCameras() &&
-    state.metrics?.algorithm === GS_VIRTUAL_CAMERA_ALGORITHM_ID &&
+    resultAlgorithm?.capabilities.virtualCameras &&
     typeof globalThis.Image2SplatPaintTilt?.createTiltViewer === "function" &&
     state.params &&
     state.metrics &&
@@ -16006,9 +21505,12 @@ function tiltViewerReady() {
 }
 
 function tiltViewerAvailabilityMessage() {
-  if (!algorithmUsesVirtualCameras()) return "Tilt is available only for GS Virtual Camera Sampling.";
-  if (state.metrics?.algorithm && state.metrics.algorithm !== GS_VIRTUAL_CAMERA_ALGORITHM_ID) {
+  const resultAlgorithm = trainedResultAlgorithm();
+  if (resultAlgorithm && !resultAlgorithm.capabilities.virtualCameras) {
     return "Train with GS Virtual Camera Sampling before opening Tilt.";
+  }
+  if (!resultAlgorithm && !algorithmUsesVirtualCameras()) {
+    return "Tilt is available only for GS Virtual Camera Sampling.";
   }
   if (typeof globalThis.Image2SplatPaintTilt?.createTiltViewer !== "function") return "Tilt renderer failed to load.";
   if (state.running) return "Stop or finish training before opening the Tilt viewer.";
@@ -16021,7 +21523,10 @@ function tiltViewerAvailabilityMessage() {
 
 function updateTiltControlState() {
   const ready = tiltViewerReady();
-  const tiltAvailable = algorithmUsesVirtualCameras();
+  const resultAlgorithm = trainedResultAlgorithm();
+  const tiltAvailable = resultAlgorithm
+    ? Boolean(resultAlgorithm.capabilities.virtualCameras)
+    : algorithmUsesVirtualCameras();
   els.tiltTab.disabled = !tiltAvailable;
   els.tiltTab.setAttribute("aria-disabled", String(!tiltAvailable));
   const interactive = Boolean(state.tilt.controller) && !state.tilt.teacherViewsLoading;
@@ -16056,6 +21561,8 @@ function updateTiltControlState() {
   const virtualSampleCount = cameraMarkers?.virtualSampleCount || 0;
   const runSampling = state.metrics?.virtual_camera_sampling;
   const runSamplingEnabled = Boolean(runSampling?.enabled);
+  // This describes the next Train selection; existing Tilt availability above
+  // remains bound to the completed result.
   const currentSamplingEnabled = algorithmUsesVirtualCameras();
   document.documentElement.dataset.tiltCameraMarkerCount = String(markerCount);
   document.documentElement.dataset.tiltCameraSampleCount = String(sampleCount);
@@ -16483,21 +21990,42 @@ async function loadTiltViewer({ force = false } = {}) {
   showCanvas("tilt");
   updateTiltControlState();
   try {
-    assertTiltViewerCapacity(state.params, state.image);
-    const plyBuffer = makePly(state.params, state.image);
+    const adjusted = await materializeCurrentSplatAdjustmentSnapshot();
+    if (!adjusted || revision !== currentTiltRevision()) {
+      if (generation === state.tilt.generation) {
+        state.tilt.abortController = null;
+        state.tilt.loading = false;
+        els.tiltStatus.textContent = "Tilt source changed; reopen Tilt to use the latest splats.";
+        updateTiltControlState();
+      }
+      return null;
+    }
+    const tiltParams = adjusted.params;
+    assertTiltViewerCapacity(tiltParams, state.image);
+    const plyBuffer = makePly(tiltParams, state.image);
     const cameraPool = await tiltCameraPoolSnapshot();
     const { createTiltViewer } = tiltViewerRuntime();
     const controller = await createTiltViewer({
       canvas: els.tiltCanvas,
       plyBuffer,
       frame: plyFrameScale(state.image),
-      supportFrame: renderFootprintSupportFrame(state.image, state.params),
+      supportFrame: renderFootprintSupportFrame(state.image, tiltParams),
       signal: abortController.signal,
       onCameraChange: updateTiltCameraDiagnostics,
       cameraPool,
     });
-    if (generation !== state.tilt.generation) {
+    if (
+      generation !== state.tilt.generation ||
+      !splatAdjustmentSnapshotIsCurrent(adjusted.snapshot) ||
+      revision !== currentTiltRevision()
+    ) {
       controller.destroy();
+      if (generation === state.tilt.generation) {
+        state.tilt.abortController = null;
+        state.tilt.loading = false;
+        els.tiltStatus.textContent = "Tilt source changed; reopen Tilt to use the latest splats.";
+        updateTiltControlState();
+      }
       return null;
     }
     state.tilt.controller = controller;
@@ -16516,7 +22044,7 @@ async function loadTiltViewer({ force = false } = {}) {
     setTiltDisplayMode(state.tilt.viewMode);
     els.tiltStatus.textContent = `PlayCanvas ${controller.engineVersion} (${controller.backend}). The camera orbits the image center at a fixed radius.`;
     eventLog(
-      `Tilt viewer loaded from memory PLY: ${state.params.count} splats` +
+      `Tilt viewer loaded from memory PLY: ${tiltParams.count} splats` +
       ` sha256=${controller.plyDigest.slice(0, 12)}`,
     );
     publishState();
@@ -16535,10 +22063,13 @@ async function loadTiltViewer({ force = false } = {}) {
 
 async function saveExport({ download = true, formatKey = "ply" } = {}) {
   if (state.exporting) return;
-  if (!algorithmSupportsExport(formatKey)) {
-    throw new Error(`${selectedAlgorithm().label} does not support ${formatKey.toUpperCase()} export.`);
+  const algorithm = displayedResultAlgorithm();
+  if (!algorithmSupportsExport(formatKey, algorithm)) {
+    throw new Error(`${algorithm.label} does not support ${formatKey.toUpperCase()} export.`);
   }
   if (!state.exportReady || state.metrics?.safety_stop) throw new Error("Export is not ready.");
+  const coverage = exportCoverageStatus();
+  if (!coverage.ok) throw new Error(`Export is not ready: ${coverage.message}.`);
   const format = EXPORT_FORMATS[formatKey] || EXPORT_FORMATS.ply;
   const pngSpec = formatKey === "png" ? currentSplatPngSpec() : null;
   const filename = pngSpec?.filename || format.filename;
@@ -16588,10 +22119,13 @@ async function saveExport({ download = true, formatKey = "ply" } = {}) {
       };
     }
 
-    const plyBuffer = makePly(state.params, state.image);
-    const plyContract = inspectPlyContract(plyBuffer, state.params, state.image);
+    const exportParams = await materializeCurrentSplatAdjustmentSnapshot();
+    if (!exportParams?.params) throw new Error("Splat adjustments changed while preparing the PLY.");
+    const plyParams = exportParams.params;
+    const plyBuffer = makePly(plyParams, state.image);
+    const plyContract = inspectPlyContract(plyBuffer, plyParams, state.image);
     const plyValid =
-      plyContract.vertices === state.params.count &&
+      plyContract.vertices === plyParams.count &&
       plyContract.row_bytes === 68 &&
       (plyContract.layer_order_enabled ? plyContract.layer_depth_match : plyContract.all_z_zero) &&
       plyContract.all_finite &&
@@ -16608,6 +22142,9 @@ async function saveExport({ download = true, formatKey = "ply" } = {}) {
 
     const bytes = new Uint8Array(plyBuffer);
     const plyDigest = await sha256Hex(plyBuffer);
+    if (!splatAdjustmentSnapshotIsCurrent(exportParams.snapshot)) {
+      throw new Error("Splat adjustments changed while preparing the PLY.");
+    }
     const currentTiltDigest = state.tilt.verifiedRevision === currentTiltRevision()
       ? state.tilt.verifiedPlyDigest
       : "";
@@ -16827,9 +22364,10 @@ function hashParams(params = state.params) {
 function previewInvariantSnapshot() {
   if (!state.params) return null;
   const metrics = state.metrics;
-  const paramsHash = hashParams();
+  const hashEnabled = previewInvariantHashEnabled();
+  const paramsHash = hashEnabled ? hashParams() : null;
   const plySignature = new TextEncoder().encode([
-    paramsHash,
+    paramsHash ?? "deferred",
     state.params.count,
     state.image?.width || 0,
     state.image?.height || 0,
@@ -16840,9 +22378,12 @@ function previewInvariantSnapshot() {
   return {
     params_hash: paramsHash,
     ply_hash: hashBytes(plySignature),
+    hash_mode: hashEnabled ? "full-qa" : "revision-only",
     splats: state.params.count,
     steps: metrics?.steps_done ?? 0,
+    params_revision: metrics?.params_revision ?? 0,
     l1: metrics?.final_l1 ?? null,
+    psnr: metrics?.final_psnr ?? null,
     global_ssim: metrics?.final_global_ssim ?? null,
     windowed_ssim: metrics?.final_windowed_ssim ?? null,
     regional_p10: metrics?.final_regional_ssim?.p10 ?? null,
@@ -16865,7 +22406,8 @@ async function runPreviewRefreshLoop() {
         rendered = true;
         break;
       }
-      if (!state.image || !state.params || !state.webgpu.renderer) {
+      const renderer = state.webgpu.renderer;
+      if (!state.image || !state.params || !renderer || renderer.deviceLost) {
         state.previewPadding = previewPaddingSpec(state.image, state.params, false);
         state.previewAppliedAlphaBackground = "";
         state.previewAppliedRevision = requestedRevision;
@@ -16875,14 +22417,23 @@ async function runPreviewRefreshLoop() {
       const generation = state.previewGeneration;
       const image = state.image;
       const params = state.params;
+      const displayParams = params;
       const before = previewInvariantSnapshot();
-      const buffers = state.webgpu.renderer.currentTrainBuffers(params);
-      const alphaOptions = document.documentElement.dataset.activeDetailTab === "splats" && state.previewMode === "splats"
-        ? splatAlphaRenderOptions()
-        : undefined;
-      const appliedAlphaBackground = alphaOptions ? els.splatAlphaBackground.value.toLowerCase() : "";
-      await state.webgpu.renderer.render(image, params, buffers, null, alphaOptions);
-      if (generation !== state.previewGeneration || state.running || image !== state.image || params !== state.params) {
+      const buffers = renderer.currentTrainBuffers(params) || renderer.currentResultBuffers(params);
+      const splatOptionsActive =
+        document.documentElement.dataset.activeDetailTab === "splats" &&
+        state.previewMode === "splats";
+      const alphaOptions = splatOptionsActive ? splatAlphaRenderOptions() : {};
+      const appliedAlphaBackground = splatOptionsActive ? els.splatAlphaBackground.value.toLowerCase() : "";
+      await renderer.render(image, displayParams, buffers, null, alphaOptions);
+      if (
+        generation !== state.previewGeneration ||
+        renderer !== state.webgpu.renderer ||
+        renderer.deviceLost ||
+        state.running ||
+        image !== state.image ||
+        params !== state.params
+      ) {
         continue;
       }
 
@@ -16947,6 +22498,7 @@ els.dropZone.addEventListener("dragleave", () => els.dropZone.classList.remove("
 els.dropZone.addEventListener("drop", async (event) => {
   event.preventDefault();
   els.dropZone.classList.remove("dragover");
+  if (trainingLifecycleInputLocked()) return;
   try {
     state.lastInputMode = "drop";
     await loadFile(event.dataTransfer.files[0]);
@@ -16958,26 +22510,36 @@ els.dropZone.addEventListener("drop", async (event) => {
 });
 
 els.fileInput.addEventListener("change", async () => {
+  const file = els.fileInput.files[0];
+  if (!file) return;
+  if (trainingLifecycleInputLocked()) {
+    els.fileInput.value = "";
+    return;
+  }
   try {
     state.lastInputMode = "file";
-    await loadFile(els.fileInput.files[0]);
-    eventLog(`loaded image from file picker: ${els.fileInput.files[0]?.name || "unknown"}`);
+    await loadFile(file);
+    eventLog(`loaded image from file picker: ${file.name || "unknown"}`);
   } catch (error) {
     setStatus("error");
     setTrainingMessage(`Image load failed: ${error.message}`, "error");
     log(error.message);
     eventLog(error.message);
+  } finally {
+    // A file input does not fire change when the same path stays selected.
+    // Clearing it makes retrying the same image reliable after success or error.
+    els.fileInput.value = "";
   }
 });
 
 els.loadImageButton.addEventListener("click", () => {
-  if (!state.running) els.fileInput.click();
+  if (!trainingLifecycleInputLocked()) els.fileInput.click();
 });
 
 els.clearImageButton.addEventListener("click", confirmClearImage);
 
 els.sampleButton.addEventListener("click", async () => {
-  if (state.running || state.sampleLoading) return;
+  if (trainingLifecycleInputLocked() || state.sampleLoading) return;
   state.lastInputMode = "sample";
   state.sampleLoading = true;
   els.sampleButton.disabled = true;
@@ -17008,6 +22570,7 @@ els.outsidePreviewToggle.addEventListener("change", () => {
   });
 });
 els.pathButton.addEventListener("click", () => {
+  if (trainingLifecycleInputLocked()) return;
   loadPathImage().catch((error) => {
     setStatus("error");
     setTrainingMessage(`Image load failed: ${error.message}`, "error");
@@ -17022,6 +22585,7 @@ els.finalSplatCount.addEventListener("input", () => {
   updateMemoryRecommendation({ reconcileSplatCounts: false });
 });
 els.adaptiveGridInitializationFraction.addEventListener("input", publishState);
+els.liveQualityMetrics.addEventListener("change", publishState);
 const commitFinalSplatCount = () => {
   updateMemoryRecommendation();
 };
@@ -17041,6 +22605,74 @@ els.trainLayerOrder.addEventListener("change", () => {
   syncLayerOrderDependency();
   publishState();
 });
+els.layerAwareAccumulation.addEventListener("change", () => {
+  syncLayerOrderDependency();
+  publishState();
+});
+els.pruneLowContributionDeepSplats.addEventListener("change", () => {
+  syncLayerOrderDependency();
+  publishState();
+});
+els.deepPruneInterval.addEventListener("change", () => {
+  els.deepPruneInterval.value = String(discreteLayerSettings().deepPruneInterval);
+  publishState();
+});
+els.hiddenRgbRecolor.addEventListener("change", () => {
+  syncLayerOrderDependency();
+  publishState();
+});
+els.hiddenRgbRecolorInterval.addEventListener("change", () => {
+  els.hiddenRgbRecolorInterval.value = String(hiddenRgbRecolorSettings().interval);
+  publishState();
+});
+els.hiddenRgbRecolorFraction.addEventListener("change", () => {
+  els.hiddenRgbRecolorFraction.value = String(hiddenRgbRecolorSettings().fraction * 100);
+  publishState();
+});
+els.hiddenRgbRecolorStrength.addEventListener("change", () => {
+  els.hiddenRgbRecolorStrength.value = String(hiddenRgbRecolorSettings().strength * 100);
+  publishState();
+});
+els.opaquePaintOpacity.addEventListener("change", () => {
+  els.opaquePaintOpacity.value = String(selectedOpaquePaintOpacity());
+  publishState();
+});
+els.layeredBrushOpacity.addEventListener("change", () => {
+  els.layeredBrushOpacity.value = String(selectedLayeredBrushOpacity());
+  publishState();
+});
+els.rectangleTopRatio.addEventListener("change", () => {
+  const minimum = selectedRectangleTopRatio();
+  els.rectangleTopRatio.value = String(minimum);
+  els.rectangleTopRatioMax.value = String(selectedRectangleTopRatioMax(minimum));
+  publishState();
+});
+els.rectangleTopRatioMax.addEventListener("change", () => {
+  els.rectangleTopRatioMax.value =
+    String(selectedRectangleTopRatioMax(selectedRectangleTopRatio()));
+  publishState();
+});
+for (const control of [
+  els.rectanglePreserveArea,
+  els.rectangleEdgeDirectedTaper,
+  els.rectangleStructureAwareRatio,
+  els.rectangleAsymmetricSoftness,
+]) {
+  control.addEventListener("change", publishState);
+}
+els.discreteLayers.addEventListener("change", () => {
+  syncLayerOrderDependency();
+  publishState();
+});
+els.discreteLayerCount.addEventListener("change", () => {
+  els.discreteLayerCount.value = String(discreteLayerSettings().count);
+  els.discreteLayerMoveRadius.value = String(discreteLayerSettings().moveRadius);
+  publishState();
+});
+els.discreteLayerMoveRadius.addEventListener("change", () => {
+  els.discreteLayerMoveRadius.value = String(discreteLayerSettings().moveRadius);
+  publishState();
+});
 els.layerUpdateInterval.addEventListener("input", publishState);
 els.p1BaseScaleFloorRatio.addEventListener("input", publishState);
 els.p2BaseScaleFloorRatio.addEventListener("input", publishState);
@@ -17053,7 +22685,10 @@ for (const element of [els.virtualCameraMaxAngle, els.virtualCameraCount, els.vi
     publishState();
   });
 }
-els.stageAwareGrowth.addEventListener("change", publishState);
+els.stageAwareGrowth.addEventListener("change", () => {
+  syncAlgorithmRequirements();
+  publishState();
+});
 for (const element of [els.stageGrowthP1, els.stageGrowthP2, els.stageGrowthP3]) {
   element.addEventListener("input", publishState);
 }
@@ -17062,11 +22697,14 @@ els.densifyInterval.addEventListener("input", publishState);
 els.growthPercentage.addEventListener("input", publishState);
 els.growthSignalThreshold.addEventListener("input", publishState);
 els.retryWebGpuButton.addEventListener("click", async () => {
-  if (state.running || state.webgpu.supported) return;
+  if (trainingLifecycleInputLocked() || state.webgpu.supported) return;
+  state.webgpu = { supported: false, renderer: null, reason: "checking", limits: null, adapterInfo: null };
+  els.backendText.textContent = "checking";
+  setStatus("checking gpu");
   els.retryWebGpuButton.disabled = true;
   try {
-    state.webgpu.renderer?.disposeTrainState();
-    await detectWebGpu();
+    const available = await detectWebGpu();
+    setStatus(available ? (state.image ? "image loaded" : "idle") : "gpu unavailable");
   } finally {
     publishState();
   }
@@ -17081,14 +22719,20 @@ els.startButton.addEventListener("click", () => {
 });
 els.algorithmSelect.addEventListener("change", () => {
   const algorithm = selectedAlgorithm();
-  if (!els.tiltCanvas.hidden) {
+  els.stageAwareGrowth.checked = stageAwareGrowthDefaultForAlgorithm(algorithm);
+  const resultAlgorithm = trainedResultAlgorithm();
+  const tiltAvailable = resultAlgorithm
+    ? Boolean(resultAlgorithm.capabilities.virtualCameras)
+    : Boolean(algorithm.capabilities.virtualCameras);
+  if (!tiltAvailable && !els.tiltCanvas.hidden) {
     restorePrimaryCanvas();
     destroyTiltViewer();
   }
-  if (!algorithm.capabilities.tilt && document.documentElement.dataset.activeDetailTab === "tilt") {
+  if (!tiltAvailable && document.documentElement.dataset.activeDetailTab === "tilt") {
     activateDetailTab("training");
   }
   document.documentElement.dataset.algorithm = algorithm.id;
+  syncLayerOrderDependency();
   syncVirtualCameraDependency();
   updateTiltControlState();
   updateExportPanel();
@@ -17114,7 +22758,11 @@ function activateDetailTab(name) {
     tilt: [els.tiltTab, els.tiltPanel],
   };
   if (state.running && (name === "splats" || name === "export")) name = "training";
-  if (name === "tilt" && !algorithmUsesVirtualCameras()) name = "training";
+  const resultAlgorithm = trainedResultAlgorithm();
+  const tiltAvailable = resultAlgorithm
+    ? Boolean(resultAlgorithm.capabilities.virtualCameras)
+    : algorithmUsesVirtualCameras();
+  if (name === "tilt" && !tiltAvailable) name = "training";
   if (name !== "tilt" && !els.tiltCanvas.hidden) {
     restorePrimaryCanvas();
     destroyTiltViewer();
@@ -17123,7 +22771,9 @@ function activateDetailTab(name) {
     const active = key === name;
     tab.classList.toggle("active", active);
     tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
     panel.classList.toggle("active", active);
+    panel.hidden = !active;
   }
   document.documentElement.dataset.activeDetailTab = name;
 }
@@ -17153,6 +22803,26 @@ els.tiltTab.addEventListener("click", () => {
     log(error.message);
     eventLog(error.message);
   });
+});
+els.logTabs.addEventListener("keydown", (event) => {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  const tabs = [
+    els.trainingLogTab,
+    els.splatsTab,
+    els.exportTab,
+    els.eventLogTab,
+    els.tiltTab,
+  ].filter((tab) => !tab.disabled);
+  if (!tabs.length) return;
+  const current = tabs.indexOf(event.target.closest('[role="tab"]'));
+  if (current < 0) return;
+  let next = current;
+  if (event.key === "Home") next = 0;
+  else if (event.key === "End") next = tabs.length - 1;
+  else next = (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+  event.preventDefault();
+  tabs[next].click();
+  tabs[next].focus();
 });
 for (const control of [els.tiltPitch, els.tiltYaw]) {
   control.addEventListener("input", applyTiltInputs);
@@ -17201,6 +22871,7 @@ for (const control of [
   els.splatAspectRatio,
 ]) {
   control.addEventListener("input", () => queueSplatAdjustments());
+  control.addEventListener("change", () => queueSplatAdjustments({ immediate: true }));
 }
 els.splatParameterEffects.addEventListener("change", () => {
   renderSplatInspector();
@@ -17208,11 +22879,8 @@ els.splatParameterEffects.addEventListener("change", () => {
 });
 els.splatShapeGaussian.addEventListener("click", () => setSplatPreviewShape("gaussian"));
 els.splatShapeRectangle.addEventListener("click", () => setSplatPreviewShape("rectangle"));
+els.splatShapeOpaqueBrush.addEventListener("click", () => setSplatPreviewShape("opaque-brush"));
 els.splatAlphaBackground.addEventListener("input", () => {
-  refreshOutsidePreview().catch((error) => log(error.message));
-});
-els.splatKernelFalloff.addEventListener("input", () => {
-  updateSplatAdjustmentLabels();
   refreshOutsidePreview().catch((error) => log(error.message));
 });
 els.splatSmallFirstOrder.addEventListener("change", () => {
@@ -17391,18 +23059,29 @@ if (QA_RUNTIME_ENABLED && new URLSearchParams(location.search).has("qa")) {
       qaObliqueButton.disabled = false;
     }
   });
-  document.body.append(qaMetricsData, qaMetricsButton, qaObliqueButton);
+  const qaDeviceLossButton = document.createElement("button");
+  qaDeviceLossButton.id = "qaDeviceLossButton";
+  qaDeviceLossButton.dataset.testid = "qa-device-loss-button";
+  qaDeviceLossButton.type = "button";
+  qaDeviceLossButton.textContent = "QA Device Loss";
+  qaDeviceLossButton.style.cssText =
+    "position:fixed;left:216px;bottom:80px;z-index:20;width:110px;height:30px;font-size:12px;opacity:0.35;";
+  qaDeviceLossButton.addEventListener("click", () => {
+    if (!state.webgpu.renderer?.device) return;
+    state.webgpu.renderer.device.destroy();
+  });
+  document.body.append(qaMetricsData, qaMetricsButton, qaObliqueButton, qaDeviceLossButton);
 }
 
 // Compatibility aliases exist only for local QA scripts and checkpoints.
 if (QA_RUNTIME_ENABLED) window.__flatPhoto3dgs = window.__image2SplatPaint;
 
 detectWebGpu()
-  .then(() => setStatus("idle"))
+  .then((available) => setStatus(available ? "idle" : "gpu unavailable"))
   .catch((error) => {
     state.webgpu = { supported: false, renderer: null, reason: error.message, limits: null, adapterInfo: null };
     els.backendText.textContent = "webgpu unavailable";
-    setStatus("idle");
+    setStatus("gpu unavailable");
     log(`webgpu check failed: ${error.message}`);
   })
   .finally(() => {
@@ -17420,6 +23099,8 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
   optimizerFootprintHistogram,
   phase39ContractProbe,
   layerOrderComparatorProbe,
+  layerEfficiencyVariants,
+  summarizeLayerEfficiency,
   planarTiltRotation,
   projectPlanarPoint,
   inverseProjectPlanarPoint,
@@ -17442,8 +23123,28 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
   },
   clearImage,
   getState() {
+    const requestedDiscreteLayers = Math.max(
+      MIN_DISCRETE_LAYER_COUNT,
+      Math.min(MAX_DISCRETE_LAYER_COUNT, Math.round(state.params?.discreteLayerCount || DEFAULT_DISCRETE_LAYER_COUNT)),
+    );
+    const discreteDepthValues = state.params?.depthOrder
+      ? [...new Set(Array.from(state.params.depthOrder, (value) => Math.min(
+          requestedDiscreteLayers - 1,
+          Math.floor(Math.max(0, Math.min(1 - Number.EPSILON, value)) * requestedDiscreteLayers),
+        )))].sort((a, b) => a - b)
+      : [];
     return {
-      image: state.image ? { width: state.image.width, height: state.image.height, fileName: state.image.fileName } : null,
+      image: state.image ? {
+        width: state.image.width,
+        height: state.image.height,
+        originalWidth: state.image.originalWidth,
+        originalHeight: state.image.originalHeight,
+        cacheWidth: state.image.cacheWidth,
+        cacheHeight: state.image.cacheHeight,
+        inputCacheMaxSide: state.image.inputCacheMaxSide,
+        inputCacheResized: state.image.inputCacheResized,
+        fileName: state.image.fileName,
+      } : null,
       running: state.running,
       stopRequested: state.stopRequested,
       metrics: state.metrics,
@@ -17464,10 +23165,29 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
       tileCullingEnabled: Boolean(els.tileCullingToggle.checked),
       opacityAwareSupport: performanceVariants().opacityAwareSupportMode,
       adaptiveGpuThroughput: performanceVariants().adaptiveGpuThroughput,
+      adaptiveGpuBatch: performanceVariants().adaptiveGpuBatch,
       gpuSchedulingMode: performanceVariants().gpuSchedulingMode,
       asyncPresentation: performanceVariants().asyncPresentation,
       metricTileReuse: performanceVariants().metricTileReuse,
+      segmentedExactBackward: performanceVariants().segmentedExactBackward,
+      fixedPointExactGradient: performanceVariants().fixedPointExactGradient,
+      inverseScaleOptimization: performanceVariants().inverseScaleOptimization,
       stageGrowthShares: phase39Variants().stageGrowthShares,
+      discreteLayers: {
+        enabled: Boolean(state.params?.discreteLayersEnabled),
+        layerAwareAccumulation: Boolean(state.params?.layerAwareAccumulationEnabled),
+        pruneLowContributionDeepSplats: Boolean(state.params?.pruneLowContributionDeepSplatsEnabled),
+        deepPruneInterval: Number(state.params?.deepPruneInterval || DEFAULT_DEEP_PRUNE_INTERVAL),
+        requested: Number(state.params?.discreteLayerCount || 0),
+        moveRadius: Number(state.params?.discreteLayerMoveRadius || 0),
+        occupied: discreteDepthValues.length,
+        values: discreteDepthValues,
+      },
+      hiddenRgbRecolor: {
+        ...hiddenRgbRecolorSettings(),
+        events: state.metrics?.hidden_rgb_recolor_events?.length || 0,
+        recolored: state.metrics?.hidden_rgb_recolor_count_total || 0,
+      },
       loss: els.lossText.textContent,
       step: els.stepText.textContent,
       previewRefresh: els.previewRefresh.value,
@@ -17478,6 +23198,11 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
       gpuMemory: { ...state.gpuMemory },
       tileCounters: state.metrics?.tile_counters ? { ...state.metrics.tile_counters } : null,
     };
+  },
+  forceDeviceLoss() {
+    if (!state.webgpu.renderer?.device) return false;
+    state.webgpu.renderer.device.destroy();
+    return true;
   },
   capacityCandidates: capacityProbeCandidates,
   capacityPlan(capacity) {
@@ -17493,6 +23218,22 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
   resizeCapProbe(width, height, maxSide = DEFAULT_MAX_SIDE) {
     const [resizedWidth, resizedHeight] = resizedSize(width, height, maxSide);
     return { width: resizedWidth, height: resizedHeight, maxSide };
+  },
+  inputCacheProbe(width, height) {
+    const [cacheWidth, cacheHeight] = resizedSize(
+      width,
+      height,
+      INPUT_CACHE_MAX_SIDE,
+      INPUT_CACHE_MAX_SIDE,
+    );
+    return {
+      sourceWidth: width,
+      sourceHeight: height,
+      cacheWidth,
+      cacheHeight,
+      maxSide: INPUT_CACHE_MAX_SIDE,
+      resized: cacheWidth !== width || cacheHeight !== height,
+    };
   },
   async exportCurrent(format = "ply", download = false) {
     if (!EXPORT_FORMATS[format]) throw new Error(`Unknown export format: ${format}`);
@@ -17552,6 +23293,7 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
         initialization_adaptive: m.initialization_adaptive || null,
       },
       quality: {
+        psnr_rgb_db: m.final_psnr,
         global_ssim: m.final_global_ssim,
         local_ssim_p10: m.final_regional_ssim?.p10 ?? null,
         l1: m.final_l1,
@@ -17622,9 +23364,17 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
       }
     }
     return {
+      algorithm: m.algorithm,
+      algorithm_label: m.algorithm_label,
       initial_orientation: m.initial_orientation,
       initial_l1: m.initial_l1,
       final_l1: m.final_l1,
+      initial_rgb_mse: m.initial_rgb_mse,
+      final_rgb_mse: m.final_rgb_mse,
+      initial_psnr: m.initial_psnr,
+      final_psnr: m.final_psnr,
+      psnr_trend: m.psnr_trend,
+      quality_metric_contract: m.quality_metric_contract,
       initial_alpha_l1: m.initial_alpha_l1,
       final_alpha_l1: m.final_alpha_l1,
       initial_alpha_ssim: m.initial_alpha_ssim,
@@ -17675,6 +23425,11 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
       detail_anisotropy_max: m.detail_anisotropy_max,
       surface_anisotropy_max: m.surface_anisotropy_max,
       thin_line_metrics: m.thin_line_metrics,
+      finalization_wall_ms: m.finalization_wall_ms,
+      final_diagnostic_sample_limit: m.final_diagnostic_sample_limit,
+      final_parameter_hash: m.final_parameter_hash ?? null,
+      training_evaluation: m.training_evaluation ? structuredClone(m.training_evaluation) : null,
+      training_residual_map: m.training_residual_map ? structuredClone(m.training_residual_map) : null,
       param_delta: m.param_delta,
       fusion_events: m.fusion_events,
       refine_events: m.fusion_refine_events,
@@ -17741,6 +23496,22 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
       layer_update_last_step: m.layer_update_last_step,
       layer_telemetry_enabled: Boolean(m.layer_telemetry_enabled),
       layer_telemetry: m.layer_telemetry || [],
+      layer_efficiency: m.layer_efficiency ? structuredClone(m.layer_efficiency) : null,
+      brush_detail_v1: m.brush_detail_v1
+        ? structuredClone(m.brush_detail_v1)
+        : null,
+      result_render_cache: m.result_render_cache
+        ? structuredClone(m.result_render_cache)
+        : null,
+      deep_layer_prune: m.deep_layer_prune ? structuredClone(m.deep_layer_prune) : null,
+      deep_layer_prune_events: m.deep_layer_prune_events ? structuredClone(m.deep_layer_prune_events) : [],
+      deep_layer_prune_removed_total: m.deep_layer_prune_removed_total || 0,
+      hidden_rgb_recolor: m.hidden_rgb_recolor ? structuredClone(m.hidden_rgb_recolor) : null,
+      hidden_rgb_recolor_events: m.hidden_rgb_recolor_events ? structuredClone(m.hidden_rgb_recolor_events) : [],
+      hidden_rgb_recolor_count_total: m.hidden_rgb_recolor_count_total || 0,
+      hidden_rgb_recolor_settings: m.hidden_rgb_recolor_settings
+        ? structuredClone(m.hidden_rgb_recolor_settings)
+        : null,
       layer_order_delta: m.param_delta?.layerOrder ?? null,
       tile_counters: m.tile_counters || null,
       tile_retry_steps: m.tile_retry_steps || 0,
@@ -17892,6 +23663,8 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
   async exportBlockedCoverageProbe() {
     const originalMetrics = state.metrics;
     const originalMessage = state.exportMessage;
+    const originalExportReady = state.exportReady;
+    const formatKey = algorithmSupportsExport("ply") ? "ply" : "png";
     const parity = {
       exact: true,
       display_equivalent: true,
@@ -17931,16 +23704,21 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
     try {
       for (const [name, metrics] of Object.entries(probes)) {
         state.metrics = metrics;
+        state.exportReady = true;
         try {
-          await saveExport({ download: false });
+          await saveExport({ download: false, formatKey });
           result[name] = { blocked: false, message: "export unexpectedly succeeded" };
         } catch (error) {
-          result[name] = { blocked: error.message.startsWith("Export blocked:"), message: error.message };
+          result[name] = {
+            blocked: /Export is not ready/.test(error.message),
+            message: error.message,
+          };
         }
       }
     } finally {
       state.metrics = originalMetrics;
       state.exportMessage = originalMessage;
+      state.exportReady = originalExportReady;
       updateExportPanel();
       publishState();
     }
