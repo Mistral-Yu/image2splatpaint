@@ -1,9 +1,13 @@
 name: Deploy GitHub Pages
 
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
   workflow_dispatch:
+
+permissions: {}
 
 concurrency:
   group: pages
@@ -22,36 +26,36 @@ jobs:
           persist-credentials: false
       - name: Configure Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
-      - name: Verify public JavaScript
+      - name: Verify release JavaScript
         run: |
-          for file in web/app.js web/sample-image-data.js web/tilt-camera.mjs web/tilt-viewer.mjs web/tilt-browser-entry.mjs web/tilt-viewer.bundle.js; do
+          for file in \
+            web/app.js \
+            web/sample-image-data.js \
+            web/tilt-camera.mjs \
+            web/tilt-browser-entry.mjs \
+            web/tilt-viewer.mjs \
+            web/tilt-viewer.bundle.js
+          do
             node --check "$file"
           done
       - name: Prepare static artifact
         run: |
+          set -euo pipefail
           rm -rf _site
-          mkdir -p _site/web/vendor _site/assets/source-images
-          cp index.html LICENSE THIRD_PARTY_NOTICES.md _site/
-          cp web/index.html web/app.js web/sample-image-data.js web/styles.css web/tilt-viewer.bundle.js _site/web/
-          cp web/vendor/PLAYCANVAS-LICENSE.txt web/vendor/playcanvas-2.20.6.min.mjs _site/web/vendor/
-          cp assets/source-images/README.md assets/source-images/ramen-photo.jpg assets/source-images/generated-geometric-sample.jpg _site/assets/source-images/
-          touch _site/.nojekyll
-      - name: Verify static artifact
-        run: |
-          test -s _site/index.html
-          test -s _site/web/index.html
-          test -s _site/web/app.js
-          test -s _site/web/tilt-viewer.bundle.js
-          test -s _site/assets/source-images/generated-geometric-sample.jpg
-          test -s _site/LICENSE
-          test -s _site/THIRD_PARTY_NOTICES.md
-          test ! -e _site/scripts
+          mkdir -p _site/web _site/web/vendor _site/assets/source-images
+          cp -f .nojekyll LICENSE THIRD_PARTY_NOTICES.md index.html _site/
+          cp -f web/index.html web/app.js web/styles.css web/sample-image-data.js web/tilt-viewer.bundle.js _site/web/
+          cp -f web/vendor/PLAYCANVAS-LICENSE.txt _site/web/vendor/
+          cp -f assets/source-images/README.md assets/source-images/ramen-photo.jpg assets/source-images/generated-geometric-sample.jpg _site/assets/source-images/
+      - name: Verify release gate
+        run: node verify-release.mjs _site
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: _site
 
   deploy:
+    if: github.event_name != 'pull_request'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

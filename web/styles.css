@@ -5,8 +5,10 @@
   --ink: #17202c;
   --muted: #657386;
   --line: #d9e0ea;
+  --line-strong: #b8c3d1;
   --accent: #1769e0;
   --accent-dark: #0f4fa8;
+  --accent-soft: #e8f1ff;
   --ok: #0c8f57;
   --warn: #ab6b00;
   --danger: #b42318;
@@ -212,6 +214,54 @@ canvas[hidden] {
   font-size: 22px;
 }
 
+.drop-zone-privacy {
+  max-width: 360px;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.drop-zone-file-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  justify-self: center;
+  min-height: 36px;
+  padding: 6px 16px;
+  border: 1px solid #8395ac;
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 750;
+  line-height: 1.2;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(23, 32, 44, 0.08);
+}
+
+.drop-zone-file-button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.drop-zone-file-button:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.drop-zone-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .drop-zone.ready {
   display: none;
 }
@@ -229,6 +279,7 @@ canvas[hidden] {
 }
 
 .progress div {
+  grid-column: span 1;
   min-width: 0;
   overflow: hidden;
   padding: 6px 8px;
@@ -313,7 +364,10 @@ label {
 .preview-mode,
 .training-grid,
 .actions,
+.webgpu-notice,
 .lr-panel,
+.rectangle-paint-panel,
+.opaque-paint-panel,
 .virtual-camera-panel,
 .capacity-control,
 .budget-panel {
@@ -482,6 +536,7 @@ select {
 
 .budget-panel,
 .lr-panel,
+.opaque-paint-settings,
 .virtual-camera-settings {
   padding: 8px;
   border: 1px solid var(--line);
@@ -491,6 +546,7 @@ select {
 
 .budget-panel summary,
 .lr-panel summary,
+.opaque-paint-settings summary,
 .virtual-camera-settings summary {
   cursor: pointer;
   color: var(--ink);
@@ -501,6 +557,7 @@ select {
 
 .budget-body,
 .lr-body,
+.opaque-paint-body,
 .virtual-camera-body {
   display: grid;
   gap: 6px;
@@ -515,6 +572,30 @@ select {
 .virtual-camera-panel {
   display: grid;
   gap: 6px;
+}
+
+.opaque-paint-panel {
+  display: grid;
+  gap: 6px;
+}
+
+.rectangle-paint-panel {
+  display: grid;
+  gap: 6px;
+}
+
+.rectangle-paint-panel > details,
+.opaque-paint-panel > details {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.opaque-paint-body [hidden] {
+  display: none;
+}
+
+.opaque-paint-body {
+  gap: 10px;
 }
 
 .virtual-camera-toggle {
@@ -532,6 +613,24 @@ select {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 6px;
+}
+
+.rectangle-edge-ratio-row {
+  display: grid;
+  grid-template-columns: minmax(104px, 1.2fr) repeat(2, minmax(72px, 0.9fr));
+  gap: 6px;
+  align-items: end;
+}
+
+.rectangle-edge-ratio-heading {
+  align-self: center;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.rectangle-edge-ratio-row label {
+  min-width: 0;
 }
 
 .inline-option {
@@ -557,23 +656,43 @@ select {
   line-height: 1.3;
 }
 
-.experimental-performance-options {
+.lr-section {
   display: grid;
   gap: 6px;
-  margin-top: 2px;
-  padding: 8px 0;
+  padding: 10px 0 4px;
   border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
 }
 
-.experimental-performance-options strong {
+.lr-section:first-child {
+  padding-top: 4px;
+  border-top: 0;
+}
+
+.lr-section-heading {
   color: var(--ink);
-  font-size: 12px;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
 }
 
-.experimental-performance-options small {
-  color: var(--muted);
-  line-height: 1.3;
+.layer-toggle-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px 10px;
+}
+
+.layer-toggle-grid .inline-option {
+  min-width: 0;
+  align-items: flex-start;
+  line-height: 1.25;
+}
+
+.layer-toggle-grid .inline-option input {
+  margin-top: 2px;
+}
+
+.experimental-performance-options {
+  padding-bottom: 0;
 }
 
 .panel-title {
@@ -637,6 +756,33 @@ select {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
+}
+
+.webgpu-notice {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #e2b85c;
+  border-radius: 6px;
+  background: #fff8e8;
+  color: #6f4700;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.webgpu-notice[hidden] {
+  display: none;
+}
+
+.webgpu-notice button {
+  min-height: 30px;
+  border-color: #c99321;
+  background: #ffffff;
+  color: #6f4700;
+  font-size: 11px;
+  font-weight: 800;
 }
 
 button {
@@ -905,9 +1051,8 @@ button:disabled {
 
 .splat-shape-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: 1fr;
   gap: 8px;
-  align-items: center;
   margin: 10px 0 14px;
   color: var(--muted);
   font-size: 11px;
@@ -918,22 +1063,22 @@ button:disabled {
 .splat-shape-options {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  width: min(210px, 100%);
+  width: 100%;
+  gap: 5px;
 }
 
 .splat-shape-options button {
-  min-height: 30px;
-  padding: 4px 10px;
-  border-radius: 0;
-}
-
-.splat-shape-options button:first-child {
-  border-radius: 5px 0 0 5px;
+  min-width: 0;
+  min-height: 36px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  line-height: 1.15;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .splat-shape-options button:last-child {
-  margin-left: -1px;
-  border-radius: 0 5px 5px 0;
+  grid-column: 1 / -1;
 }
 
 .splat-shape-options button.active {
@@ -1099,6 +1244,19 @@ button:disabled {
     grid-template-columns: repeat(5, minmax(0, 1fr));
   }
 
+  .progress div {
+    grid-column: span 1;
+  }
+
+  .progress div:nth-child(5),
+  .progress div:nth-child(10) {
+    border-right: 0;
+  }
+
+  .progress div:nth-child(n + 6) {
+    border-bottom: 0;
+  }
+
   .controls {
     grid-template-rows: auto 28px minmax(560px, auto) auto;
     overflow: visible;
@@ -1110,6 +1268,10 @@ button:disabled {
 }
 
 @media (max-width: 520px) {
+  .layer-toggle-grid {
+    grid-template-columns: 1fr;
+  }
+
   .progress {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
