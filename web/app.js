@@ -213,7 +213,8 @@ const LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL = 250;
 const LAYERED_OPAQUE_BRUSH_DEEP_FRACTION = 0.75;
 const LAYERED_OPAQUE_BRUSH_P2_PRUNE_FRACTION = 0.05;
 const LAYERED_OPAQUE_BRUSH_P3_PRUNE_FRACTION = 0.025;
-const LAYERED_OPAQUE_BRUSH_FINAL_PRUNE_FRACTION = 0.10;
+const OPAQUE_PAINT_LATE_SETTLE_FRACTION = 0.10;
+const MAX_OPAQUE_PAINT_LATE_SETTLE_FRACTION = 0.20;
 const MAX_FINAL_DIAGNOSTIC_SAMPLES = 16384;
 const MAX_THIN_LINE_DIAGNOSTIC_SAMPLES = 8192;
 const ALGORITHM_REGISTRY = Object.freeze({
@@ -1207,6 +1208,34 @@ function qaOverrides(name) {
     : {};
 }
 
+function opaquePaintLateSettleFraction() {
+  const overrides = qaOverrides("__image2SplatPaintLateSettle");
+  const query = new URLSearchParams(globalThis.location?.search || "");
+  const queryValue = Number(query.get("paint-settle-fraction"));
+  const requested = Number.isFinite(Number(overrides.fraction))
+    ? Number(overrides.fraction)
+    : QA_RUNTIME_ENABLED && query.has("paint-settle-fraction") && Number.isFinite(queryValue)
+      ? queryValue
+      : OPAQUE_PAINT_LATE_SETTLE_FRACTION;
+  return Math.max(0, Math.min(MAX_OPAQUE_PAINT_LATE_SETTLE_FRACTION, requested));
+}
+
+function opaquePaintLateSettleStartStep(steps, fraction = OPAQUE_PAINT_LATE_SETTLE_FRACTION) {
+  const total = Math.max(1, Math.round(Number(steps) || 1));
+  const boundedFraction = Math.max(0, Math.min(MAX_OPAQUE_PAINT_LATE_SETTLE_FRACTION, Number(fraction) || 0));
+  if (boundedFraction <= 0) return total + 1;
+  return Math.max(1, Math.floor(total * (1 - boundedFraction)) + 1);
+}
+
+function opaquePaintStructuralMutationAllowed(
+  step,
+  steps,
+  opaqueLayered,
+  fraction = OPAQUE_PAINT_LATE_SETTLE_FRACTION,
+) {
+  return !opaqueLayered || Math.round(step) < opaquePaintLateSettleStartStep(steps, fraction);
+}
+
 const sharedTiltOrbitRadiusCache = new Map();
 
 function sharedTiltOrbitRadius(
@@ -2104,6 +2133,8 @@ function discreteLayerSettings() {
       Math.min(MAX_DISCRETE_LAYER_COUNT, Math.round(Number.isFinite(rawCount) ? rawCount : DEFAULT_DISCRETE_LAYER_COUNT)),
     );
   return {
+    opaqueLayered,
+    opaquePaintSettleFraction: opaqueLayered ? opaquePaintLateSettleFraction() : 0,
     enabled: (opaqueLayered || requested) && Boolean(document.querySelector("#trainLayerOrder")?.checked) && !algorithmUsesVirtualCameras(),
     accumulationEnabled: (opaqueLayered || accumulationRequested) && Boolean(document.querySelector("#trainLayerOrder")?.checked) && !algorithmUsesVirtualCameras(),
     deepPruneEnabled:
@@ -2197,17 +2228,33 @@ function quantizeLayerOrder(order, layerCount) {
   return (layer + inLayerOrder * 0.999999) / count;
 }
 
-function layerOptimizationSettings(step, steps, stage, variants = phase46Variants()) {
+function layerOptimizationSettings(
+  step,
+  steps,
+  stage,
+  variants = phase46Variants(),
+  opaqueLayered = false,
+  settleFraction = OPAQUE_PAINT_LATE_SETTLE_FRACTION,
+) {
   const stageMultiplier = variants.stageAwareRate
     ? stage === "coarse" ? 1 : stage === "mid" ? 0.5 : 0.2
     : 1;
   const freezeStep = Math.round(steps * variants.freezeFraction);
-  const enabled = variants.freezeFraction > 0 && step <= freezeStep;
+  const scheduled = variants.freezeFraction > 0 && step <= freezeStep && step % variants.layerUpdateInterval === 0;
+  const settleAllowsMutation = opaquePaintStructuralMutationAllowed(
+    step,
+    steps,
+    opaqueLayered,
+    settleFraction,
+  );
+  const enabled = variants.freezeFraction > 0 && step <= freezeStep && settleAllowsMutation;
   return {
     interval: variants.layerUpdateInterval,
     rate: variants.layerUpdateRate * stageMultiplier,
     enabled,
     due: enabled && step % variants.layerUpdateInterval === 0,
+    scheduled,
+    suppressedByLateSettle: scheduled && !settleAllowsMutation,
   };
 }
 
@@ -6513,7 +6560,7 @@ function deepPruneStage(step, steps) {
   return "P3";
 }
 
-function deepPruneDue(step, steps, settings) {
+function deepPruneScheduled(step, steps, settings) {
   if (!settings?.deepPruneEnabled) return false;
   // A metric-display QA flag must not alter the learning event schedule.
   const interval = Math.max(
@@ -6523,6 +6570,15 @@ function deepPruneDue(step, steps, settings) {
   return step > experimentalCoarseSteps(steps) && (
     (step < steps && step % interval === 0) ||
     (step === steps && settings.finalDeepPrune)
+  );
+}
+
+function deepPruneDue(step, steps, settings) {
+  return deepPruneScheduled(step, steps, settings) && opaquePaintStructuralMutationAllowed(
+    step,
+    steps,
+    Boolean(settings?.opaqueLayered),
+    settings?.opaquePaintSettleFraction,
   );
 }
 
@@ -17059,6 +17115,8 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
       requestedSteps,
       trainingStage,
       state.metrics?.phase46_variants || phase46Variants(),
+      Boolean(params.opaqueLayered),
+      state.metrics?.opaque_paint_late_settle?.fraction,
     );
     const scheduledTiltStep = virtualTiltStepSpec(currentStep, trainingStage, requestedSteps);
     const requestedTiltStep = viewOverride === "front"
@@ -17372,6 +17430,12 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
         params.discreteLayersEnabled &&
         params.discreteLayerMoveRadius > 0 &&
         applyOptimizer &&
+        opaquePaintStructuralMutationAllowed(
+          currentStep,
+          requestedSteps,
+          Boolean(params.opaqueLayered),
+          state.metrics?.opaque_paint_late_settle?.fraction,
+        ) &&
         (
           (
             currentStep === requestedSteps &&
@@ -18657,6 +18721,12 @@ function plannedAdaptiveGpuBatch({
   const requested = Math.max(1, Math.min(MAX_TRAIN_BATCH_SIZE, Math.round(desiredSize) || 1));
   let count = 1;
   for (let candidate = step + 1; candidate <= steps && count < requested; candidate += 1) {
+    const paintMutationAllowed = opaquePaintStructuralMutationAllowed(
+      candidate,
+      steps,
+      Boolean(state.params?.opaqueLayered),
+      deepPruneSettings?.opaquePaintSettleFraction,
+    );
     const candidateStage = curriculumTrainingStage(
       candidate,
       steps,
@@ -18664,19 +18734,21 @@ function plannedAdaptiveGpuBatch({
       state.webgpu.renderer?.trainState?.coarseImage,
       state.webgpu.renderer?.trainState?.midImage,
     );
-    const densityDue =
+    const densityScheduled =
       growthSettings.densityEventsEnabled &&
       candidate > densifyWarmupSteps(densitySteps) &&
       candidate <= growthSteps &&
       (candidate % growthSettings.densifyInterval === 0 || candidate === growthSteps);
-    const brushSurfaceRecoveryDue =
+    const densityDue = paintMutationAllowed && densityScheduled;
+    const brushSurfaceRecoveryScheduled =
       normalizedKernelShape(state.params?.kernelShape) === "opaque-brush" &&
       illustrativeOilSurfaceRecoveryDue(
         candidate,
         steps,
         state.params?.deepPruneInterval || LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL,
       );
-    const relocationDue =
+    const brushSurfaceRecoveryDue = paintMutationAllowed && brushSurfaceRecoveryScheduled;
+    const relocationScheduled =
       growthSettings.densityEventsEnabled &&
       growthSettings.mcmcRelocationEnabled &&
       candidate > densifyWarmupSteps(densitySteps) &&
@@ -18685,17 +18757,32 @@ function plannedAdaptiveGpuBatch({
           candidate <= Math.floor(densitySteps * 0.85) &&
           candidate % EXPERIMENTAL_REFINE_EVERY === 0
         ) ||
-        brushSurfaceRecoveryDue
+        brushSurfaceRecoveryScheduled
       );
-    const layerDue = layerOptimizationSettings(
+    const relocationDue = paintMutationAllowed && relocationScheduled;
+    const layerSchedule = layerOptimizationSettings(
       candidate,
       steps,
       candidateStage,
       runLayerSettings,
-    ).due;
+      Boolean(state.params?.opaqueLayered),
+      deepPruneSettings?.opaquePaintSettleFraction,
+    );
+    const layerDue = layerSchedule.due;
+    const pruneScheduled = deepPruneScheduled(candidate, steps, deepPruneSettings);
     const pruneDue = deepPruneDue(candidate, steps, deepPruneSettings);
-    const recolorDue = hiddenRgbRecolorDue(candidate, steps, hiddenRgbSettings);
-    const paintOutlierFinalRepairDue = algorithmUsesPaintKernel() && candidate === steps;
+    const recolorScheduled = hiddenRgbRecolorDue(candidate, steps, hiddenRgbSettings);
+    const recolorDue = paintMutationAllowed && recolorScheduled;
+    const paintOutlierFinalRepairScheduled = algorithmUsesPaintKernel() && candidate === steps;
+    const paintOutlierFinalRepairDue = paintMutationAllowed && paintOutlierFinalRepairScheduled;
+    const suppressedPaintMutationScheduled = !paintMutationAllowed && (
+      densityScheduled ||
+      relocationScheduled ||
+      layerSchedule.scheduled ||
+      pruneScheduled ||
+      recolorScheduled ||
+      paintOutlierFinalRepairScheduled
+    );
     if (
       candidateStage !== startStage ||
       densityDue ||
@@ -18704,6 +18791,7 @@ function plannedAdaptiveGpuBatch({
       pruneDue ||
       recolorDue ||
       paintOutlierFinalRepairDue ||
+      suppressedPaintMutationScheduled ||
       performanceProfileLabels(candidate, steps).length > 0 ||
       virtualTiltStepSpec(candidate, candidateStage, steps).enabled
     ) break;
@@ -19205,11 +19293,9 @@ async function applyDeepPrune(step, steps, run = null) {
   const phase = deepPruneStage(step, steps);
   const opaqueLayered = Boolean(params.opaqueLayered);
   const eventPruneFraction = opaqueLayered
-    ? step === steps
-      ? LAYERED_OPAQUE_BRUSH_FINAL_PRUNE_FRACTION
-      : phase === "P2"
-        ? LAYERED_OPAQUE_BRUSH_P2_PRUNE_FRACTION
-        : LAYERED_OPAQUE_BRUSH_P3_PRUNE_FRACTION
+    ? phase === "P2"
+      ? LAYERED_OPAQUE_BRUSH_P2_PRUNE_FRACTION
+      : LAYERED_OPAQUE_BRUSH_P3_PRUNE_FRACTION
     : phase === "P2"
       ? layerEfficiencyVariants().deepPruneP2Fraction
       : layerEfficiencyVariants().deepPruneP3Fraction;
@@ -19229,7 +19315,7 @@ async function applyDeepPrune(step, steps, run = null) {
   report.step = step;
   report.interval = params.deepPruneInterval || DEFAULT_DEEP_PRUNE_INTERVAL;
   report.policy = opaqueLayered ? "opaque-hidden-layer-prune" : "standard-deep-prune";
-  report.final_sweep = opaqueLayered && step === steps;
+  report.final_sweep = false;
   report.metrics_before = null;
   report.metrics_evaluation = "deferred-to-final";
   if (!plan.applied) {
@@ -20382,6 +20468,33 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
     deep_layer_prune_events: [],
     deep_layer_prune_removed_total: 0,
     deep_layer_prune_interval: runDiscreteLayerSettings.deepPruneInterval,
+    opaque_paint_late_settle: {
+      enabled: Boolean(runDiscreteLayerSettings.opaqueLayered),
+      fraction: runDiscreteLayerSettings.opaquePaintSettleFraction,
+      start_step: runDiscreteLayerSettings.opaqueLayered
+        ? opaquePaintLateSettleStartStep(steps, runDiscreteLayerSettings.opaquePaintSettleFraction)
+        : null,
+      active: false,
+      entered_step: null,
+      count_at_start: null,
+      count_at_end: null,
+      count_stable: null,
+      suppressed_total: 0,
+      suppressed: {
+        growth: 0,
+        relocation: 0,
+        deep_prune: 0,
+        layer_update: 0,
+        discrete_layer: 0,
+        hidden_rgb_recolor: 0,
+        final_repair: 0,
+      },
+      suppressed_steps: [],
+      final_prune_suppressed: false,
+      final_paint_repair_suppressed: false,
+      continuous_optimizer_active: true,
+      final_metrics_active: true,
+    },
     hidden_rgb_recolor: null,
     hidden_rgb_recolor_events: [],
     hidden_rgb_recolor_count_total: 0,
@@ -20584,12 +20697,19 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         stageAwareGrowth: runStageAwareGrowth,
         stageGrowthShares: runStageGrowthShares,
       };
+      const paintMutationAllowedAtStep = opaquePaintStructuralMutationAllowed(
+        step,
+        steps,
+        Boolean(state.params?.opaqueLayered),
+        runDiscreteLayerSettings.opaquePaintSettleFraction,
+      );
       const densifyInterval = growthSettings.densifyInterval;
-      const densifyDue =
+      const densifyScheduledAtStep =
         growthSettings.densityEventsEnabled &&
         step > densifyWarmupSteps(densitySteps) &&
         step <= growthSteps &&
         (step % densifyInterval === 0 || step === growthSteps);
+      const densifyDue = paintMutationAllowedAtStep && densifyScheduledAtStep;
       const growthPlan = densifyDue
         ? growthSchedulePlan({
           step,
@@ -20697,14 +20817,15 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
           state.metrics.residual_destination_oracle = state.webgpu.renderer.residualDestinationOracleSummary();
         }
       }
-      const brushSurfaceRecoveryDueAtStep =
+      const brushSurfaceRecoveryScheduledAtStep =
         normalizedKernelShape(state.params?.kernelShape) === "opaque-brush" &&
         illustrativeOilSurfaceRecoveryDue(
           step,
           steps,
           state.params?.deepPruneInterval || LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL,
         );
-      const relocationDueAtStep =
+      const brushSurfaceRecoveryDueAtStep = paintMutationAllowedAtStep && brushSurfaceRecoveryScheduledAtStep;
+      const relocationScheduledAtStep =
         growthSettings.densityEventsEnabled &&
         growthSettings.mcmcRelocationEnabled &&
         gpuRelocationEnabled &&
@@ -20714,11 +20835,67 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
             step <= Math.floor(densitySteps * 0.85) &&
             step % EXPERIMENTAL_REFINE_EVERY === 0
           ) ||
-          brushSurfaceRecoveryDueAtStep
+          brushSurfaceRecoveryScheduledAtStep
         );
+      const relocationDueAtStep = paintMutationAllowedAtStep && relocationScheduledAtStep;
+      const deepPruneScheduledAtStep = deepPruneScheduled(step, steps, runDiscreteLayerSettings);
       const deepPruneDueAtStep = deepPruneDue(step, steps, runDiscreteLayerSettings);
-      const hiddenRgbRecolorDueAtStep = hiddenRgbRecolorDue(step, steps, runHiddenRgbRecolorSettings);
-      const paintOutlierFinalRepairDueAtStep = algorithmUsesPaintKernel() && step === steps;
+      const hiddenRgbRecolorScheduledAtStep = hiddenRgbRecolorDue(step, steps, runHiddenRgbRecolorSettings);
+      const hiddenRgbRecolorDueAtStep = paintMutationAllowedAtStep && hiddenRgbRecolorScheduledAtStep;
+      const paintOutlierFinalRepairScheduledAtStep = algorithmUsesPaintKernel() && step === steps;
+      const paintOutlierFinalRepairDueAtStep = paintMutationAllowedAtStep && paintOutlierFinalRepairScheduledAtStep;
+      const trainingStageAtStep = curriculumTrainingStage(
+        step,
+        steps,
+        phase33Variants(),
+        state.webgpu.renderer?.trainState?.coarseImage,
+        state.webgpu.renderer?.trainState?.midImage,
+      );
+      const layerScheduleAtStep = layerOptimizationSettings(
+        step,
+        steps,
+        trainingStageAtStep,
+        runLayerSettings,
+        Boolean(state.params?.opaqueLayered),
+        runDiscreteLayerSettings.opaquePaintSettleFraction,
+      );
+      const discreteLayerScheduledAtStep = Boolean(
+        state.params?.discreteLayersEnabled &&
+        state.params?.discreteLayerMoveRadius > 0 &&
+        step >= densitySteps &&
+        brushSurfaceRecoveryScheduledAtStep
+      );
+      const settleReport = state.metrics.opaque_paint_late_settle;
+      if (settleReport?.enabled && !paintMutationAllowedAtStep) {
+        if (!settleReport.active) {
+          settleReport.active = true;
+          settleReport.entered_step = step;
+          settleReport.count_at_start = state.params.count;
+        }
+        const suppressedAtStep = {
+          growth: densifyScheduledAtStep,
+          relocation: relocationScheduledAtStep,
+          deep_prune: deepPruneScheduledAtStep,
+          layer_update: layerScheduleAtStep.scheduled,
+          discrete_layer: discreteLayerScheduledAtStep,
+          hidden_rgb_recolor: hiddenRgbRecolorScheduledAtStep,
+          final_repair: paintOutlierFinalRepairScheduledAtStep,
+        };
+        const suppressedKinds = Object.entries(suppressedAtStep)
+          .filter(([, suppressed]) => suppressed)
+          .map(([kind]) => kind);
+        for (const kind of suppressedKinds) {
+          settleReport.suppressed[kind] += 1;
+          settleReport.suppressed_total += 1;
+        }
+        if (suppressedKinds.length > 0 && settleReport.suppressed_steps.length < 32) {
+          settleReport.suppressed_steps.push({ step, kinds: suppressedKinds });
+        }
+        if (step === steps && deepPruneScheduledAtStep) settleReport.final_prune_suppressed = true;
+        if (step === steps && paintOutlierFinalRepairScheduledAtStep) {
+          settleReport.final_paint_repair_suppressed = true;
+        }
+      }
       const structuralStep =
         densifyDue ||
         relocationDueAtStep ||
@@ -21018,6 +21195,16 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         }
       }
       recordTrainingTiming(step, performance.now() - stepWallStarted);
+    }
+    const lateSettleReport = state.metrics.opaque_paint_late_settle;
+    if (lateSettleReport?.enabled && lateSettleReport.active) {
+      lateSettleReport.count_at_end = state.params.count;
+      lateSettleReport.count_stable = lateSettleReport.count_at_start === state.params.count;
+      if (!lateSettleReport.count_stable) {
+        throw new Error(
+          `Opaque paint late-settle changed splat count: ${lateSettleReport.count_at_start} -> ${state.params.count}`,
+        );
+      }
     }
     if (!state.metrics.safety_stop) {
       const finalizationStarted = performance.now();
@@ -23493,6 +23680,11 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
   initialSplatShape,
   initialOrientationStats,
   rectangleConstraintProbe,
+  opaquePaintLateSettleFraction,
+  opaquePaintLateSettleStartStep,
+  opaquePaintStructuralMutationAllowed,
+  deepPruneScheduled,
+  deepPruneDue,
   sharedTiltOrbitRadius,
   optimizerFootprintHistogram,
   phase39ContractProbe,
@@ -23904,6 +24096,9 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
       deep_layer_prune: m.deep_layer_prune ? structuredClone(m.deep_layer_prune) : null,
       deep_layer_prune_events: m.deep_layer_prune_events ? structuredClone(m.deep_layer_prune_events) : [],
       deep_layer_prune_removed_total: m.deep_layer_prune_removed_total || 0,
+      opaque_paint_late_settle: m.opaque_paint_late_settle
+        ? structuredClone(m.opaque_paint_late_settle)
+        : null,
       hidden_rgb_recolor: m.hidden_rgb_recolor ? structuredClone(m.hidden_rgb_recolor) : null,
       hidden_rgb_recolor_events: m.hidden_rgb_recolor_events ? structuredClone(m.hidden_rgb_recolor_events) : [],
       hidden_rgb_recolor_count_total: m.hidden_rgb_recolor_count_total || 0,
