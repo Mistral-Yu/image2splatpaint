@@ -157,7 +157,7 @@
                   <select id="previewRefresh" data-testid="preview-refresh">
                     <option value="frame">Every frame</option>
                     <option value="10" selected>Every 10 iterations</option>
-                    <option value="metrics">Metrics only</option>
+                    <option value="final">Final preview only</option>
                   </select>
                 </label>
               </div>
@@ -275,12 +275,12 @@
                           <input id="opaquePaintOpacity" data-testid="opaque-paint-opacity" type="number" min="0.05" max="1" step="0.005" value="0.995" />
                         </label>
                         <div class="rectangle-edge-ratio-row field-wide" role="group" aria-labelledby="rectangleEdgeRatioHeading">
-                          <span id="rectangleEdgeRatioHeading" class="rectangle-edge-ratio-heading">Edge / long edge</span>
-                          <label title="Minimum parallel-edge width divided by the splat long edge. Applied at the next Train start.">
+                          <span id="rectangleEdgeRatioHeading" class="rectangle-edge-ratio-heading">Short edge / long edge</span>
+                          <label title="Minimum short-edge ratio in the deterministic Rectangle shape range. 0 allows triangle tips. Applied at the next Train start.">
                             Min
                             <input id="rectangleTopRatio" data-testid="rectangle-top-ratio" type="number" min="0" max="1" step="0.05" value="1" />
                           </label>
-                          <label title="Maximum parallel-edge width divided by the splat long edge. Must be at least the minimum. 1 preserves the current full-width edge. Applied at the next Train start.">
+                          <label title="Maximum short-edge ratio in the deterministic Rectangle shape range. 1 allows full rectangles. Must be at least the minimum. Applied at the next Train start.">
                             Max
                             <input id="rectangleTopRatioMax" data-testid="rectangle-top-ratio-max" type="number" min="0" max="1" step="0.05" value="1" />
                           </label>
@@ -293,7 +293,7 @@
                           <input id="rectangleEdgeDirectedTaper" data-testid="rectangle-edge-directed-taper" type="checkbox" checked />
                           Edge-directed taper
                         </label>
-                        <label class="inline-option field-wide" title="Keeps flat-region splats untapered at the maximum width while edge and detail splats use the selected minimum-to-maximum taper. Applied at the next Train start.">
+                        <label class="inline-option field-wide" title="Uses the selected maximum short-edge ratio in flat regions while edge and detail splats use the full Min-to-Max range. Applied at the next Train start.">
                           <input id="rectangleStructureAwareRatio" data-testid="rectangle-structure-aware-ratio" type="checkbox" />
                           Structure-aware ratio
                         </label>

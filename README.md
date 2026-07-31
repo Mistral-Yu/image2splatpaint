@@ -72,14 +72,15 @@ image replacement, or a new completed run.
 <details>
 <summary><strong>Advanced Rectangle and Brush behavior</strong></summary>
 
-`Rectangle Splats` exposes `Min` and `Max` values for `Edge / long edge`.
-`1 / 1` keeps the current rectangular kernel, `0 / 1` makes a triangle,
-equal nonzero values keep both parallel edges at the same width, and
-`0 <= Min <= Max <= 1` produces a deterministic trapezoid range. Optional
-Rectangle-only controls can preserve footprint area while tapering, point the
-narrow edge toward stronger local structure, keep flat-region splats
-rectangular, and use a harder narrow edge with a softer wide edge. `1 / 1`
-retains the existing Rectangle training path.
+`Rectangle Splats` exposes `Min` and `Max` values for
+`Short edge / long edge`. `1 / 1` keeps the current rectangular kernel.
+Lower values taper the short parallel edge while the opposite edge stays at
+full width: `0` allows triangle tips, and `0 <= Min <= Max <= 1` distributes a
+deterministic mix of triangles, trapezoids, and rectangles across the paint
+layers. Optional Rectangle-only controls can preserve each footprint area
+while tapering, point the narrow edge toward stronger local structure, prefer
+the selected Max ratio in flat regions, and use a harder narrow edge with a
+softer wide edge. `1 / 1` retains the existing Rectangle training path.
 
 `Rectangle Splats` uses a trainable minimum opacity floor. `Layered Opaque
 Brush` instead has its own fixed paint opacity and does not share that Rectangle
@@ -115,6 +116,12 @@ previous run's quality values.
 - PLY: available for the Gaussian algorithms. It uses standard SH0 Gaussian
   Splatting fields in aspect-preserving coordinates and stores the learned
   layer-order depth plus any enabled bounded virtual depth in `z`.
+
+These PLY files are learned from one image and prioritize its front view.
+Rotated views—especially from `Planar Gaussian`—will generally be less complete
+than conventional 3DGS trained from calibrated multi-view photos. Virtual
+Camera Sampling improves bounded tilt, but does not replace true multi-view
+geometry or view-dependent color.
 
 `Rectangle Splats` and `Layered Opaque Brush` use analytic non-Gaussian
 kernels, so their exact export is PNG and PLY is intentionally disabled.

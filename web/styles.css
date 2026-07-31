@@ -148,6 +148,10 @@ canvas {
   cursor: grabbing;
 }
 
+.viewer.canvas-view-locked canvas {
+  cursor: not-allowed;
+}
+
 .preview-image-frame {
   position: absolute;
   left: 50%;

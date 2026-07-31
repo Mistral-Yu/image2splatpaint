@@ -961,13 +961,24 @@ fn rectangle_effective_width_ratios(
 ) -> vec2<f32> {
   let minimumRatio = clamp(minimumRatioInput, 0.0, 1.0);
   let maximumRatio = clamp(max(maximumRatioInput, minimumRatio), 0.0, 1.0);
+  // Rectangle paint uses eight deterministic depth layers. Permute those
+  // layer buckets into a stable 0..1 selector so Min/Max describe a range of
+  // short-edge ratios rather than the two opposing edges of every splat.
+  let layerOrder = clamp(
+    min(fract(packedTag), ${LAYER_CODE_RANGE}) / ${LAYER_CODE_RANGE},
+    0.0,
+    1.0
+  );
+  let layerBucket = min(7u, u32(round(layerOrder * 7.0)));
+  let rangeSelector = f32((layerBucket * 5u + 3u) % 8u) / 7.0;
   let flatStructure = floor(packedTag) < 1.5;
-  return select(
-    vec2<f32>(minimumRatio, maximumRatio),
-    vec2<f32>(maximumRatio),
+  let shortEdgeRatio = select(
+    mix(minimumRatio, maximumRatio, rangeSelector),
+    maximumRatio,
     rectangle_flag_enabled(flags, ${RECTANGLE_FLAG_STRUCTURE_AWARE_RATIO}u) &&
       flatStructure
   );
+  return vec2<f32>(shortEdgeRatio, 1.0);
 }
 
 fn rectangle_area_compensation(widthRatios: vec2<f32>, flags: f32) -> f32 {
@@ -988,8 +999,7 @@ fn rectangle_trapezoid_kernel_sample(
   let feather = clamp(featherInput, 0.01, 0.49);
   let minimumRatio = clamp(minimumRatioInput, 0.0, 1.0);
   let maximumRatio = clamp(max(maximumRatioInput, minimumRatio), 0.0, 1.0);
-  // Local -Y is the minimum-width edge and local +Y is the maximum-width
-  // edge. Setting max to 1 recovers the previous n-to-1 footprint exactly.
+  // Local -Y is the selected short edge and local +Y is the full-width edge.
   let verticalProgress = clamp(normalized.y * 0.5 + 0.5, 0.0, 1.0);
   let halfWidth = max(0.0001, mix(minimumRatio, maximumRatio, verticalProgress));
   let axisCoordinate = vec2<f32>(
@@ -4480,12 +4490,14 @@ function applyCanvasView() {
 }
 
 function setCanvasView(mode) {
+  if (canvasViewInputLocked()) return false;
   state.canvasView.mode = mode;
   state.canvasView.scale = mode === "actual" ? 1 : fittedCanvasScale();
   state.canvasView.panX = 0;
   state.canvasView.panY = 0;
   applyCanvasView();
   publishState();
+  return true;
 }
 
 function fitCanvases(width = activePreviewCanvas().width, height = activePreviewCanvas().height) {
@@ -4496,14 +4508,41 @@ function fitCanvases(width = activePreviewCanvas().width, height = activePreview
   applyCanvasView();
 }
 
+function canvasViewInputLocked() {
+  return trainingLifecycleInputLocked();
+}
+
+function cancelCanvasViewGesture() {
+  const pointerIds = [...state.canvasPointers.keys()];
+  state.canvasPointers.clear();
+  state.canvasPinch = null;
+  state.canvasView.pointerId = null;
+  els.viewer.classList.remove("is-panning");
+  for (const pointerId of pointerIds) {
+    try {
+      if (els.viewer.hasPointerCapture(pointerId)) els.viewer.releasePointerCapture(pointerId);
+    } catch {
+      // Pointer capture may already have ended between lifecycle updates.
+    }
+  }
+}
+
 function updateCanvasViewControls() {
-  const disabled = !state.image;
+  const locked = canvasViewInputLocked();
+  if (locked && (state.canvasPointers.size > 0 || state.canvasPinch || state.canvasView.pointerId !== null)) {
+    cancelCanvasViewGesture();
+  }
+  const disabled = !state.image || locked;
   els.actualSizeButton.disabled = disabled;
   els.fitViewButton.disabled = disabled;
+  els.viewer.classList.toggle("canvas-view-locked", locked);
+  els.viewer.dataset.canvasViewLocked = String(locked);
+  els.viewer.title = locked ? "Canvas zoom and pan are locked while training." : "";
+  document.documentElement.dataset.canvasViewLocked = String(locked);
 }
 
 function zoomCanvasAt(clientX, clientY, deltaY) {
-  if (!state.image) return;
+  if (!state.image || canvasViewInputLocked()) return false;
   const rect = els.viewer.getBoundingClientRect();
   const oldScale = state.canvasView.scale;
   const nextScale = Math.max(0.02, Math.min(32, oldScale * Math.exp(-deltaY * 0.0015)));
@@ -4516,6 +4555,7 @@ function zoomCanvasAt(clientX, clientY, deltaY) {
   state.canvasView.panX = clientX - (rect.left + rect.width * 0.5) - imageX * nextScale;
   state.canvasView.panY = clientY - (rect.top + rect.height * 0.5) - imageY * nextScale;
   applyCanvasView();
+  return true;
 }
 
 function drawRgbToCanvas(rgb, width, height) {
@@ -4986,7 +5026,7 @@ function applyAdaptiveBspPaintInitialization(image, params, kernelShape) {
           y,
           structure.theta,
           params.rectangleEdgeDirectedTaper &&
-            params.rectangleTopRatio + 0.000001 < params.rectangleTopRatioMax,
+            params.rectangleTopRatio < 1 - 0.000001,
         )
       : structure.theta;
     const areaScale = Math.sqrt(Math.max(MIN_SPLAT_SCALE ** 2, regionWidth * regionHeight)) * 0.62 / extent;
@@ -6211,7 +6251,7 @@ function initOpaqueLayeredPaint(image, count, kernelShape) {
           y,
           structure.theta,
           params.rectangleEdgeDirectedTaper &&
-            params.rectangleTopRatio + 0.000001 < params.rectangleTopRatioMax,
+            params.rectangleTopRatio < 1 - 0.000001,
         );
     const nextSx = areaScale * scaleMultiplier * stretch;
     const nextSy = areaScale * scaleMultiplier / stretch;
@@ -14012,7 +14052,7 @@ fn rectangle_directed_taper_theta(
   if (
     config[40] < 0.5 ||
     config[40] > 1.5 ||
-    config[96] >= config[98] - 0.000001 ||
+    config[96] >= 1.0 - 0.000001 ||
     (flags & ${RECTANGLE_FLAG_EDGE_DIRECTED_TAPER}u) == 0u
   ) {
     return theta;
@@ -18288,7 +18328,7 @@ function selectedLearningRates() {
 }
 
 function selectedPreviewRefresh() {
-  return ["frame", "10", "metrics"].includes(els.previewRefresh.value) ? els.previewRefresh.value : "10";
+  return ["frame", "10", "final"].includes(els.previewRefresh.value) ? els.previewRefresh.value : "10";
 }
 
 function shouldPresentTrainingStep(step, refresh) {
@@ -18574,10 +18614,10 @@ function syncAlgorithmRequirements() {
   els.rectangleTopRatio.disabled = state.running || !rectangleSelected;
   els.rectangleTopRatioMax.disabled = state.running || !rectangleSelected;
   els.rectangleTopRatio.title = rectangleSelected
-    ? "Minimum parallel-edge width divided by the splat long edge."
+    ? "Minimum short-edge ratio in the deterministic Rectangle shape range; 0 allows triangle tips."
     : "Available for Rectangle Splats.";
   els.rectangleTopRatioMax.title = rectangleSelected
-    ? "Maximum parallel-edge width divided by the splat long edge."
+    ? "Maximum short-edge ratio in the deterministic Rectangle shape range; 1 allows full rectangles."
     : "Available for Rectangle Splats.";
   for (const control of [
     els.rectanglePreserveArea,
@@ -19751,8 +19791,12 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   }
   state.virtualCameraByStep = new Array(steps + 1).fill("");
   if (!els.trainLayerOrder.checked) state.params.depthOrder.fill(0);
-  state.previewMode = "splats";
+  state.previewMode = previewRefresh === "final" ? "original" : "splats";
   fitCanvases(state.image.width, state.image.height);
+  if (previewRefresh === "final") {
+    drawOriginalToCanvas();
+    showCanvas("preview");
+  }
   updatePreviewModeControls();
   state.metrics = {
     format: PRODUCT_FORMAT,
@@ -20654,6 +20698,10 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       setTrainingMessage(`Finalizing ${state.params.count.toLocaleString()} splats on WebGPU...`);
       publishState();
       await awaitTrainingRun(run, nextFrame());
+      if (previewRefresh === "final") {
+        state.previewMode = "splats";
+        updatePreviewModeControls();
+      }
       await updatePreview(state.metrics.steps_done, true, {}, run);
       state.metrics.training_evaluation.final_full_image_evaluations = 1;
       await awaitTrainingRun(run, renderer.preserveResultRenderState(state.image, state.params));
@@ -22648,8 +22696,16 @@ els.rectangleTopRatio.addEventListener("change", () => {
   publishState();
 });
 els.rectangleTopRatioMax.addEventListener("change", () => {
-  els.rectangleTopRatioMax.value =
-    String(selectedRectangleTopRatioMax(selectedRectangleTopRatio()));
+  const maximum = clampNumber(
+    els.rectangleTopRatioMax.value,
+    MIN_RECTANGLE_TOP_RATIO,
+    MAX_RECTANGLE_TOP_RATIO,
+    DEFAULT_RECTANGLE_TOP_RATIO_MAX,
+  );
+  els.rectangleTopRatioMax.value = String(maximum);
+  if (selectedRectangleTopRatio() > maximum) {
+    els.rectangleTopRatio.value = String(maximum);
+  }
   publishState();
 });
 for (const control of [
@@ -22896,6 +22952,7 @@ els.viewer.addEventListener(
   (event) => {
     if (!state.image || event.target === els.tiltCanvas || !(event.target instanceof HTMLCanvasElement)) return;
     event.preventDefault();
+    if (canvasViewInputLocked()) return;
     zoomCanvasAt(event.clientX, event.clientY, event.deltaY);
   },
   { passive: false },
@@ -22907,6 +22964,7 @@ els.viewer.addEventListener("pointerdown", (event) => {
   const directPointer = event.pointerType !== "mouse";
   if (!state.image || event.target === els.tiltCanvas || (!directPointer && event.button !== 2) || !(event.target instanceof HTMLCanvasElement)) return;
   event.preventDefault();
+  if (canvasViewInputLocked()) return;
   state.canvasView.pointerId = event.pointerId;
   state.canvasView.lastX = event.clientX;
   state.canvasView.lastY = event.clientY;
@@ -22926,6 +22984,10 @@ els.viewer.addEventListener("pointerdown", (event) => {
   els.viewer.setPointerCapture(event.pointerId);
 });
 els.viewer.addEventListener("pointermove", (event) => {
+  if (canvasViewInputLocked()) {
+    if (state.canvasPointers.has(event.pointerId)) cancelCanvasViewGesture();
+    return;
+  }
   if (!state.canvasPointers.has(event.pointerId)) return;
   state.canvasPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
   state.canvasView.mode = "custom";
