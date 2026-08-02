@@ -23,10 +23,12 @@
 
 ## Quick start
 
-1. Select **Load image**, use **Sample**, or drop an image on the canvas.
-2. Choose an **Algorithm**, then set **Max image side**, splat counts, and
-   **Iterations**.
-3. Select **Train**. Use **Pause** or **Stop** if needed.
+1. Choose an **Algorithm**. Algorithm and setting changes apply to the next
+   Train without reloading the page or clearing the loaded image and current
+   result.
+2. Select **Load image**, use **Sample**, or drop an image on the canvas.
+3. Set **Max image side**, splat counts, and **Iterations**, then select
+   **Train**. Use **Pause** or **Stop** if needed.
 4. Switch between **Original** and **Splats**, then review L1, SSIM, PSNR, and
    the GPU/state indicators.
 5. Open **Export** to save the current rendering as PNG. Gaussian results can
@@ -85,7 +87,9 @@ softer wide edge. `1 / 1` retains the existing Rectangle training path.
 `Rectangle Splats` uses a trainable minimum opacity floor. `Layered Opaque
 Brush` instead has its own fixed paint opacity and does not share that Rectangle
 setting. The former optional Brush Line layer and Brush-profile choices are no
-longer part of the product UI.
+longer part of the product UI. The rejected Sector-aware, optical-smoothing,
+and residual-matching Brush experiments are also absent from the product UI;
+their comparison records remain in the local Brush experiment registry.
 
 </details>
 
@@ -96,7 +100,9 @@ use a bounded decoder when available and are cached at no more than 4096 pixels
 on the long side. `Max image side` is a separate training-time resize. The
 status bar reports the current cached or training size, not the pre-cache source
 dimensions. Decoder support varies by browser; the app retains a guarded
-fallback for formats without bounded decode support.
+fallback for formats without bounded decode support. Training resize and GPU
+estimates use the decoded display orientation, so EXIF-rotated images keep the
+same aspect ratio when Train starts.
 
 ## Training feedback
 

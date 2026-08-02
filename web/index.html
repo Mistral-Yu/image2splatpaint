@@ -9,7 +9,7 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; worker-src 'self' blob:; connect-src 'self' blob:; img-src 'self' file: data: blob:; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
     <link rel="icon" href="data:," />
     <title>Image2SplatPaint</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./styles.css?v=brush-detail-refinement-v1" />
   </head>
   <body>
     <main class="app">
@@ -326,8 +326,8 @@
                     <section class="lr-section" aria-labelledby="brushPaintAppearanceHeading">
                       <strong id="brushPaintAppearanceHeading" class="lr-section-heading">Paint appearance</strong>
                       <div class="lr-grid">
-                        <label class="field-wide" title="Fixed opacity for Layered Opaque Brush paint splats. This is independent from Rectangle Splats minimum opacity and is applied at the next Train start.">
-                          Fixed paint opacity
+                        <label class="field-wide" title="Minimum learned opacity for Layered Opaque Brush paint splats. Training may raise individual splats above this floor. This is independent from Rectangle Splats and is applied at the next Train start.">
+                          Minimum paint opacity
                           <input id="layeredBrushOpacity" data-testid="layered-brush-opacity" type="number" min="0.05" max="1" step="0.005" value="0.995" />
                         </label>
                       </div>
@@ -462,7 +462,7 @@
                   <input id="splatSmallFirstOrder" data-testid="splat-small-first-order" type="checkbox" />
                   Prefer small splats on equal opacity
                 </label>
-                <label class="alpha-background-row">Alpha background <input id="splatAlphaBackground" data-testid="splat-alpha-background" type="color" value="#787878" /></label>
+                <label class="alpha-background-row">Alpha background <input id="splatAlphaBackground" data-testid="splat-alpha-background" type="color" value="#000000" /></label>
                 <div class="splat-shape-row">
                   <span>Splat shape</span>
                   <div class="splat-shape-options" role="group" aria-label="Splat preview shape">
@@ -506,6 +506,6 @@
     </main>
     <script src="./tilt-viewer.bundle.js?v=camera-summary-v2"></script>
     <script src="./sample-image-data.js?v=sample-v1"></script>
-    <script src="./app.js?v=splat-shape-preview-v4"></script>
+    <script src="./app.js?v=brush-detail-refinement-v1"></script>
   </body>
 </html>

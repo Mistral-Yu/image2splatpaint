@@ -118,10 +118,11 @@ const DEFAULT_VIRTUAL_CAMERA_MID_ANGLE_DEGREES = 2;
 const DEFAULT_VIRTUAL_CAMERA_FULL_ANGLE_DEGREES = 5;
 const VIRTUAL_CAMERA_GOLDEN_ANGLE_RADIANS = Math.PI * (3 - Math.sqrt(5));
 // Keep the shared config buffer 16-byte aligned. Slot 88 carries the paint
-// opacity value and slot 90 distinguishes Rectangle's minimum from Oil's
-// fixed opacity. Slots 92-95 are reserved to keep the existing buffer layout.
-// Slots 96 and 98 carry Rectangle's minimum and maximum parallel-edge width
-// ratios. Slot 97 carries Rectangle shape flags.
+// minimum opacity and slot 90 enables learning above that floor for opaque
+// Paint. Slot 89 enables Brush detail-child layer promotion, slot 92
+// carries Rectangle orientation, and slots 93-95 remain reserved. Slots 96 and
+// 98 carry Rectangle's minimum and maximum parallel-edge width ratios. Slot 97
+// carries Rectangle shape flags.
 const TRAIN_CONFIG_FLOATS = 100;
 const TRAIN_CONFIG_BYTES = TRAIN_CONFIG_FLOATS * 4;
 const MAX_TRAIN_BATCH_SIZE = 16;
@@ -215,6 +216,10 @@ const LAYERED_OPAQUE_BRUSH_P2_PRUNE_FRACTION = 0.05;
 const LAYERED_OPAQUE_BRUSH_P3_PRUNE_FRACTION = 0.025;
 const OPAQUE_PAINT_LATE_SETTLE_FRACTION = 0.10;
 const MAX_OPAQUE_PAINT_LATE_SETTLE_FRACTION = 0.20;
+const OPAQUE_PAINT_VISIBILITY_GRACE_STEPS = 64;
+const OPAQUE_PAINT_VISIBILITY_MIN_GAP_STEPS = 8;
+const OPAQUE_PAINT_HARD_ZERO_EPSILON = 1e-7;
+const OPAQUE_PAINT_HARD_ZERO_MAX_FRACTION = 0.1;
 const MAX_FINAL_DIAGNOSTIC_SAMPLES = 16384;
 const MAX_THIN_LINE_DIAGNOSTIC_SAMPLES = 8192;
 const ALGORITHM_REGISTRY = Object.freeze({
@@ -266,7 +271,7 @@ const ALGORITHM_REGISTRY = Object.freeze({
       virtualCameras: false,
       kernelShape: "opaque-brush",
       opaqueLayeredPaint: true,
-      fixedOpacity: LAYERED_OPAQUE_BRUSH_OPACITY,
+      minimumOpacity: true,
       requiresLayerOrder: true,
       layerCount: LAYERED_OPAQUE_BRUSH_LAYER_COUNT,
       hiddenSplatPruning: true,
@@ -401,17 +406,18 @@ function configurePaintKernel(config, params = state.params) {
     : RECTANGLE_EDGE_SOFTNESS;
   config[85] = params?.opaqueLayered ? 1 : 0;
   config[88] = clampNumber(
-    params?.fixedOpacity,
+    params?.minimumOpacity,
     MIN_OPAQUE_PAINT_OPACITY,
     MAX_OPAQUE_PAINT_OPACITY,
     LAYERED_OPAQUE_BRUSH_OPACITY,
   );
-  // Reserved paint slots stay zero so the compact Brush core keeps the shared
-  // 100-float optimizer layout used by the other algorithms.
-  config[86] = 0;
+  // QA can disable Current-Visibility Compaction as one unit so same-seed
+  // comparisons include child visibility, ordering, and physical compaction.
+  // The public product default remains enabled for opaque Paint algorithms.
+  config[86] = params?.currentVisibilityCompactionEnabled === false ? 0 : 1;
   config[87] = 0;
-  config[89] = 0;
-  // Rectangle learns opacity above this floor; Illustrative Oil stays fixed.
+  config[89] = params?.brushDetailRefinementEnabled ? 1 : 0;
+  // Opaque Paint algorithms learn opacity from RGB error above this floor.
   config[90] = params?.minimumOpacityEnabled ? 1 : 0;
   config[91] = clampNumber(
     params?.rectangleMaxAspectRatio,
@@ -1206,6 +1212,16 @@ function qaOverrides(name) {
   return QA_RUNTIME_ENABLED && globalThis[name] && typeof globalThis[name] === "object"
     ? globalThis[name]
     : {};
+}
+
+function opaqueBrushDetailRefinementEnabled() {
+  const override = qaOverrides("__image2SplatBrushDetailRefinement");
+  return override.enabled !== false;
+}
+
+function opaquePaintCurrentVisibilityCompactionEnabled() {
+  const override = qaOverrides("__image2SplatCurrentVisibilityCompaction");
+  return override.enabled !== false;
 }
 
 function opaquePaintLateSettleFraction() {
@@ -2134,6 +2150,8 @@ function discreteLayerSettings() {
     );
   return {
     opaqueLayered,
+    currentVisibilityCompactionEnabled:
+      opaqueLayered && opaquePaintCurrentVisibilityCompactionEnabled(),
     opaquePaintSettleFraction: opaqueLayered ? opaquePaintLateSettleFraction() : 0,
     enabled: (opaqueLayered || requested) && Boolean(document.querySelector("#trainLayerOrder")?.checked) && !algorithmUsesVirtualCameras(),
     accumulationEnabled: (opaqueLayered || accumulationRequested) && Boolean(document.querySelector("#trainLayerOrder")?.checked) && !algorithmUsesVirtualCameras(),
@@ -3763,8 +3781,8 @@ function capacityProbeCandidates(requested) {
 
 function estimatedImageSizeFor(trainSize) {
   if (!state.image) return { width: trainSize, height: trainSize };
-  const sourceWidth = state.image.originalWidth || state.image.width;
-  const sourceHeight = state.image.originalHeight || state.image.height;
+  const sourceWidth = state.image.cacheWidth || state.image.width;
+  const sourceHeight = state.image.cacheHeight || state.image.height;
   const [width, height] = resizedSize(sourceWidth, sourceHeight, trainSize);
   return { width, height };
 }
@@ -3776,8 +3794,8 @@ function imagePixelEstimate(trainSize) {
 
 function sideFromPixelBudget(pixelBudget, trainSize) {
   if (!state.image) return Math.sqrt(pixelBudget);
-  const sourceWidth = state.image.originalWidth || state.image.width;
-  const sourceHeight = state.image.originalHeight || state.image.height;
+  const sourceWidth = state.image.cacheWidth || state.image.width;
+  const sourceHeight = state.image.cacheHeight || state.image.height;
   const side = Math.max(1, sourceWidth, sourceHeight);
   const aspectPixels = Math.max(1, sourceWidth * sourceHeight) / (side * side);
   return Math.sqrt(pixelBudget / Math.max(0.01, aspectPixels));
@@ -4044,8 +4062,12 @@ function compactNumber(value) {
 
 function resizeLoadedImageToMaxSide(maxSide) {
   if (!state.image) return false;
-  const sourceWidth = state.image.originalWidth || state.image.width;
-  const sourceHeight = state.image.originalHeight || state.image.height;
+  // The decoded cache is display-oriented. Header dimensions can still be in
+  // encoded EXIF orientation, so using originalWidth/originalHeight here can
+  // swap the aspect ratio when Train is pressed. The cache dimensions also
+  // let a later larger run resize again from sourceBitmap without upscaling.
+  const sourceWidth = state.image.cacheWidth || state.image.width;
+  const sourceHeight = state.image.cacheHeight || state.image.height;
   const targetSide = Math.round(clampNumber(maxSide, LIMITS.trainSizeMin, LIMITS.trainSizeMax, Math.max(sourceWidth, sourceHeight)));
   const [width, height] = resizedSize(sourceWidth, sourceHeight, targetSide);
   if (width === state.image.width && height === state.image.height) return false;
@@ -4083,7 +4105,8 @@ function resizeLoadedImageToMaxSide(maxSide) {
     width,
     height,
     resizeMode: "max-side",
-    resizeScale: Math.max(width / state.image.originalWidth, height / state.image.originalHeight),
+    resizeScale: Math.max(width, height) /
+      Math.max(1, state.image.originalWidth || sourceWidth, state.image.originalHeight || sourceHeight),
     rgb,
     alpha,
   };
@@ -4146,7 +4169,7 @@ async function loadFile(file) {
       INPUT_CACHE_MAX_SIDE,
       INPUT_CACHE_MAX_SIDE,
     );
-    const loadScale = Math.max(width / originalWidth, height / originalHeight);
+    const loadScale = Math.max(width, height) / Math.max(1, originalWidth, originalHeight);
     const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
@@ -4574,11 +4597,9 @@ function showCanvas(kind) {
   els.tiltCanvas.style.opacity = kind === "tilt" && state.tilt.viewMode === "original" ? "0" : "1";
   els.tiltFrameOverlay.hidden = kind !== "tilt" || !state.tilt.controller;
   els.viewControls.hidden = kind === "tilt";
-  els.previewImageFrame.hidden =
-    kind !== "gpu" ||
-    state.running ||
-    !els.outsidePreviewToggle.checked ||
-    state.previewPadding.x <= 0 && state.previewPadding.y <= 0;
+  // The padded canvas already communicates the outside-image extent. Keep the
+  // legacy frame node for QA selectors, but never draw a competing white box.
+  els.previewImageFrame.hidden = true;
   if (kind !== "tilt") applyCanvasView();
 }
 
@@ -5402,13 +5423,15 @@ function snapshotParams(params) {
       params.rectangleAsymmetricSoftness ?? DEFAULT_RECTANGLE_ASYMMETRIC_SOFTNESS,
     opaqueLayered: Boolean(params.opaqueLayered),
     minimumOpacityEnabled: Boolean(params.minimumOpacityEnabled),
-    fixedOpacity: clampNumber(
-      params.fixedOpacity,
+    minimumOpacity: clampNumber(
+      params.minimumOpacity,
       MIN_OPAQUE_PAINT_OPACITY,
       MAX_OPAQUE_PAINT_OPACITY,
       LAYERED_OPAQUE_BRUSH_OPACITY,
     ),
     illustrativeOilVersion: Math.max(0, Math.round(Number(params.illustrativeOilVersion) || 0)),
+    brushDetailRefinementEnabled: Boolean(params.brushDetailRefinementEnabled),
+    currentVisibilityCompactionEnabled: params.currentVisibilityCompactionEnabled !== false,
     illustrativeOilFamilyStats: params.illustrativeOilFamilyStats
       ? structuredClone(params.illustrativeOilFamilyStats)
       : null,
@@ -5956,7 +5979,7 @@ function splatAlphaRenderOptions() {
   const trainedShape = trainedSplatShape();
   const adjustments = currentSplatAdjustmentValues();
   return {
-    alphaBackground: hexColorToRgb(els.splatAlphaBackground?.value, [120 / 255, 120 / 255, 120 / 255]),
+    alphaBackground: hexColorToRgb(els.splatAlphaBackground?.value, [0, 0, 0]),
     splatSmallFirstOrder: effectsEnabled && Boolean(els.splatSmallFirstOrder?.checked),
     kernelFalloff: adjustments.kernelFalloff,
     opacityMultiplier: adjustments.opacityMultiplier,
@@ -6348,8 +6371,9 @@ function initOpaqueLayeredPaint(image, count, kernelShape) {
       ? rectangleShape.asymmetricSoftness
       : DEFAULT_RECTANGLE_ASYMMETRIC_SOFTNESS;
   params.opaqueLayered = true;
-  params.minimumOpacityEnabled = kernelShape === "rectangle";
-  params.fixedOpacity = params.minimumOpacityEnabled
+  params.currentVisibilityCompactionEnabled = opaquePaintCurrentVisibilityCompactionEnabled();
+  params.minimumOpacityEnabled = true;
+  params.minimumOpacity = kernelShape === "rectangle"
     ? selectedOpaquePaintOpacity()
     : selectedLayeredBrushOpacity();
   params.boundarySigma = Math.min(
@@ -6367,9 +6391,10 @@ function initOpaqueLayeredPaint(image, count, kernelShape) {
   const baseCount = params.count;
   params.pruneLowContributionDeepSplatsEnabled = true;
   params.deepPruneInterval = LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL;
-  params.opacity.fill(params.fixedOpacity);
+  params.opacity.fill(params.minimumOpacity);
   const illustrativeOil = kernelShape === "opaque-brush";
   params.illustrativeOilVersion = illustrativeOil ? 1 : 0;
+  params.brushDetailRefinementEnabled = illustrativeOil && opaqueBrushDetailRefinementEnabled();
   const illustrativeOilFamilyCounts = [0, 0, 0];
   for (let i = 0; i < baseCount; i += 1) {
     const x = params.xy[i * 2];
@@ -6580,6 +6605,34 @@ function deepPruneDue(step, steps, settings) {
     Boolean(settings?.opaqueLayered),
     settings?.opaquePaintSettleFraction,
   );
+}
+
+function opaquePaintVisibilityCompactionStep(
+  steps,
+  fraction = OPAQUE_PAINT_LATE_SETTLE_FRACTION,
+) {
+  return Math.max(1, opaquePaintLateSettleStartStep(steps, fraction) - 1);
+}
+
+function opaquePaintVisibilityGraceSteps(steps) {
+  return Math.min(
+    OPAQUE_PAINT_VISIBILITY_GRACE_STEPS,
+    Math.max(OPAQUE_PAINT_VISIBILITY_MIN_GAP_STEPS, Math.round(Math.max(1, steps) * 0.02)),
+  );
+}
+
+function opaquePaintVisibilityCompactionDue(step, steps, settings) {
+  if (
+    !settings?.opaqueLayered ||
+    !settings?.deepPruneEnabled ||
+    settings?.currentVisibilityCompactionEnabled === false
+  ) return false;
+  const compactionStep = opaquePaintVisibilityCompactionStep(
+    steps,
+    settings?.opaquePaintSettleFraction,
+  );
+  const grace = compactionStep - experimentalGrowthSteps(steps);
+  return grace >= opaquePaintVisibilityGraceSteps(steps) && Math.round(step) === compactionStep;
 }
 
 function illustrativeOilSurfaceRecoveryDue(step, steps, interval) {
@@ -6958,13 +7011,15 @@ function growParamPlaceholders(params, targetCount) {
     rectangleAsymmetricSoftness:
       params.rectangleAsymmetricSoftness ?? DEFAULT_RECTANGLE_ASYMMETRIC_SOFTNESS,
     illustrativeOilVersion: Math.max(0, Math.round(Number(params.illustrativeOilVersion) || 0)),
+    brushDetailRefinementEnabled: Boolean(params.brushDetailRefinementEnabled),
+    currentVisibilityCompactionEnabled: params.currentVisibilityCompactionEnabled !== false,
     illustrativeOilFamilyStats: params.illustrativeOilFamilyStats
       ? structuredClone(params.illustrativeOilFamilyStats)
       : null,
     opaqueLayered: Boolean(params.opaqueLayered),
     minimumOpacityEnabled: Boolean(params.minimumOpacityEnabled),
-    fixedOpacity: clampNumber(
-      params.fixedOpacity,
+    minimumOpacity: clampNumber(
+      params.minimumOpacity,
       MIN_OPAQUE_PAINT_OPACITY,
       MAX_OPAQUE_PAINT_OPACITY,
       LAYERED_OPAQUE_BRUSH_OPACITY,
@@ -7269,6 +7324,88 @@ function lowContributionDeepPrunePlan(
     max_prune_fraction: boundedPruneFraction,
     normalized_influence_threshold: influenceThreshold,
     pruneIndices: removedIndices,
+    keepIndices,
+  };
+}
+
+function hardZeroContributionPlan(
+  params,
+  importanceData,
+  maxPruneFraction = OPAQUE_PAINT_HARD_ZERO_MAX_FRACTION,
+) {
+  const count = params?.count || 0;
+  if (
+    count < DEEP_PRUNE_MIN_SPLATS ||
+    !importanceData?.observedCoverage ||
+    !importanceData?.integratedInfluence
+  ) {
+    return { applied: false, reason: "insufficient-current-visibility", before: count, after: count, removed: 0 };
+  }
+  const boundedFraction = Math.max(0, Math.min(OPAQUE_PAINT_HARD_ZERO_MAX_FRACTION, maxPruneFraction));
+  const maxRemove = Math.max(0, Math.min(
+    Math.floor(count * boundedFraction),
+    count - DEEP_PRUNE_MIN_SPLATS,
+  ));
+  const depthBinCount = 4096;
+  const depthBins = new Uint32Array(depthBinCount);
+  const removalMask = new Uint8Array(count);
+  let candidateCount = 0;
+  for (let index = 0; index < count; index += 1) {
+    const observed = Math.max(0, Number(importanceData.observedCoverage[index]) || 0);
+    const integratedInfluence = Math.max(0, Number(importanceData.integratedInfluence[index]) || 0);
+    if (
+      observed <= OPAQUE_PAINT_HARD_ZERO_EPSILON &&
+      integratedInfluence <= OPAQUE_PAINT_HARD_ZERO_EPSILON
+    ) {
+      candidateCount += 1;
+      const depth = Math.max(0, Math.min(1, Number(params.depthOrder?.[index]) || 0));
+      depthBins[Math.min(depthBinCount - 1, Math.floor(depth * depthBinCount))] += 1;
+    }
+  }
+  if (!candidateCount) {
+    return { applied: false, reason: "no-current-hard-zero", before: count, after: count, removed: 0 };
+  }
+  const selectedCount = Math.min(candidateCount, maxRemove);
+  if (selectedCount <= 0) {
+    return { applied: false, reason: "minimum-count-guard", before: count, after: count, removed: 0 };
+  }
+  let thresholdBin = 0;
+  let selectedBeforeThreshold = 0;
+  while (
+    thresholdBin < depthBinCount - 1 &&
+    selectedBeforeThreshold + depthBins[thresholdBin] < selectedCount
+  ) {
+    selectedBeforeThreshold += depthBins[thresholdBin];
+    thresholdBin += 1;
+  }
+  let thresholdQuota = selectedCount - selectedBeforeThreshold;
+  for (let index = 0; index < count; index += 1) {
+    const observed = Math.max(0, Number(importanceData.observedCoverage[index]) || 0);
+    const integratedInfluence = Math.max(0, Number(importanceData.integratedInfluence[index]) || 0);
+    if (
+      observed > OPAQUE_PAINT_HARD_ZERO_EPSILON ||
+      integratedInfluence > OPAQUE_PAINT_HARD_ZERO_EPSILON
+    ) continue;
+    const depth = Math.max(0, Math.min(1, Number(params.depthOrder?.[index]) || 0));
+    const bin = Math.min(depthBinCount - 1, Math.floor(depth * depthBinCount));
+    if (bin < thresholdBin || (bin === thresholdBin && thresholdQuota-- > 0)) removalMask[index] = 1;
+  }
+  const keepIndices = new Uint32Array(count - selectedCount);
+  let keepIndex = 0;
+  for (let index = 0; index < count; index += 1) {
+    if (!removalMask[index]) keepIndices[keepIndex++] = index;
+  }
+  return {
+    applied: true,
+    reason: "current-hard-zero",
+    before: count,
+    after: keepIndices.length,
+    removed: selectedCount,
+    removed_ratio: selectedCount / count,
+    hard_zero_candidates: candidateCount,
+    hard_zero_candidate_ratio: candidateCount / count,
+    max_prune_fraction: boundedFraction,
+    epsilon: OPAQUE_PAINT_HARD_ZERO_EPSILON,
     keepIndices,
   };
 }
@@ -8088,7 +8225,7 @@ struct Uniforms {
   localAspectRatio: f32,
   reservedPreview0: f32,
   reservedPreview1: f32,
-  padBrushDetail: f32,
+  reservedPreview2: f32,
   pad2: f32,
 };
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -10759,7 +10896,8 @@ fn ssim_tiles(
       "    let dLogDr = dLogDNormalized / extentScale;",
       "    let dCenter = vec2<f32>(-c * dLogDr.x + s * dLogDr.y, -s * dLogDr.x - c * dLogDr.y);",
       "    let baseRatio = (baseScale * baseScale) / max(sampleScale * sampleScale, vec2<f32>(0.00000001));",
-      "    let dLogScale = -dLogDNormalized * normalized * baseRatio;",
+      "    var dLogScale = -dLogDNormalized * normalized;",
+      "    dLogScale *= baseRatio;",
       "    let dTheta = dLogDr.x * r.y - dLogDr.y * r.x;",
       "    return KernelSample(sample.kernel, dCenter, dLogScale, dTheta);",
       "  }",
@@ -15083,10 +15221,11 @@ fn apply_grow(@builtin(global_invocation_id) id: vec3u) {
       residualPos = error_pixel_position((encoded & SOURCE_MASK) - 1u, width, height);
     }
     let residualPriority = config[17] > 0.5 || config[18] > 0.5;
+    let gridResidual = error_at_position(gridPos, width, height);
+    let residualError = error_at_position(residualPos, width, height);
     let materiallyWorse =
-      error_at_position(residualPos, width, height) >
-      error_at_position(gridPos, width, height) + 0.04;
-    let useResidual = materiallyWorse &&
+      residualError > gridResidual + 0.04;
+    var useResidual = materiallyWorse &&
       (residualPriority || hash_unit(f32(index) * 29.7 + f32(step) * 0.11) < 0.15);
     var nextPos = constrain_xy(select(gridPos, residualPos, useResidual));
     var nextScale = max(baseScaleFloor, stageMinScale);
@@ -15245,11 +15384,45 @@ fn apply_grow(@builtin(global_invocation_id) id: vec3u) {
   xy[index].rawDepth = xy[source].rawDepth;
   xy[index].depthGradient = 0.0;
   let inheritedLayer = min(fract(sourceT.w), ${LAYER_CODE_RANGE} * 0.999999);
+  let brushDetailChild =
+    mode == 1u &&
+    config[40] > 3.5 &&
+    config[89] > 0.5 &&
+    detailTagged;
+  let layerStep = ${LAYER_CODE_RANGE} / max(1.0, config[82] - 1.0);
+  var childLayer = select(
+    inheritedLayer,
+    min(${LAYER_CODE_RANGE} * 0.999999, inheritedLayer + layerStep),
+    brushDetailChild
+  );
+  let parentLayerScaled =
+    clamp(inheritedLayer / ${LAYER_CODE_RANGE}, 0.0, 0.999999) * max(2.0, config[82]);
+  let parentLayerId = floor(parentLayerScaled);
+  let parentInLayerOrder = fract(parentLayerScaled);
+  let sameLayerChild =
+    ((parentLayerId + min(0.999999, parentInLayerOrder + 0.25)) / max(2.0, config[82])) *
+    ${LAYER_CODE_RANGE};
+  let childTargetColorError = dot(abs(childColor - targetColor), vec3<f32>(0.33333334));
+  let guardedSameLayerAdvance =
+    config[86] > 0.5 &&
+    config[65] > 0.5 &&
+    !brushDetailChild &&
+    (mode == 1u || mode == 2u) &&
+    localError > 0.02 &&
+    childTargetColorError <= 0.075;
+  childLayer = select(childLayer, sameLayerChild, guardedSameLayerAdvance);
   let childTag = select(1.0, 2.0, detailTagged);
-  transform[index] = vec4<f32>(nextScale, nextTheta, childTag + inheritedLayer);
+  transform[index] = vec4<f32>(nextScale, nextTheta, childTag + childLayer);
   color[index] = vec4<f32>(childColor, childOpacity);
   stats[index] = select(sourceStats, sourceStats * 0.5, tiltTrueSplit);
-  var childImportance = sourceImportance * 0.5;
+  // The front-only opaque child has not contributed yet. Inheriting the
+  // parent's visibility made fully hidden children look important to prune.
+  // Virtual symmetric true splits still divide the measured source history.
+  var childImportance = select(
+    sourceImportance * 0.5,
+    vec4<f32>(0.0),
+    config[86] > 0.5 && config[65] > 0.5 && !tiltTrueSplit,
+  );
   if (config[25] > 0.5 && !tiltTrueSplit) { childImportance.w = sourceImportance.w; }
   stats[capacity + index] = childImportance;
   if (tiltTrueSplit) {
@@ -16829,7 +17002,11 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
       new Uint32Array([oldCount, newCount, trainState.capacity, 0]),
       GPUBufferUsage.UNIFORM,
     );
-    const keepBuffer = makeBuffer(this.device, new Uint32Array(keepIndices), GPUBufferUsage.STORAGE);
+    const keepBuffer = makeBuffer(
+      this.device,
+      keepIndices instanceof Uint32Array ? keepIndices : new Uint32Array(keepIndices),
+      GPUBufferUsage.STORAGE,
+    );
     const createOutput = (size) => this.device.createBuffer({
       size: Math.max(4, size),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
@@ -16899,7 +17076,26 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
     }
   }
 
-  async readImportanceData(count) {
+  async resetImportanceWindowGpu(count) {
+    if (!this.trainState?.statsBuffer || count <= 0) return false;
+    const boundedCount = Math.min(this.trainState.count, Math.max(0, Math.round(count)));
+    if (boundedCount <= 0) return false;
+    const encoder = this.device.createCommandEncoder();
+    encoder.clearBuffer(
+      this.trainState.statsBuffer,
+      this.trainState.capacity * 4 * 4,
+      boundedCount * 4 * 4,
+    );
+    this.device.queue.submit([encoder.finish()]);
+    this.trainState.currentVisibilityWindow = {
+      reset_step: state.metrics?.steps_done || 0,
+      count: boundedCount,
+      buffer: "importance-stats",
+    };
+    return true;
+  }
+
+  async readImportanceData(count, { includeSummary = true } = {}) {
     if (!this.trainState?.statsBuffer || count <= 0) return null;
     const bytes = count * 4 * 4;
     const readBuffer = this.device.createBuffer({
@@ -16913,9 +17109,9 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
       await readBuffer.mapAsync(GPUMapMode.READ);
       const values = new Float32Array(readBuffer.getMappedRange()).slice();
       readBuffer.unmap();
-      const coverage = [];
-      const influence = [];
-      const residual = [];
+      const coverage = includeSummary ? [] : null;
+      const influence = includeSummary ? [] : null;
+      const residual = includeSummary ? [] : null;
       const normalizedInfluence = new Float32Array(count);
       const integratedInfluenceBySplat = new Float32Array(count);
       const observedCoverage = new Float32Array(count);
@@ -16925,9 +17121,11 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
         const observed = Number.isFinite(values[i]) ? Math.max(0, values[i]) : 0;
         const integratedInfluence = Number.isFinite(values[i + 1]) ? Math.max(0, values[i + 1]) : 0;
         const residualMass = Number.isFinite(values[i + 2]) ? Math.max(0, values[i + 2]) : 0;
-        coverage.push(observed);
-        influence.push(integratedInfluence);
-        residual.push(residualMass / Math.max(observed, 1));
+        if (includeSummary) {
+          coverage.push(observed);
+          influence.push(integratedInfluence);
+          residual.push(residualMass / Math.max(observed, 1));
+        }
         normalizedInfluence[i / 4] = integratedInfluence / Math.max(observed, 1);
         observedCoverage[i / 4] = observed;
         integratedInfluenceBySplat[i / 4] = integratedInfluence;
@@ -16947,13 +17145,13 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
         normalizedInfluence,
         integratedInfluence: integratedInfluenceBySplat,
         observedCoverage,
-        summary: {
+        summary: includeSummary ? {
           count,
           nonfinite_count: nonfiniteCount,
           coverage: summarize(coverage),
           influence: summarize(influence),
           residual: summarize(residual),
-        },
+        } : null,
       };
     } finally {
       readBuffer.destroy();
@@ -18643,9 +18841,7 @@ function selectedLearningRates() {
     scale: DEFAULT_LR_SCALE,
     position: clampNumber(els.positionLearningRate.value, LIMITS.lrMin, LIMITS.lrDefaultMax, DEFAULT_POSITION_LR),
     color: clampNumber(els.colorLearningRate.value, LIMITS.lrMin, LIMITS.lrDefaultMax, DEFAULT_COLOR_LR),
-    opacity: algorithmUsesLayeredOpaqueBrush()
-      ? 0
-      : clampNumber(els.opacityLearningRate.value, LIMITS.lrMin, LIMITS.opacityLrMax, DEFAULT_OPACITY_LR),
+    opacity: clampNumber(els.opacityLearningRate.value, LIMITS.lrMin, LIMITS.opacityLrMax, DEFAULT_OPACITY_LR),
     scaleParam: clampNumber(els.scaleLearningRate.value, LIMITS.lrMin, LIMITS.scaleLrMax, DEFAULT_SCALE_LR),
     rotation: clampNumber(els.rotationLearningRate.value, LIMITS.lrMin, LIMITS.lrDefaultMax, DEFAULT_ROTATION_LR),
     thetaAlign: clampNumber(els.thetaAlignRate.value, LIMITS.lrMin, LIMITS.thetaAlignLrMax, DEFAULT_THETA_ALIGN_LR),
@@ -18771,6 +18967,11 @@ function plannedAdaptiveGpuBatch({
     const layerDue = layerSchedule.due;
     const pruneScheduled = deepPruneScheduled(candidate, steps, deepPruneSettings);
     const pruneDue = deepPruneDue(candidate, steps, deepPruneSettings);
+    const visibilityCompactionDue = opaquePaintVisibilityCompactionDue(
+      candidate,
+      steps,
+      deepPruneSettings,
+    );
     const recolorScheduled = hiddenRgbRecolorDue(candidate, steps, hiddenRgbSettings);
     const recolorDue = paintMutationAllowed && recolorScheduled;
     const paintOutlierFinalRepairScheduled = algorithmUsesPaintKernel() && candidate === steps;
@@ -18789,6 +18990,7 @@ function plannedAdaptiveGpuBatch({
       relocationDue ||
       layerDue ||
       pruneDue ||
+      visibilityCompactionDue ||
       recolorDue ||
       paintOutlierFinalRepairDue ||
       suppressedPaintMutationScheduled ||
@@ -18908,7 +19110,6 @@ function syncAlgorithmRequirements() {
     delete els.discreteLayerMoveRadius.dataset.nonBrushValue;
   }
   for (const [control, fallback] of [
-    [els.opacityLearningRate, DEFAULT_OPACITY_LR],
     [els.alphaLossWeight, DEFAULT_ALPHA_LOSS_WEIGHT],
   ]) {
     if (brushSelected) {
@@ -18958,7 +19159,7 @@ function syncAlgorithmRequirements() {
       ? "Opaque paint algorithms use 8 layers and remove low-influence splats from the rear 75% every 250 iterations."
       : "Every configured interval during P2 and P3, compact low-contribution splats from the rear half of the learned layer order. P2 removes up to 2.5% per event and P3 uses a 1% detail-safe cap.";
   }
-  els.opacityLearningRate.disabled = state.running || brushSelected;
+  els.opacityLearningRate.disabled = state.running;
   els.alphaLossWeight.disabled = state.running || brushSelected;
   els.adaptiveGridInitializationFraction.disabled = state.running || algorithmUsesPaintKernel();
   els.adaptiveGridInitializationFraction.title = algorithmUsesPaintKernel()
@@ -18969,7 +19170,7 @@ function syncAlgorithmRequirements() {
     "Minimum learned opacity for Rectangle Splats; individual opacity may train above this floor.";
   els.layeredBrushOpacity.disabled = state.running || !brushSelected;
   els.layeredBrushOpacity.title =
-    "Fixed opacity for Layered Opaque Brush paint splats; independent from Rectangle Splats.";
+    "Minimum learned opacity for Layered Opaque Brush paint splats; training may raise individual splats above this floor and the value is independent from Rectangle Splats.";
   els.rectangleTopRatio.disabled = state.running || !rectangleSelected;
   els.rectangleTopRatioMax.disabled = state.running || !rectangleSelected;
   els.rectangleMaxAspectRatio.disabled = state.running || !rectangleSelected;
@@ -19080,7 +19281,6 @@ function pausedRuntimeControls() {
 function setPausedRuntimeControlsEnabled(enabled) {
   for (const element of pausedRuntimeControls()) element.disabled = !enabled;
   if (algorithmUsesLayeredOpaqueBrush()) {
-    els.opacityLearningRate.disabled = true;
     els.alphaLossWeight.disabled = true;
   }
   document.documentElement.dataset.pausedRuntimeControls = String(enabled);
@@ -19340,6 +19540,68 @@ async function applyDeepPrune(step, steps, run = null) {
   state.metrics.deep_layer_prune_removed_total = removedTotal + plan.removed;
   state.metrics.deep_layer_prune_events.push(report);
   state.metrics.deep_layer_prune = report;
+  state.metrics.num_gaussians = state.params.count;
+  state.metrics.params_revision = (state.metrics.params_revision || 0) + 1;
+  state.metrics.cpu_mirror_step = step;
+  state.metrics.cpu_mirror_count = state.params.count;
+  return true;
+}
+
+async function applyCurrentVisibilityCompaction(step, steps, run = null) {
+  assertTrainingRun(run);
+  const renderer = state.webgpu.renderer;
+  const params = state.params;
+  if (!params?.opaqueLayered || state.metrics?.stopped || !renderer?.trainState) return false;
+  if ((state.metrics?.current_visibility_compaction_events || []).some((event) => event.step === step)) {
+    return false;
+  }
+  // Layer priority uses the current trained order. The visibility path skips
+  // percentile summaries and the planner uses fixed-size depth bins, avoiding
+  // the previous per-candidate object allocation and O(N log N) sort.
+  await awaitTrainingRun(run, renderer.readTrainedColors(params));
+  assertFiniteParams(params, "current-visibility-compaction-readback");
+  const importanceData = await awaitTrainingRun(
+    run,
+    renderer.readImportanceData(params.count, { includeSummary: false }),
+  );
+  const plan = hardZeroContributionPlan(params, importanceData);
+  const report = { ...plan };
+  delete report.keepIndices;
+  delete report.pruneIndices;
+  report.step = step;
+  report.phase = "pre-settle";
+  report.policy = "current-visibility-hard-zero";
+  report.visibility_window = {
+    reset_step: renderer.trainState?.currentVisibilityWindow?.reset_step ?? step - 1,
+    measured_steps: 1,
+    signal: "accepted-pixels-and-sum-t-before-alpha",
+    scope: "all-opaque-paint-layers",
+  };
+  report.metrics_evaluation = "deferred-to-final";
+  if (!plan.applied) {
+    state.metrics.current_visibility_compaction = report;
+    state.metrics.current_visibility_compaction_events.push(report);
+    return false;
+  }
+  const compactResult = await awaitTrainingRun(run, renderer.compactTrainStateGpu(plan.keepIndices));
+  if (!compactResult.compacted) {
+    report.applied = false;
+    report.reason = "gpu-compaction-skipped";
+    state.metrics.current_visibility_compaction = report;
+    state.metrics.current_visibility_compaction_events.push(report);
+    return false;
+  }
+  state.params = compactSplatParams(params, plan.keepIndices);
+  updateTrainingRunOwnership(run, { params: state.params });
+  if (els.tileCullingToggle.checked) {
+    await awaitTrainingRun(run, renderer.prepareTileLists(state.image, state.params, { sync: true }));
+  }
+  report.gpu_compaction_ms = compactResult.gpu_ms;
+  report.optimizer_state_preserved = true;
+  report.params_compacted = true;
+  state.metrics.current_visibility_compaction_removed_total += plan.removed;
+  state.metrics.current_visibility_compaction = report;
+  state.metrics.current_visibility_compaction_events.push(report);
   state.metrics.num_gaussians = state.params.count;
   state.metrics.params_revision = (state.metrics.params_revision || 0) + 1;
   state.metrics.cpu_mirror_step = step;
@@ -20124,6 +20386,8 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   initialCount = state.params.count;
   finalCount = Math.max(initialCount, finalCount);
   state.params.layerAwareAccumulationEnabled = runDiscreteLayerSettings.accumulationEnabled;
+  state.params.currentVisibilityCompactionEnabled =
+    runDiscreteLayerSettings.currentVisibilityCompactionEnabled;
   state.params.pruneLowContributionDeepSplatsEnabled = runDiscreteLayerSettings.deepPruneEnabled;
   state.params.deepPruneInterval = runDiscreteLayerSettings.deepPruneInterval;
   state.params.hiddenRgbRecolorEnabled = runHiddenRgbRecolorSettings.enabled;
@@ -20135,6 +20399,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   state.params.discreteLayerMoveRadius = runDiscreteLayerSettings.moveRadius;
   if (algorithmUsesOpaqueLayeredPaint(algorithm)) {
     state.params.opaqueLayered = true;
+    state.params.minimumOpacityEnabled = true;
     state.params.rectangleTopRatio = algorithmUsesRectangleKernel(algorithm)
       ? runRectangleTopRatio
       : DEFAULT_RECTANGLE_TOP_RATIO;
@@ -20159,7 +20424,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
     state.params.rectangleAsymmetricSoftness = algorithmUsesRectangleKernel(algorithm)
       ? runRectangleShape.asymmetricSoftness
       : DEFAULT_RECTANGLE_ASYMMETRIC_SOFTNESS;
-    state.params.fixedOpacity = runOpaquePaintOpacity;
+    state.params.minimumOpacity = runOpaquePaintOpacity;
     state.params.opacity.fill(runOpaquePaintOpacity);
     state.params.layerOrderEnabled = true;
     state.params.layerAwareAccumulationEnabled = true;
@@ -20208,6 +20473,13 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       backend: "webgpu-compute",
     },
     initialization_bsp: state.params.initializationStats || null,
+    brush_detail_refinement: algorithmUsesLayeredOpaqueBrush(algorithm)
+      ? {
+          enabled: Boolean(state.params.brushDetailRefinementEnabled),
+          split: "detail-child-one-layer-promotion",
+          surface_recovery_start_step: experimentalDensifySteps(steps),
+        }
+      : null,
     initial_splats: initialCount,
     final_splats: finalCount,
     num_gaussians: initialCount,
@@ -20247,10 +20519,10 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       illustrativeOil: algorithmUsesLayeredOpaqueBrush(algorithm),
       illustrativeOilVersion: state.params.illustrativeOilVersion || 0,
       illustrativeOilFamilyStats: state.params.illustrativeOilFamilyStats || null,
-      fixedSplatOpacity: algorithmUsesOpaqueLayeredPaint(algorithm) ? runOpaquePaintOpacity : null,
+      minimumSplatOpacity: algorithmUsesOpaqueLayeredPaint(algorithm) ? runOpaquePaintOpacity : null,
       rectangleMinimumPaintOpacity:
         algorithmUsesRectangleKernel(algorithm) ? runRectanglePaintOpacity : null,
-      layeredBrushFixedOpacity:
+      layeredBrushMinimumPaintOpacity:
         algorithmUsesLayeredOpaqueBrush(algorithm) ? runLayeredBrushOpacity : null,
       discreteLayers: runDiscreteLayerSettings.enabled,
       discreteLayerCount: runDiscreteLayerSettings.count,
@@ -20468,6 +20740,9 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
     deep_layer_prune_events: [],
     deep_layer_prune_removed_total: 0,
     deep_layer_prune_interval: runDiscreteLayerSettings.deepPruneInterval,
+    current_visibility_compaction: null,
+    current_visibility_compaction_events: [],
+    current_visibility_compaction_removed_total: 0,
     opaque_paint_late_settle: {
       enabled: Boolean(runDiscreteLayerSettings.opaqueLayered),
       fraction: runDiscreteLayerSettings.opaquePaintSettleFraction,
@@ -20840,6 +21115,11 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       const relocationDueAtStep = paintMutationAllowedAtStep && relocationScheduledAtStep;
       const deepPruneScheduledAtStep = deepPruneScheduled(step, steps, runDiscreteLayerSettings);
       const deepPruneDueAtStep = deepPruneDue(step, steps, runDiscreteLayerSettings);
+      const currentVisibilityCompactionDueAtStep = opaquePaintVisibilityCompactionDue(
+        step,
+        steps,
+        runDiscreteLayerSettings,
+      );
       const hiddenRgbRecolorScheduledAtStep = hiddenRgbRecolorDue(step, steps, runHiddenRgbRecolorSettings);
       const hiddenRgbRecolorDueAtStep = paintMutationAllowedAtStep && hiddenRgbRecolorScheduledAtStep;
       const paintOutlierFinalRepairScheduledAtStep = algorithmUsesPaintKernel() && step === steps;
@@ -20900,6 +21180,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         densifyDue ||
         relocationDueAtStep ||
         deepPruneDueAtStep ||
+        currentVisibilityCompactionDueAtStep ||
         hiddenRgbRecolorDueAtStep ||
         paintOutlierFinalRepairDueAtStep;
       const effectiveSyncInterval = effectiveTrainSyncInterval(
@@ -20934,6 +21215,9 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         ? await awaitTrainingRun(run, renderer.hashTrainParameters(state.params))
         : null;
       const trainStarted = performance.now();
+      if (currentVisibilityCompactionDueAtStep) {
+        await awaitTrainingRun(run, renderer.resetImportanceWindowGpu(state.params.count));
+      }
       if (gpuBatchSize > 1) {
         const batchSteps = Array.from({ length: gpuBatchSize }, (_, index) => step + index);
         await awaitTrainingRun(run, renderer.trainStepsGpu(
@@ -21049,6 +21333,9 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
           await awaitTrainingRun(run, nextFrame());
         }
         await applyDeepPrune(step, steps, run);
+      }
+      if (currentVisibilityCompactionDueAtStep) {
+        await applyCurrentVisibilityCompaction(step, steps, run);
       }
       if (paintOutlierFinalRepairDueAtStep && !state.metrics?.stopped) {
         const repairStarted = performance.now();
@@ -23546,6 +23833,7 @@ function endCanvasPan(event) {
 }
 els.viewer.addEventListener("pointerup", endCanvasPan);
 els.viewer.addEventListener("pointercancel", endCanvasPan);
+document.documentElement.dataset.algorithm = selectedAlgorithm().id;
 activateDetailTab("training");
 syncLayerOrderDependency();
 syncVirtualCameraDependency();
@@ -24096,6 +24384,13 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
       deep_layer_prune: m.deep_layer_prune ? structuredClone(m.deep_layer_prune) : null,
       deep_layer_prune_events: m.deep_layer_prune_events ? structuredClone(m.deep_layer_prune_events) : [],
       deep_layer_prune_removed_total: m.deep_layer_prune_removed_total || 0,
+      current_visibility_compaction: m.current_visibility_compaction
+        ? structuredClone(m.current_visibility_compaction)
+        : null,
+      current_visibility_compaction_events: m.current_visibility_compaction_events
+        ? structuredClone(m.current_visibility_compaction_events)
+        : [],
+      current_visibility_compaction_removed_total: m.current_visibility_compaction_removed_total || 0,
       opaque_paint_late_settle: m.opaque_paint_late_settle
         ? structuredClone(m.opaque_paint_late_settle)
         : null,
