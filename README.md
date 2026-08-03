@@ -57,7 +57,7 @@ reload, so save PNG or PLY results you want to keep.
 | --- | --- | --- | --- |
 | `Planar Gaussian` | Stable front-view approximation of one image | PNG and standard 3DGS PLY | No |
 | `Rectangle Splats` | Analytic rectangle, trapezoid, or triangle paint shapes | PNG | No |
-| `Layered Opaque Brush` | Layered opaque illustrative-oil brush shapes | PNG | No |
+| `Brush Splats` | Directional illustrative brush shapes | PNG | No |
 | `GS Virtual Camera Sampling` | Thin-depth 3DGS-style training from front and virtual teachers | PNG and standard 3DGS PLY | Yes |
 
 All four choices share one custom WebGPU optimizer and standard front-to-back
@@ -84,10 +84,12 @@ while tapering, point the narrow edge toward stronger local structure, prefer
 the selected Max ratio in flat regions, and use a harder narrow edge with a
 softer wide edge. `1 / 1` retains the existing Rectangle training path.
 
-`Rectangle Splats` uses a trainable minimum opacity floor. `Layered Opaque
-Brush` instead has its own fixed paint opacity and does not share that Rectangle
-setting. The former optional Brush Line layer and Brush-profile choices are no
-longer part of the product UI. The rejected Sector-aware, optical-smoothing,
+`Rectangle Splats` uses a trainable minimum opacity floor. `Brush Splats`
+instead has its own minimum paint opacity and does not share that Rectangle
+setting. Its optional opacity gradient and learned directional width taper each
+provide separate tail/tip values. The former saturation gradient, Brush Line
+layer, and Brush-profile choices are no longer part of the product UI. The
+rejected Sector-aware, optical-smoothing,
 and residual-matching Brush experiments are also absent from the product UI;
 their comparison records remain in the local Brush experiment registry.
 
@@ -106,10 +108,16 @@ same aspect ratio when Train starts.
 
 ## Training feedback
 
-`Update quality metrics during training`, under `Learning rates`, optionally
+`Update quality metrics during training`, under `Shared training settings`, optionally
 refreshes L1, global/local SSIM, and PSNR at a bounded interval. It is off by
 default because the read-only full-image evaluations can slow training; final
 metrics are always calculated.
+
+The following `Color workflow` is also shared by every algorithm. `Monochrome
+underpainting` initializes and optimizes lightness only until `Color finish
+starts at (%)`; `Stage-aware Lab color training` uses a CIELAB objective for
+the color stage. Both options are off by default and do not change RGB rendering
+or final RGB quality metrics.
 
 The two-row status area reports iteration and splat counts, L1, global and local
 SSIM, RGB PSNR, image size, background/outside coverage, speed and elapsed time,
@@ -129,7 +137,7 @@ than conventional 3DGS trained from calibrated multi-view photos. Virtual
 Camera Sampling improves bounded tilt, but does not replace true multi-view
 geometry or view-dependent color.
 
-`Rectangle Splats` and `Layered Opaque Brush` use analytic non-Gaussian
+`Rectangle Splats` and `Brush Splats` use analytic non-Gaussian
 kernels, so their exact export is PNG and PLY is intentionally disabled.
 
 PLY opacity, color, scale, and rotation use standard pre-activation fields. The

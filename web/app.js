@@ -119,11 +119,14 @@ const DEFAULT_VIRTUAL_CAMERA_FULL_ANGLE_DEGREES = 5;
 const VIRTUAL_CAMERA_GOLDEN_ANGLE_RADIANS = Math.PI * (3 - Math.sqrt(5));
 // Keep the shared config buffer 16-byte aligned. Slot 88 carries the paint
 // minimum opacity and slot 90 enables learning above that floor for opaque
-// Paint. Slot 89 enables Brush detail-child layer promotion, slot 92
-// carries Rectangle orientation, and slots 93-95 remain reserved. Slots 96 and
+// Paint. Slot 87 carries the Brush taper learning rate, slot 89 enables Brush
+// detail-child layer promotion, and slot 92 carries Rectangle orientation.
+// Slot 93 enables shared Lab/monochrome color workflows; slots 94-95 enable
+// Brush opacity and trainable-width effects. Slots 96 and
 // 98 carry Rectangle's minimum and maximum parallel-edge width ratios. Slot 97
-// carries Rectangle shape flags.
-const TRAIN_CONFIG_FLOATS = 100;
+// carries Rectangle shape flags. Slot 100 carries the phase-independent shared
+// monochrome-underpainting cutoff; slots 101-104 carry Brush effect endpoints.
+const TRAIN_CONFIG_FLOATS = 108;
 const TRAIN_CONFIG_BYTES = TRAIN_CONFIG_FLOATS * 4;
 const MAX_TRAIN_BATCH_SIZE = 16;
 const TRAIN_BATCH_CONFIG_BYTES = TRAIN_CONFIG_BYTES * MAX_TRAIN_BATCH_SIZE;
@@ -206,6 +209,11 @@ const LAYERED_OPAQUE_BRUSH_TIP_WIDTH = 0.18;
 const ILLUSTRATIVE_OIL_DETAIL_THRESHOLD = 0.58;
 const ILLUSTRATIVE_OIL_RIBBON_ANISOTROPY = 2.15;
 const LAYERED_OPAQUE_BRUSH_OPACITY = 0.995;
+const DEFAULT_COLOR_FINISH_START_PERCENT = 43;
+const MIN_COLOR_FINISH_START_PERCENT = 0;
+const MAX_COLOR_FINISH_START_PERCENT = 100;
+const DEFAULT_LAYERED_BRUSH_TAPER = 1;
+const DEFAULT_LAYERED_BRUSH_TAPER_LR = 0.01;
 const MIN_OPAQUE_PAINT_OPACITY = 0.05;
 const MAX_OPAQUE_PAINT_OPACITY = 1;
 const LAYERED_OPAQUE_BRUSH_LAYER_COUNT = 8;
@@ -257,7 +265,7 @@ const ALGORITHM_REGISTRY = Object.freeze({
   }),
   [LAYERED_OPAQUE_BRUSH_ALGORITHM_ID]: Object.freeze({
     id: LAYERED_OPAQUE_BRUSH_ALGORITHM_ID,
-    label: "Layered Opaque Brush",
+    label: "Brush Splats",
     backend: "custom-webgpu",
     initialize: initLayeredOpaqueBrush,
     train: trainLayeredOpaqueBrush,
@@ -415,7 +423,7 @@ function configurePaintKernel(config, params = state.params) {
   // comparisons include child visibility, ordering, and physical compaction.
   // The public product default remains enabled for opaque Paint algorithms.
   config[86] = params?.currentVisibilityCompactionEnabled === false ? 0 : 1;
-  config[87] = 0;
+  config[87] = params?.brushWidthTaperEnabled ? DEFAULT_LAYERED_BRUSH_TAPER_LR : 0;
   config[89] = params?.brushDetailRefinementEnabled ? 1 : 0;
   // Opaque Paint algorithms learn opacity from RGB error above this floor.
   config[90] = params?.minimumOpacityEnabled ? 1 : 0;
@@ -426,9 +434,13 @@ function configurePaintKernel(config, params = state.params) {
     DEFAULT_RECTANGLE_ASPECT_RATIO,
   );
   config[92] = rectangleOrientationCode(params?.rectangleOrientation);
-  config[93] = 0;
-  config[94] = 0;
-  config[95] = 0;
+  // Bit 1: stage-aware CIELAB color objective. Bit 2: CIELAB-L* monochrome
+  // underpainting until slot 100. Bits 1+2 mean
+  // L*-only underpainting followed by stage-aware Lab color training.
+  config[93] = (params?.stageAwareLabTrainingEnabled ? 2 : 0)
+    + (params?.monochromeUnderpaintingEnabled ? 4 : 0);
+  config[94] = params?.brushOpacityGradientEnabled ? 1 : 0;
+  config[95] = params?.brushWidthTaperEnabled ? 1 : 0;
   config[96] = clampNumber(
     params?.rectangleTopRatio,
     MIN_RECTANGLE_TOP_RATIO,
@@ -445,6 +457,14 @@ function configurePaintKernel(config, params = state.params) {
   // Density pass override: final Paint repair may select only footprint-color
   // outliers without running the ordinary inactive-splat relocation policy.
   config[99] = 0;
+  config[100] = Math.max(
+    0,
+    Math.round(Number(params?.colorFinishStartStep) || 0),
+  );
+  config[101] = clampNumber(params?.brushOpacityGradientStart, 0, 1, 0);
+  config[102] = clampNumber(params?.brushOpacityGradientEnd, 0, 1, 1);
+  config[103] = clampNumber(params?.brushWidthTaperStart, 0, 1, 1);
+  config[104] = clampNumber(params?.brushWidthTaperEnd, 0, 1, 0);
   return config;
 }
 
@@ -464,6 +484,43 @@ function selectedLayeredBrushOpacity() {
     MAX_OPAQUE_PAINT_OPACITY,
     LAYERED_OPAQUE_BRUSH_OPACITY,
   );
+}
+
+function selectedLayeredBrushDirectionalEffects() {
+  return {
+    opacity: Boolean(document.querySelector("#layeredBrushOpacityGradient")?.checked),
+    opacityStart: clampNumber(document.querySelector("#layeredBrushOpacityGradientStart")?.value, 0, 1, 0),
+    opacityEnd: clampNumber(document.querySelector("#layeredBrushOpacityGradientEnd")?.value, 0, 1, 1),
+    widthTaper: Boolean(document.querySelector("#layeredBrushWidthTaper")?.checked),
+    widthStart: clampNumber(document.querySelector("#layeredBrushWidthTaperStart")?.value, 0, 1, 1),
+    widthEnd: clampNumber(document.querySelector("#layeredBrushWidthTaperEnd")?.value, 0, 1, 0),
+  };
+}
+
+function selectedSharedColorWorkflow() {
+  return {
+    stageAwareLab: Boolean(document.querySelector("#stageAwareLabTraining")?.checked),
+    monochromeUnderpainting: Boolean(document.querySelector("#monochromeUnderpainting")?.checked),
+    colorFinishStartPercent: clampNumber(
+      document.querySelector("#colorFinishStart")?.value,
+      MIN_COLOR_FINISH_START_PERCENT,
+      MAX_COLOR_FINISH_START_PERCENT,
+      DEFAULT_COLOR_FINISH_START_PERCENT,
+    ),
+  };
+}
+
+function colorFinishStartStep(totalIterations, percentage) {
+  const total = Math.max(1, Math.round(Number(totalIterations) || 1));
+  const percent = clampNumber(
+    percentage,
+    MIN_COLOR_FINISH_START_PERCENT,
+    MAX_COLOR_FINISH_START_PERCENT,
+    DEFAULT_COLOR_FINISH_START_PERCENT,
+  );
+  if (percent <= 0) return 1;
+  if (percent >= 100) return total + 1;
+  return Math.max(1, Math.ceil(total * percent / 100));
 }
 
 function selectedRectangleTopRatio() {
@@ -1147,7 +1204,13 @@ const ILLUSTRATIVE_OIL_WGSL = `
 struct OilKernelSample {
   kernel: f32,
   gradient: vec2<f32>,
+  taperGradient: f32,
 };
+
+fn brush_directional_progress(normalized: vec2<f32>, majorIsX: bool) -> f32 {
+  let longitudinal = select(normalized.y, normalized.x, majorIsX);
+  return clamp(0.5 + 0.5 * longitudinal, 0.0, 1.0);
+}
 
 fn illustrative_oil_family(scale: vec2<f32>, packedTag: f32) -> f32 {
   let minor = max(0.0001, min(scale.x, scale.y));
@@ -1160,7 +1223,14 @@ fn illustrative_oil_kernel_sample(
   normalized: vec2<f32>,
   majorIsX: bool,
   feather: f32,
-  family: f32
+  family: f32,
+  taperAmount: f32,
+  opacityGradientEnabled: bool,
+  widthTaperEnabled: bool,
+  opacityStart: f32,
+  opacityEnd: f32,
+  widthStart: f32,
+  widthEnd: f32
 ) -> OilKernelSample {
   let longitudinal = select(normalized.y, normalized.x, majorIsX);
   let transverse = select(normalized.x, normalized.y, majorIsX);
@@ -1175,15 +1245,34 @@ fn illustrative_oil_kernel_sample(
   let bendAmount = select(select(0.025, 0.055, isRibbon), 0.035, isAccent);
   let u = longitudinal / lengthScale;
   let u2 = u * u;
+  let directionalProgress = clamp(0.5 + 0.5 * longitudinal, 0.0, 1.0);
+  let dProgressDLongitudinal = select(
+    0.0,
+    0.5,
+    longitudinal > -1.0 && longitudinal < 1.0
+  );
+  let dProgressDU = dProgressDLongitudinal * lengthScale;
   let bend = bendAmount * u * (1.0 - u2);
   let bendGradient = bendAmount * (1.0 - 3.0 * u2);
   let bentTransverse = transverse - bend;
   let baseWidth = widthBase * (1.0 - shoulder * u2 + widthBias * u);
   let baseWidthGradient = widthBase * (-2.0 * shoulder * u + widthBias);
-  let rawWidth = baseWidth;
-  let rawWidthGradient = baseWidthGradient;
-  let width = max(0.30, rawWidth);
-  let widthGradient = select(0.0, rawWidthGradient, rawWidth > 0.30);
+  let taper = select(0.0, clamp(taperAmount, 0.0, 1.0), widthTaperEnabled);
+  let configuredWidth = mix(widthStart, widthEnd, directionalProgress);
+  let taperFactor = mix(widthStart, configuredWidth, taper);
+  let taperFactorGradient = taper * (widthEnd - widthStart) * dProgressDU;
+  let rawWidth = baseWidth * taperFactor;
+  let rawWidthGradient = baseWidthGradient * taperFactor + baseWidth * taperFactorGradient;
+  let rawWidthTaperGradient = select(
+    0.0,
+    baseWidth * (configuredWidth - widthStart),
+    widthTaperEnabled
+  );
+  // Zero is the public minimum. Keep only an internal epsilon for finite WGSL
+  // division at the exact tip where a full width gradient closes to a point.
+  let width = max(0.0001, rawWidth);
+  let widthGradient = select(0.0, rawWidthGradient, rawWidth > 0.0001);
+  let widthTaperGradient = select(0.0, rawWidthTaperGradient, rawWidth > 0.0001);
   let v = bentTransverse / width;
   let v2 = v * v;
   let q = u2 * u2 + v2 * v2;
@@ -1191,21 +1280,172 @@ fn illustrative_oil_kernel_sample(
   let t = clamp((q - (1.0 - feather)) / denominator, 0.0, 1.0);
   let baseKernel = 1.0 - t * t * (3.0 - 2.0 * t);
   if (baseKernel <= 0.00000001) {
-    return OilKernelSample(0.0, vec2<f32>(0.0));
+    return OilKernelSample(0.0, vec2<f32>(0.0), 0.0);
   }
   let dKernelDq = -6.0 * t * (1.0 - t) / denominator;
   let dVdU = -bendGradient / width - v * widthGradient / width;
+  let dVdTaper = -v * widthTaperGradient / width;
   let dQdU = 4.0 * u * u2 + 4.0 * v * v2 * dVdU;
+  let dQdTaper = 4.0 * v * v2 * dVdTaper;
   let dQdLongitudinal = dQdU / lengthScale;
   let dQdTransverse = 4.0 * v * v2 / width;
   let gradientLongTrans = vec2<f32>(
     dKernelDq * dQdLongitudinal,
     dKernelDq * dQdTransverse
   );
-  let gradient = select(gradientLongTrans.yx, gradientLongTrans, majorIsX);
-  return OilKernelSample(baseKernel, gradient);
+  let baseGradient = select(gradientLongTrans.yx, gradientLongTrans, majorIsX);
+  let opacityFactor = select(
+    1.0,
+    mix(opacityStart, opacityEnd, directionalProgress),
+    opacityGradientEnabled
+  );
+  let dOpacityDLongitudinal = select(
+    0.0,
+    (opacityEnd - opacityStart) * dProgressDLongitudinal,
+    opacityGradientEnabled
+  );
+  let opacityGradientLongTrans = vec2<f32>(dOpacityDLongitudinal, 0.0);
+  let opacityGradient = select(opacityGradientLongTrans.yx, opacityGradientLongTrans, majorIsX);
+  let kernel = baseKernel * opacityFactor;
+  let gradient = baseGradient * opacityFactor + baseKernel * opacityGradient;
+  let taperGradient = dKernelDq * dQdTaper * opacityFactor;
+  return OilKernelSample(kernel, gradient, taperGradient);
 }
 
+`;
+
+// Full CIELAB training keeps splat storage and compositing in signal-space
+// sRGB. Only the Brush color objective crosses the explicit IEC sRGB -> XYZ
+// D65 -> CIELAB boundary, then analytically chains the gradient back to sRGB.
+const CIELAB_D65_WGSL = `
+fn srgb_decode_channel(value: f32) -> f32 {
+  let c = clamp(value, 0.0, 1.0);
+  return select(pow((c + 0.055) / 1.055, 2.4), c / 12.92, c <= 0.04045);
+}
+
+fn srgb_decode_derivative(value: f32) -> f32 {
+  let c = clamp(value, 0.0, 1.0);
+  let derivative = select(
+    (2.4 / 1.055) * pow((c + 0.055) / 1.055, 1.4),
+    1.0 / 12.92,
+    c <= 0.04045
+  );
+  return select(0.0, derivative, value > 0.0 && value < 1.0);
+}
+
+fn lab_curve(value: f32) -> f32 {
+  let delta = 6.0 / 29.0;
+  let delta3 = delta * delta * delta;
+  return select(value / (3.0 * delta * delta) + 4.0 / 29.0, pow(max(value, 0.0), 1.0 / 3.0), value > delta3);
+}
+
+fn lab_curve_derivative(value: f32) -> f32 {
+  let delta = 6.0 / 29.0;
+  let delta3 = delta * delta * delta;
+  return select(1.0 / (3.0 * delta * delta), 1.0 / (3.0 * pow(max(value, delta3), 2.0 / 3.0)), value > delta3);
+}
+
+fn srgb_to_normalized_lab(rgb: vec3<f32>) -> vec3<f32> {
+  let linear = vec3<f32>(
+    srgb_decode_channel(rgb.r),
+    srgb_decode_channel(rgb.g),
+    srgb_decode_channel(rgb.b)
+  );
+  let xyz = vec3<f32>(
+    dot(linear, vec3<f32>(0.4124564, 0.3575761, 0.1804375)),
+    dot(linear, vec3<f32>(0.2126729, 0.7151522, 0.0721750)),
+    dot(linear, vec3<f32>(0.0193339, 0.1191920, 0.9503041))
+  );
+  let f = vec3<f32>(
+    lab_curve(xyz.x / 0.95047),
+    lab_curve(xyz.y),
+    lab_curve(xyz.z / 1.08883)
+  );
+  return vec3<f32>(
+    (116.0 * f.y - 16.0) / 100.0,
+    500.0 * (f.x - f.y) / 128.0,
+    200.0 * (f.y - f.z) / 128.0
+  );
+}
+
+fn stage_aware_lab_chroma_weight(progress: f32) -> f32 {
+  let p = clamp(progress, 0.0, 1.0);
+  let p1End = 1.0 / 7.0;
+  let p2End = 3.0 / 7.0;
+  let fullChromaStart = 0.90;
+  if (p <= p1End) { return 0.10; }
+  if (p <= p2End) {
+    return mix(0.10, 0.20, (p - p1End) / (p2End - p1End));
+  }
+  return mix(0.20, 1.0, clamp((p - p2End) / (fullChromaStart - p2End), 0.0, 1.0));
+}
+
+fn normalized_lab_weights(progress: f32) -> vec3<f32> {
+  let chroma = stage_aware_lab_chroma_weight(progress);
+  return vec3<f32>(1.0, chroma, chroma) / (1.0 + 2.0 * chroma);
+}
+
+fn normalized_lab_gradient_srgb(rgb: vec3<f32>, dLab: vec3<f32>) -> vec3<f32> {
+  let linear = vec3<f32>(
+    srgb_decode_channel(rgb.r),
+    srgb_decode_channel(rgb.g),
+    srgb_decode_channel(rgb.b)
+  );
+  let xyz = vec3<f32>(
+    dot(linear, vec3<f32>(0.4124564, 0.3575761, 0.1804375)),
+    dot(linear, vec3<f32>(0.2126729, 0.7151522, 0.0721750)),
+    dot(linear, vec3<f32>(0.0193339, 0.1191920, 0.9503041))
+  );
+  let normalizedXyz = vec3<f32>(xyz.x / 0.95047, xyz.y, xyz.z / 1.08883);
+  let dF = vec3<f32>(
+    dLab.y * (500.0 / 128.0),
+    dLab.x * (116.0 / 100.0) - dLab.y * (500.0 / 128.0) + dLab.z * (200.0 / 128.0),
+    -dLab.z * (200.0 / 128.0)
+  );
+  let dXyz = dF * vec3<f32>(
+    lab_curve_derivative(normalizedXyz.x) / 0.95047,
+    lab_curve_derivative(normalizedXyz.y),
+    lab_curve_derivative(normalizedXyz.z) / 1.08883
+  );
+  let dLinear = vec3<f32>(
+    dot(dXyz, vec3<f32>(0.4124564, 0.2126729, 0.0193339)),
+    dot(dXyz, vec3<f32>(0.3575761, 0.7151522, 0.1191920)),
+    dot(dXyz, vec3<f32>(0.1804375, 0.0721750, 0.9503041))
+  );
+  return dLinear * vec3<f32>(
+    srgb_decode_derivative(rgb.r),
+    srgb_decode_derivative(rgb.g),
+    srgb_decode_derivative(rgb.b)
+  );
+}
+
+fn normalized_lab_l1_gradient_srgb(
+  rgb: vec3<f32>,
+  targetRgb: vec3<f32>,
+  progress: f32
+) -> vec3<f32> {
+  let lab = srgb_to_normalized_lab(rgb);
+  let targetLab = srgb_to_normalized_lab(targetRgb);
+  return normalized_lab_gradient_srgb(
+    rgb,
+    sign(lab - targetLab) * normalized_lab_weights(progress)
+  );
+}
+
+fn normalized_lab_l_only_gray_gradient_srgb(
+  rgb: vec3<f32>,
+  targetRgb: vec3<f32>
+) -> vec3<f32> {
+  let lab = srgb_to_normalized_lab(rgb);
+  let targetLab = srgb_to_normalized_lab(targetRgb);
+  let unconstrained = normalized_lab_gradient_srgb(
+    rgb,
+    vec3<f32>(sign(lab.x - targetLab.x), 0.0, 0.0)
+  );
+  // P1/P2 constrain R=G=B. Share the derivative of that one gray scalar
+  // equally across the three stored RGB parameters so Adam preserves neutrality.
+  return vec3<f32>((unconstrained.r + unconstrained.g + unconstrained.b) / 3.0);
+}
 `;
 
 function qaOverrides(name) {
@@ -1489,26 +1729,12 @@ function performanceVariants() {
   const bindGroupCacheQuery = query.get("bind-group-cache");
   const paintShapeCullingQuery = query.get("paint-shape-culling");
   const virtualExactCullingQuery = query.get("virtual-exact-culling");
-  const opacitySupportQuery = query.get("opacity-support");
-  const adaptiveThroughputQuery = query.get("adaptive-gpu-throughput");
   const gpuBatchQuery = query.get("gpu-batch");
   const asyncPresentationQuery = query.get("async-presentation");
   const metricReuseQuery = query.get("metric-render-reuse");
   const segmentedBackwardQuery = query.get("segmented-backward");
   const fixedPointGradientQuery = query.get("fixed-point-gradient");
   const inverseScaleQuery = query.get("inverse-scale-optimization");
-  const opacitySupportMode = overrides.opacityAwareSupportMode === "aggressive"
-    ? "aggressive"
-    : QA_RUNTIME_ENABLED && query.has("opacity-support")
-      ? (opacitySupportQuery === "aggressive" ? "aggressive" : "off")
-      : document.querySelector("#opacitySupportAggressive")?.checked
-        ? "aggressive"
-        : "off";
-  const adaptiveGpuThroughput = typeof overrides.adaptiveGpuThroughput === "boolean"
-    ? overrides.adaptiveGpuThroughput
-    : QA_RUNTIME_ENABLED && query.has("adaptive-gpu-throughput")
-      ? adaptiveThroughputQuery !== "0"
-      : Boolean(document.querySelector("#adaptiveGpuThroughput")?.checked);
   const adaptiveGpuBatch = typeof overrides.adaptiveGpuBatch === "boolean"
     ? overrides.adaptiveGpuBatch
     : QA_RUNTIME_ENABLED && query.has("gpu-batch")
@@ -1518,12 +1744,12 @@ function performanceVariants() {
     ? overrides.asyncPresentation
     : QA_RUNTIME_ENABLED && query.has("async-presentation")
       ? asyncPresentationQuery !== "0"
-      : adaptiveGpuThroughput;
+      : false;
   const metricTileReuse = typeof overrides.metricTileReuse === "boolean"
     ? overrides.metricTileReuse
     : QA_RUNTIME_ENABLED && query.has("metric-render-reuse")
       ? metricReuseQuery !== "0"
-      : adaptiveGpuThroughput;
+      : false;
   return {
     tileCooperativeRenderer: overrides.tileCooperativeRenderer === true,
     quadExactBackward: typeof overrides.quadExactBackward === "boolean"
@@ -1571,8 +1797,8 @@ function performanceVariants() {
       : QA_RUNTIME_ENABLED && query.has("inverse-scale-optimization")
         ? inverseScaleQuery !== "0"
         : false,
-    opacityAwareSupportMode: opacitySupportMode,
-    adaptiveGpuThroughput,
+    opacityAwareSupportMode: "off",
+    adaptiveGpuThroughput: false,
     adaptiveGpuBatch,
     gpuSchedulingMode: adaptiveGpuBatch ? "adaptive" : "compatible",
     asyncPresentation,
@@ -2362,6 +2588,15 @@ const els = {
   opaquePaintSummary: document.querySelector("#opaquePaintSummary"),
   opaquePaintOpacity: document.querySelector("#opaquePaintOpacity"),
   layeredBrushOpacity: document.querySelector("#layeredBrushOpacity"),
+  layeredBrushOpacityGradient: document.querySelector("#layeredBrushOpacityGradient"),
+  layeredBrushOpacityGradientStart: document.querySelector("#layeredBrushOpacityGradientStart"),
+  layeredBrushOpacityGradientEnd: document.querySelector("#layeredBrushOpacityGradientEnd"),
+  layeredBrushWidthTaper: document.querySelector("#layeredBrushWidthTaper"),
+  layeredBrushWidthTaperStart: document.querySelector("#layeredBrushWidthTaperStart"),
+  layeredBrushWidthTaperEnd: document.querySelector("#layeredBrushWidthTaperEnd"),
+  stageAwareLabTraining: document.querySelector("#stageAwareLabTraining"),
+  monochromeUnderpainting: document.querySelector("#monochromeUnderpainting"),
+  colorFinishStart: document.querySelector("#colorFinishStart"),
   rectangleTopRatio: document.querySelector("#rectangleTopRatio"),
   rectangleTopRatioMax: document.querySelector("#rectangleTopRatioMax"),
   rectangleMaxAspectRatio: document.querySelector("#rectangleMaxAspectRatio"),
@@ -2370,8 +2605,6 @@ const els = {
   rectangleEdgeDirectedTaper: document.querySelector("#rectangleEdgeDirectedTaper"),
   rectangleStructureAwareRatio: document.querySelector("#rectangleStructureAwareRatio"),
   rectangleAsymmetricSoftness: document.querySelector("#rectangleAsymmetricSoftness"),
-  opacitySupportAggressive: document.querySelector("#opacitySupportAggressive"),
-  adaptiveGpuThroughput: document.querySelector("#adaptiveGpuThroughput"),
   virtualBoundedDepth: document.querySelector("#virtualBoundedDepth"),
   virtualGofDensity: document.querySelector("#virtualGofDensity"),
   virtualCameraShare: document.querySelector("#virtualCameraShare"),
@@ -2871,6 +3104,15 @@ function publishState() {
   data.resultRenderCacheSource = state.metrics?.result_render_cache?.source || "";
   data.resultRenderCacheOrder = state.metrics?.result_render_cache?.order_mode || "";
   data.splatBytes = state.params ? String(state.params.count * ROW_BYTES) : "0";
+  data.brushTaperMinimum = Number.isFinite(state.metrics?.brush_taper_stats?.minimum)
+    ? String(state.metrics.brush_taper_stats.minimum)
+    : "";
+  data.brushTaperMean = Number.isFinite(state.metrics?.brush_taper_stats?.mean)
+    ? String(state.metrics.brush_taper_stats.mean)
+    : "";
+  data.brushTaperMaximum = Number.isFinite(state.metrics?.brush_taper_stats?.maximum)
+    ? String(state.metrics.brush_taper_stats.maximum)
+    : "";
   data.lastDownload = state.lastDownload;
   data.lastGpuLoss = state.lastGpuLoss === null ? "" : String(state.lastGpuLoss);
   // Keep the DOM on the same WebGPU metric snapshot used by logs and exports.
@@ -2920,6 +3162,15 @@ function publishState() {
   data.opaquePaintOpacityInput = String(selectedOpaquePaintOpacity());
   data.rectangleMinimumPaintOpacityInput = String(selectedOpaquePaintOpacity());
   data.layeredBrushOpacityInput = String(selectedLayeredBrushOpacity());
+  const brushDirectionalEffects = selectedLayeredBrushDirectionalEffects();
+  const sharedColorWorkflow = selectedSharedColorWorkflow();
+  data.layeredBrushOpacityGradientInput = String(brushDirectionalEffects.opacity);
+  data.layeredBrushOpacityGradientRange = `${brushDirectionalEffects.opacityStart},${brushDirectionalEffects.opacityEnd}`;
+  data.layeredBrushWidthTaperInput = String(brushDirectionalEffects.widthTaper);
+  data.layeredBrushWidthTaperRange = `${brushDirectionalEffects.widthStart},${brushDirectionalEffects.widthEnd}`;
+  data.stageAwareLabTrainingInput = String(sharedColorWorkflow.stageAwareLab);
+  data.monochromeUnderpaintingInput = String(sharedColorWorkflow.monochromeUnderpainting);
+  data.colorFinishStartInput = String(sharedColorWorkflow.colorFinishStartPercent);
   data.rectangleTopRatioInput = String(selectedRectangleTopRatio());
   data.rectangleTopRatioMaxInput =
     String(selectedRectangleTopRatioMax(selectedRectangleTopRatio()));
@@ -2930,8 +3181,6 @@ function publishState() {
   data.rectangleEdgeDirectedTaperInput = String(rectangleShape.edgeDirectedTaper);
   data.rectangleStructureAwareRatioInput = String(rectangleShape.structureAwareRatio);
   data.rectangleAsymmetricSoftnessInput = String(rectangleShape.asymmetricSoftness);
-  data.opacityAwareSupportInput = performanceVariants().opacityAwareSupportMode;
-  data.adaptiveGpuThroughputInput = String(Boolean(els.adaptiveGpuThroughput.checked));
   data.virtualCameraSamplingInput = String(algorithmUsesVirtualCameras());
   data.virtual3dgsMultiviewInput = "true";
   data.virtualGofDensityInput = String(Boolean(els.virtualGofDensity.checked));
@@ -5431,6 +5680,24 @@ function snapshotParams(params) {
     ),
     illustrativeOilVersion: Math.max(0, Math.round(Number(params.illustrativeOilVersion) || 0)),
     brushDetailRefinementEnabled: Boolean(params.brushDetailRefinementEnabled),
+    brushOpacityGradientEnabled: Boolean(params.brushOpacityGradientEnabled),
+    brushOpacityGradientStart: clampNumber(params.brushOpacityGradientStart, 0, 1, 0),
+    brushOpacityGradientEnd: clampNumber(params.brushOpacityGradientEnd, 0, 1, 1),
+    brushWidthTaperEnabled: Boolean(params.brushWidthTaperEnabled),
+    brushWidthTaperStart: clampNumber(params.brushWidthTaperStart, 0, 1, 1),
+    brushWidthTaperEnd: clampNumber(params.brushWidthTaperEnd, 0, 1, 0),
+    stageAwareLabTrainingEnabled: Boolean(params.stageAwareLabTrainingEnabled),
+    monochromeUnderpaintingEnabled: Boolean(params.monochromeUnderpaintingEnabled),
+    colorFinishStartPercent: clampNumber(
+      params.colorFinishStartPercent,
+      MIN_COLOR_FINISH_START_PERCENT,
+      MAX_COLOR_FINISH_START_PERCENT,
+      DEFAULT_COLOR_FINISH_START_PERCENT,
+    ),
+    colorFinishStartStep: Math.max(
+      0,
+      Math.round(Number(params.colorFinishStartStep) || 0),
+    ),
     currentVisibilityCompactionEnabled: params.currentVisibilityCompactionEnabled !== false,
     illustrativeOilFamilyStats: params.illustrativeOilFamilyStats
       ? structuredClone(params.illustrativeOilFamilyStats)
@@ -5443,6 +5710,9 @@ function snapshotParams(params) {
     theta: new Float32Array(params.theta),
     depthOrder: params.depthOrder ? new Float32Array(params.depthOrder) : initialDepthOrder(params.count),
     virtualDepth: params.virtualDepth ? new Float32Array(params.virtualDepth) : new Float32Array(params.count),
+    brushTaper: params.brushTaper
+      ? new Float32Array(params.brushTaper)
+      : new Float32Array(params.count).fill(DEFAULT_LAYERED_BRUSH_TAPER),
     virtualDepthEnabled: Boolean(params.virtualDepthEnabled),
     virtualDepthThickness: Number(params.virtualDepthThickness) || DEFAULT_VIRTUAL_DEPTH_THICKNESS,
     detailTags: params.detailTags ? new Float32Array(params.detailTags) : new Float32Array(params.count).fill(1),
@@ -6393,6 +6663,14 @@ function initOpaqueLayeredPaint(image, count, kernelShape) {
   params.deepPruneInterval = LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL;
   params.opacity.fill(params.minimumOpacity);
   const illustrativeOil = kernelShape === "opaque-brush";
+  const directionalEffects = selectedLayeredBrushDirectionalEffects();
+  params.brushOpacityGradientEnabled = illustrativeOil && directionalEffects.opacity;
+  params.brushOpacityGradientStart = directionalEffects.opacityStart;
+  params.brushOpacityGradientEnd = directionalEffects.opacityEnd;
+  params.brushWidthTaperEnabled = illustrativeOil && directionalEffects.widthTaper;
+  params.brushWidthTaperStart = directionalEffects.widthStart;
+  params.brushWidthTaperEnd = directionalEffects.widthEnd;
+  params.brushTaper = new Float32Array(baseCount).fill(DEFAULT_LAYERED_BRUSH_TAPER);
   params.illustrativeOilVersion = illustrativeOil ? 1 : 0;
   params.brushDetailRefinementEnabled = illustrativeOil && opaqueBrushDetailRefinementEnabled();
   const illustrativeOilFamilyCounts = [0, 0, 0];
@@ -6547,6 +6825,65 @@ function sampleImageAt(image, x, y, out, offset) {
   out[offset] = image.rgb[source];
   out[offset + 1] = image.rgb[source + 1];
   out[offset + 2] = image.rgb[source + 2];
+}
+
+function srgbSignalToLinear(value) {
+  const channel = Math.max(0, Math.min(1, Number(value) || 0));
+  return channel <= 0.04045
+    ? channel / 12.92
+    : ((channel + 0.055) / 1.055) ** 2.4;
+}
+
+function linearToSrgbSignal(value) {
+  const channel = Math.max(0, Math.min(1, Number(value) || 0));
+  return channel <= 0.0031308
+    ? channel * 12.92
+    : 1.055 * channel ** (1 / 2.4) - 0.055;
+}
+
+function neutralSrgbPreservingLabL(r, g, b) {
+  const relativeY =
+    0.2126729 * srgbSignalToLinear(r) +
+    0.7151522 * srgbSignalToLinear(g) +
+    0.0721750 * srgbSignalToLinear(b);
+  return linearToSrgbSignal(relativeY);
+}
+
+function convertRgbToNeutralLabL(rgb) {
+  for (let offset = 0; offset + 2 < rgb.length; offset += 3) {
+    const gray = neutralSrgbPreservingLabL(
+      rgb[offset],
+      rgb[offset + 1],
+      rgb[offset + 2],
+    );
+    rgb[offset] = gray;
+    rgb[offset + 1] = gray;
+    rgb[offset + 2] = gray;
+  }
+  return rgb;
+}
+
+function brushColorNeutrality(params = state.params) {
+  const rgb = params?.rgb;
+  const count = Math.min(params?.count || 0, Math.floor((rgb?.length || 0) / 3));
+  let maximumChannelDelta = 0;
+  let meanChannelDelta = 0;
+  for (let index = 0; index < count; index += 1) {
+    const offset = index * 3;
+    const delta = Math.max(
+      Math.abs(rgb[offset] - rgb[offset + 1]),
+      Math.abs(rgb[offset + 1] - rgb[offset + 2]),
+      Math.abs(rgb[offset + 2] - rgb[offset]),
+    );
+    maximumChannelDelta = Math.max(maximumChannelDelta, delta);
+    meanChannelDelta += delta;
+  }
+  return {
+    count,
+    maximum_channel_delta: maximumChannelDelta,
+    mean_channel_delta: meanChannelDelta / Math.max(1, count),
+    completely_neutral: maximumChannelDelta <= 1e-6,
+  };
 }
 
 function densifyWarmupSteps(steps) {
@@ -6850,6 +7187,7 @@ function densityGpuConfig({ image, count, targetCount, step, steps, layout, maxA
       layerEfficiency.influenceThreshold,
       state.params?.opaqueLayered ? 1 : 0,
     ], 0);
+  config[49] = experimentalDensifySteps(steps);
   configurePaintKernel(config, state.params);
   return { schedule, config };
 }
@@ -6957,6 +7295,7 @@ function growParamPlaceholders(params, targetCount) {
   const theta = new Float32Array(targetCount);
   const depthOrder = new Float32Array(targetCount);
   const virtualDepth = new Float32Array(targetCount);
+  const brushTaper = new Float32Array(targetCount);
   const detailTags = new Float32Array(targetCount);
   xy.set(params.xy);
   scale.set(params.scale);
@@ -6965,6 +7304,9 @@ function growParamPlaceholders(params, targetCount) {
   theta.set(params.theta);
   depthOrder.set(params.depthOrder || initialDepthOrder(oldCount));
   virtualDepth.set(params.virtualDepth || new Float32Array(oldCount));
+  brushTaper.set(
+    params.brushTaper || new Float32Array(oldCount).fill(DEFAULT_LAYERED_BRUSH_TAPER),
+  );
   detailTags.set(params.detailTags || new Float32Array(oldCount).fill(1));
   for (let i = oldCount; i < targetCount; i += 1) {
     const source = i % oldCount;
@@ -6979,6 +7321,7 @@ function growParamPlaceholders(params, targetCount) {
     theta[i] = params.theta[source];
     depthOrder[i] = params.depthOrder?.[source] ?? (1 - source / Math.max(1, oldCount - 1));
     virtualDepth[i] = params.virtualDepth?.[source] ?? 0;
+    brushTaper[i] = params.brushTaper?.[source] ?? DEFAULT_LAYERED_BRUSH_TAPER;
     detailTags[i] = params.detailTags?.[source] ?? 1;
   }
   return {
@@ -7012,6 +7355,24 @@ function growParamPlaceholders(params, targetCount) {
       params.rectangleAsymmetricSoftness ?? DEFAULT_RECTANGLE_ASYMMETRIC_SOFTNESS,
     illustrativeOilVersion: Math.max(0, Math.round(Number(params.illustrativeOilVersion) || 0)),
     brushDetailRefinementEnabled: Boolean(params.brushDetailRefinementEnabled),
+    brushOpacityGradientEnabled: Boolean(params.brushOpacityGradientEnabled),
+    brushOpacityGradientStart: clampNumber(params.brushOpacityGradientStart, 0, 1, 0),
+    brushOpacityGradientEnd: clampNumber(params.brushOpacityGradientEnd, 0, 1, 1),
+    brushWidthTaperEnabled: Boolean(params.brushWidthTaperEnabled),
+    brushWidthTaperStart: clampNumber(params.brushWidthTaperStart, 0, 1, 1),
+    brushWidthTaperEnd: clampNumber(params.brushWidthTaperEnd, 0, 1, 0),
+    stageAwareLabTrainingEnabled: Boolean(params.stageAwareLabTrainingEnabled),
+    monochromeUnderpaintingEnabled: Boolean(params.monochromeUnderpaintingEnabled),
+    colorFinishStartPercent: clampNumber(
+      params.colorFinishStartPercent,
+      MIN_COLOR_FINISH_START_PERCENT,
+      MAX_COLOR_FINISH_START_PERCENT,
+      DEFAULT_COLOR_FINISH_START_PERCENT,
+    ),
+    colorFinishStartStep: Math.max(
+      0,
+      Math.round(Number(params.colorFinishStartStep) || 0),
+    ),
     currentVisibilityCompactionEnabled: params.currentVisibilityCompactionEnabled !== false,
     illustrativeOilFamilyStats: params.illustrativeOilFamilyStats
       ? structuredClone(params.illustrativeOilFamilyStats)
@@ -7024,7 +7385,7 @@ function growParamPlaceholders(params, targetCount) {
       MAX_OPAQUE_PAINT_OPACITY,
       LAYERED_OPAQUE_BRUSH_OPACITY,
     ),
-    xy, scale, rgb, opacity, theta, depthOrder, virtualDepth, detailTags, count: targetCount,
+    xy, scale, rgb, opacity, theta, depthOrder, virtualDepth, brushTaper, detailTags, count: targetCount,
     rows: params.rows, cols: params.cols, bg: params.bg,
     boundarySigma: params.boundarySigma,
     layerOrderEnabled: Boolean(params.layerOrderEnabled),
@@ -7056,6 +7417,7 @@ function resizeParamPlaceholders(params, targetCount) {
     theta: slice(params.theta, targetCount),
     depthOrder: slice(params.depthOrder, targetCount),
     virtualDepth: slice(params.virtualDepth, targetCount),
+    brushTaper: slice(params.brushTaper, targetCount),
     detailTags: slice(params.detailTags, targetCount),
   };
 }
@@ -7082,6 +7444,7 @@ function compactSplatParams(params, keepIndices) {
     theta: copy(params.theta, 1),
     depthOrder: copy(params.depthOrder, 1),
     virtualDepth: copy(params.virtualDepth, 1),
+    brushTaper: copy(params.brushTaper, 1, DEFAULT_LAYERED_BRUSH_TAPER),
     detailTags: copy(params.detailTags, 1, 1),
   };
 }
@@ -7783,7 +8146,6 @@ async function detectWebGpu() {
       },
       subgroups: device.features.has("subgroups"),
     };
-    syncExperimentalPerformanceControls();
     device.lost.then((info) => handleWebGpuDeviceLoss(renderer, info));
     els.backendText.textContent = "webgpu available";
     updateMemoryRecommendation();
@@ -8180,7 +8542,7 @@ class WebGpuPreview {
       Number(limits.maxComputeInvocationsPerWorkgroup || 0) >= TILE_SIZE * TILE_SIZE &&
       Number(limits.maxComputeWorkgroupSizeX || 0) >= TILE_SIZE &&
       Number(limits.maxComputeWorkgroupSizeY || 0) >= TILE_SIZE &&
-      Number(limits.maxComputeWorkgroupStorageSize || 0) >= 12288;
+      Number(limits.maxComputeWorkgroupStorageSize || 0) >= 16384;
     const cooperative =
       performanceVariants().tileCooperativeRenderer &&
       Boolean(els.tileCullingToggle.checked) &&
@@ -8271,6 +8633,7 @@ fn preview_kernel(
   s: f32,
   scale: vec2f,
   packedTag: f32,
+  taperAmount: f32,
   worldPoint: vec2f
 ) -> f32 {
   if (uniforms.shapeMode > 4.5) {
@@ -8281,7 +8644,14 @@ fn preview_kernel(
       normalized,
       scale.x >= scale.y,
       ${LAYERED_OPAQUE_BRUSH_EDGE_SOFTNESS},
-      family
+      family,
+      taperAmount,
+      uniforms.reservedPreview1 > 0.5,
+      uniforms.reservedPreview2 > 0.5,
+      uniforms.reservedPreview0,
+      uniforms.pad2,
+      uniforms.padPaint0,
+      uniforms.padPaint1
     ).kernel;
     return oilKernel;
   }
@@ -8379,7 +8749,7 @@ fn fs(in: VertexOut) -> @location(0) vec4f {
     );
     let mip = mip_weight_scale(baseScale);
     let useEwa = uniforms.useEwa > 0.5;
-    var kernel = preview_kernel(d, c, sT, mip.xy, t.w, p);
+    var kernel = preview_kernel(d, c, sT, mip.xy, t.w, xy[i].rawDepth, p);
     var compensation = select(mip.z, 1.0, uniforms.shapeMode > 0.5);
     if (useEwa) {
       let sampleOffset = select(0.5, 0.28867513459481287, uniforms.useGaussLegendre > 0.5);
@@ -8391,10 +8761,10 @@ fn fs(in: VertexOut) -> @location(0) vec4f {
       let p01 = select(p + vec2f(-ox,  oy), clamp(p + vec2f(-ox,  oy), vec2f(-1.0), vec2f(1.0)), clampToImage);
       let p11 = select(p + vec2f( ox,  oy), clamp(p + vec2f( ox,  oy), vec2f(-1.0), vec2f(1.0)), clampToImage);
       kernel = 0.25 * (
-        preview_kernel(p00 - xy[i].center, c, sT, baseScale, t.w, p00) +
-        preview_kernel(p10 - xy[i].center, c, sT, baseScale, t.w, p10) +
-        preview_kernel(p01 - xy[i].center, c, sT, baseScale, t.w, p01) +
-        preview_kernel(p11 - xy[i].center, c, sT, baseScale, t.w, p11)
+        preview_kernel(p00 - xy[i].center, c, sT, baseScale, t.w, xy[i].rawDepth, p00) +
+        preview_kernel(p10 - xy[i].center, c, sT, baseScale, t.w, xy[i].rawDepth, p10) +
+        preview_kernel(p01 - xy[i].center, c, sT, baseScale, t.w, xy[i].rawDepth, p01) +
+        preview_kernel(p11 - xy[i].center, c, sT, baseScale, t.w, xy[i].rawDepth, p11)
       );
       compensation = 1.0;
     }
@@ -8778,7 +9148,7 @@ fn sort_tiles(
 }
 `;
     const shader = `
-struct Config { values: array<vec4<f32>, 25>, };
+struct Config { values: array<vec4<f32>, 27>, };
 @group(0) @binding(0) var<uniform> config: Config;
 struct SplatPosition { center: vec2<f32>, rawDepth: f32, depthGradient: f32, };
 @group(0) @binding(1) var<storage, read> xy: array<SplatPosition>;
@@ -9627,8 +9997,8 @@ fn commit_layers(@builtin(global_invocation_id) id: vec3<u32>) {
       shapeMode,
       params.layerAwareAccumulationEnabled ? 1 : 0,
       Math.max(MIN_DISCRETE_LAYER_COUNT, Math.min(MAX_DISCRETE_LAYER_COUNT, Math.round(params.discreteLayerCount || DEFAULT_DISCRETE_LAYER_COUNT))),
-      0,
-      0,
+      clampNumber(params.brushWidthTaperStart, 0, 1, 1),
+      clampNumber(params.brushWidthTaperEnd, 0, 1, 0),
       clampNumber(
         params.rectangleTopRatio,
         MIN_RECTANGLE_TOP_RATIO,
@@ -9649,10 +10019,10 @@ fn commit_layers(@builtin(global_invocation_id) id: vec3<u32>) {
         ? Math.max(0, Number(options.splatScaleMultiplier))
         : 1,
       Math.max(0.000001, Number(options.localAspectRatio) || 1),
-      0,
-      0,
-      0,
-      0,
+      clampNumber(params.brushOpacityGradientStart, 0, 1, 0),
+      params.brushOpacityGradientEnabled ? 1 : 0,
+      params.brushWidthTaperEnabled ? 1 : 0,
+      clampNumber(params.brushOpacityGradientEnd, 0, 1, 1),
     ]);
     const buffers = [];
     let xyBuffer = sourceBuffers?.xyBuffer;
@@ -10071,7 +10441,7 @@ fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   let importanceW = select(previousImportance.w + 1.0, previousImportance.w + coherenceNorm, densityGradientMode == 2u);
   stats[capacity + g] = vec4<f32>(mix(previousImportance.xyz, measuredImportance, importanceAlpha), importanceW);`;
     const renderShader = `
-struct Config { values: array<vec4<f32>, 25>, };
+struct Config { values: array<vec4<f32>, 27>, };
 struct AlphaState { compositeAlpha: f32, acceptedEnd: u32, pad0: f32, pad1: u32, };
 @group(0) @binding(0) var<uniform> config: Config;
 struct SplatPosition { center: vec2<f32>, rawDepth: f32, depthGradient: f32, };
@@ -10100,7 +10470,14 @@ fn gaussian_kernel(d: vec2<f32>, c: f32, s: f32, scale: vec2<f32>) -> f32 {
   return exp(-0.5 * q);
 }
 
-fn training_kernel(d: vec2<f32>, c: f32, s: f32, scale: vec2<f32>, packedTag: f32) -> f32 {
+fn training_kernel(
+  d: vec2<f32>,
+  c: f32,
+  s: f32,
+  scale: vec2<f32>,
+  packedTag: f32,
+  taperAmount: f32
+) -> f32 {
   if (cfg(40u) < 0.5) {
     return gaussian_kernel(d, c, s, scale);
   }
@@ -10111,7 +10488,14 @@ fn training_kernel(d: vec2<f32>, c: f32, s: f32, scale: vec2<f32>, packedTag: f3
       normalized,
       scale.x >= scale.y,
       clamp(cfg(41u), 0.01, 0.49),
-      illustrative_oil_family(scale, packedTag)
+      illustrative_oil_family(scale, packedTag),
+      taperAmount,
+      cfg(94u) > 0.5,
+      cfg(95u) > 0.5,
+      cfg(101u),
+      cfg(102u),
+      cfg(103u),
+      cfg(104u)
     ).kernel;
   }
   let widthRatios = rectangle_effective_width_ratios(
@@ -10147,6 +10531,7 @@ var<workgroup> tileShared0: array<vec4<f32>, ${TILE_SIZE * TILE_SIZE}>;
 var<workgroup> tileShared1: array<vec4<f32>, ${TILE_SIZE * TILE_SIZE}>;
 var<workgroup> tileSharedColor: array<vec4<f32>, ${TILE_SIZE * TILE_SIZE}>;
 var<workgroup> tileSharedLayer: array<f32, ${TILE_SIZE * TILE_SIZE}>;
+var<workgroup> tileSharedTaper: array<f32, ${TILE_SIZE * TILE_SIZE}>;
 var<workgroup> tileSharedPackedOrder: array<f32, ${TILE_SIZE * TILE_SIZE}>;
 var<workgroup> tileSharedIndex: array<u32, ${TILE_SIZE * TILE_SIZE}>;
 
@@ -10244,7 +10629,7 @@ fn render_state(
       }
       let splatPoint = select(virtual_inverse_point_at_z(outputPoint, layerZ).xy, outputPoint, camera_covariance_3d_enabled());
       let d = splatPoint - center;
-      var kernel = training_kernel(d, c, s, sampleScale, t.w);
+      var kernel = training_kernel(d, c, s, sampleScale, t.w, xy[g].rawDepth);
       if (useEwa) {
         let sampleOffset = select(0.5, 0.28867513459481287, cfg(31u) > 0.5);
         let ox = select(0.0, sampleOffset / f32(width - 1u), width > 1u);
@@ -10258,10 +10643,10 @@ fn render_state(
         let q01 = select(virtual_inverse_point_at_z(p01, layerZ).xy, p01, camera_covariance_3d_enabled());
         let q11 = select(virtual_inverse_point_at_z(p11, layerZ).xy, p11, camera_covariance_3d_enabled());
         kernel = 0.25 * (
-          training_kernel(q00 - center, c, s, baseScale, t.w) +
-          training_kernel(q10 - center, c, s, baseScale, t.w) +
-          training_kernel(q01 - center, c, s, baseScale, t.w) +
-          training_kernel(q11 - center, c, s, baseScale, t.w)
+          training_kernel(q00 - center, c, s, baseScale, t.w, xy[g].rawDepth) +
+          training_kernel(q10 - center, c, s, baseScale, t.w, xy[g].rawDepth) +
+          training_kernel(q01 - center, c, s, baseScale, t.w, xy[g].rawDepth) +
+          training_kernel(q11 - center, c, s, baseScale, t.w, xy[g].rawDepth)
         );
       }
       if (kernel >= 0.0003354626) {
@@ -10395,6 +10780,7 @@ fn render_state_tile(
       tileShared1[localIndex] = vec4<f32>(sampleScale, mip, select(0.0, 1.0, isActive));
       tileSharedColor[localIndex] = color[g];
       tileSharedLayer[localIndex] = layerZ;
+      tileSharedTaper[localIndex] = xy[g].rawDepth;
       tileSharedPackedOrder[localIndex] = t.w;
       tileSharedIndex[localIndex] = g;
     }
@@ -10408,7 +10794,7 @@ fn render_state_tile(
           let sampleScale = tileShared1[j].xy;
           let layerZ = tileSharedLayer[j];
           let splatPoint = select(virtual_inverse_point_at_z(outputPoint, layerZ).xy, outputPoint, camera_covariance_3d_enabled());
-          var kernel = training_kernel(splatPoint - center, c, s, sampleScale, tileSharedPackedOrder[j]);
+          var kernel = training_kernel(splatPoint - center, c, s, sampleScale, tileSharedPackedOrder[j], tileSharedTaper[j]);
           if (useEwa) {
             let p00 = clamp(outputPoint + vec2<f32>(-ox, -oy), vec2<f32>(-1.0), vec2<f32>(1.0));
             let p10 = clamp(outputPoint + vec2<f32>( ox, -oy), vec2<f32>(-1.0), vec2<f32>(1.0));
@@ -10419,15 +10805,14 @@ fn render_state_tile(
             let q01 = select(virtual_inverse_point_at_z(p01, layerZ).xy, p01, camera_covariance_3d_enabled());
             let q11 = select(virtual_inverse_point_at_z(p11, layerZ).xy, p11, camera_covariance_3d_enabled());
             kernel = 0.25 * (
-              training_kernel(q00 - center, c, s, sampleScale, tileSharedPackedOrder[j]) +
-              training_kernel(q10 - center, c, s, sampleScale, tileSharedPackedOrder[j]) +
-              training_kernel(q01 - center, c, s, sampleScale, tileSharedPackedOrder[j]) +
-              training_kernel(q11 - center, c, s, sampleScale, tileSharedPackedOrder[j])
+              training_kernel(q00 - center, c, s, sampleScale, tileSharedPackedOrder[j], tileSharedTaper[j]) +
+              training_kernel(q10 - center, c, s, sampleScale, tileSharedPackedOrder[j], tileSharedTaper[j]) +
+              training_kernel(q01 - center, c, s, sampleScale, tileSharedPackedOrder[j], tileSharedTaper[j]) +
+              training_kernel(q11 - center, c, s, sampleScale, tileSharedPackedOrder[j], tileSharedTaper[j])
             );
           }
           if (kernel >= 0.0003354626) {
             let rgba = tileSharedColor[j];
-            let d = splatPoint - center;
             let surfaceRgb = rgba.rgb;
             let fixedOpaque = cfg(85u) > 0.5 && cfg(90u) < 0.5;
             let minimumOpacity = select(0.0, cfg(88u), cfg(85u) > 0.5 && cfg(90u) > 0.5);
@@ -10617,7 +11002,7 @@ fn ssim_tiles(
 }`;
 
     const lossGradientShader = [
-      "struct Config { values: array<vec4<f32>, 20>, };",
+      "struct Config { values: array<vec4<f32>, 27>, };",
       "@group(0) @binding(0) var<uniform> config: Config;",
       "@group(0) @binding(1) var<storage, read> targetRgb: array<f32>;",
       "@group(0) @binding(2) var<storage, read> targetAlpha: array<f32>;",
@@ -10626,6 +11011,7 @@ fn ssim_tiles(
       "@group(0) @binding(5) var<storage, read_write> lossGradient: array<vec4<f32>>;",
       "fn cfg(i: u32) -> f32 { return config.values[i / 4u][i % 4u]; }",
       VIRTUAL_TILT_WGSL,
+      CIELAB_D65_WGSL,
       "fn target_color_at(point: vec2<f32>, width: u32, height: u32) -> vec3<f32> {",
       "  let source = clamp((point * 0.5 + 0.5) * vec2<f32>(f32(width - 1u), f32(height - 1u)), vec2<f32>(0.0), vec2<f32>(f32(width - 1u), f32(height - 1u)));",
       "  let p0 = vec2<u32>(floor(source));",
@@ -10689,7 +11075,16 @@ fn ssim_tiles(
       "  let sampledTarget = select(target_color_at(inversePoint.xy, width, height), directTarget, source_domain_reprojection_enabled());",
       "  let targetColor = select(vec3<f32>(0.0), sampledTarget, inversePoint.z > 0.5);",
       "  let residual = renderedState.rgb - targetColor;",
+      "  let fullLabTraining = (u32(round(cfg(93u))) & 2u) != 0u;",
+      "  let monochromeUnderpainting = (u32(round(cfg(93u))) & 4u) != 0u;",
+      "  let underpaintingActive = monochromeUnderpainting && cfg(8u) < cfg(100u);",
+      "  let trainingProgress = clamp(cfg(8u) / max(cfg(9u), 1.0), 0.0, 1.0);",
       "  var dColor = sign(residual) * ((1.0 - 0.2) / 3.0);",
+      "  if (underpaintingActive) {",
+      "    dColor = normalized_lab_l_only_gray_gradient_srgb(renderedState.rgb, targetColor);",
+      "  } else if (fullLabTraining) {",
+      "    dColor = normalized_lab_l1_gradient_srgb(renderedState.rgb, targetColor, trainingProgress);",
+      "  }",
       "  let ssimTileCols = (width + 7u) / 8u;",
       "  let tile = (py / 8u) * ssimTileCols + (px / 8u);",
       "  let moments = ssimTiles[tile * 4u];",
@@ -10708,8 +11103,8 @@ fn ssim_tiles(
       "  let cc = safe_signed(mux * mux + muy * muy + 0.0001);",
       "  let dd = safe_signed(vx + vy + 0.0009);",
       "  let dSsim = ssim * ((2.0 * muy / n) / a + (2.0 * (y - muy) / n) / b - (2.0 * mux / n) / cc - (2.0 * (x - mux) / n) / dd);",
-      "  dColor += vec3<f32>(-0.5 * 0.2 * dSsim / 3.0);",
-      "  if (cfg(15u) > 0.5) {",
+      "  if (!fullLabTraining && !underpaintingActive) { dColor += vec3<f32>(-0.5 * 0.2 * dSsim / 3.0); }",
+      "  if (!fullLabTraining && !underpaintingActive && cfg(15u) > 0.5) {",
       "    var gradientDerivative = 0.0;",
       "    var gradientTerms = 0.0;",
       "    if (px > 0u) {",
@@ -10749,7 +11144,14 @@ fn ssim_tiles(
       "  let alphaD = safe_signed(alphaVx + alphaVy + 0.0009);",
       "  let dAlphaSsim = alphaSsim * ((2.0 * alphaMuy / alphaN) / alphaA + (2.0 * (alphaY - alphaMuy) / alphaN) / alphaB - (2.0 * alphaMux / alphaN) / alphaC - (2.0 * (alphaX - alphaMux) / alphaN) / alphaD);",
       "  var dAlpha = cfg(46u) * ((1.0 - 0.2) * sign(alphaX - alphaY) - 0.5 * 0.2 * dAlphaSsim);",
-      "  let residualMagnitude = (abs(residual.r) + abs(residual.g) + abs(residual.b)) / 3.0;",
+      "  var residualMagnitude = (abs(residual.r) + abs(residual.g) + abs(residual.b)) / 3.0;",
+      "  if (fullLabTraining) {",
+      "    let labResidual = abs(srgb_to_normalized_lab(renderedState.rgb) - srgb_to_normalized_lab(targetColor));",
+      "    residualMagnitude = dot(labResidual, normalized_lab_weights(trainingProgress));",
+      "  }",
+      "  if (underpaintingActive) {",
+      "    residualMagnitude = abs(srgb_to_normalized_lab(renderedState.rgb).x - srgb_to_normalized_lab(targetColor).x);",
+      "  }",
       "  if (cfg(21u) > 0.5 && residualMagnitude > 0.02) {",
       "    dAlpha += -2.0 * cfg(23u) * max(0.0, cfg(22u) - renderedState.a);",
       "  }",
@@ -10852,9 +11254,9 @@ fn ssim_tiles(
       ];
     const exactBackwardShader = [
       this.subgroupExactBackwardEnabled ? "enable subgroups;" : "",
-      "struct Config { values: array<vec4<f32>, 25>, };",
+      "struct Config { values: array<vec4<f32>, 27>, };",
       "struct AlphaState { compositeAlpha: f32, acceptedEnd: u32, pad0: f32, pad1: u32, };",
-      "struct KernelSample { kernel: f32, dCenter: vec2<f32>, dLogScale: vec2<f32>, dTheta: f32, };",
+      "struct KernelSample { kernel: f32, dCenter: vec2<f32>, dLogScale: vec2<f32>, dTheta: f32, dTaper: f32, };",
       "struct KernelEvaluation { rawKernel: f32, weightedKernel: f32, dCenter: vec2<f32>, dLogScale: vec2<f32>, dTheta: f32, dDepth: f32, };",
       "@group(0) @binding(0) var<uniform> config: Config;",
       "struct SplatPosition { center: vec2<f32>, rawDepth: f32, depthGradient: f32, };",
@@ -10879,7 +11281,7 @@ fn ssim_tiles(
       ILLUSTRATIVE_OIL_WGSL,
       "fn tile_offset(index: u32) -> u32 { return tileOffsets[index] & 0x7fffffffu; }",
       "fn tile_list_overflow() -> bool { return cfg(19u) > 0.5 && (tileOffsets[arrayLength(&tileOffsets) - 1u] & 0x80000000u) != 0u; }",
-      "fn kernel_sample(d: vec2<f32>, c: f32, s: f32, baseScale: vec2<f32>, sampleScale: vec2<f32>, includeMipGradient: bool, packedTag: f32) -> KernelSample {",
+      "fn kernel_sample(d: vec2<f32>, c: f32, s: f32, baseScale: vec2<f32>, sampleScale: vec2<f32>, includeMipGradient: bool, packedTag: f32, taperAmount: f32) -> KernelSample {",
       "  let r = vec2<f32>(c * d.x + s * d.y, -s * d.x + c * d.y);",
       "  if (cfg(40u) > 3.5) {",
       `    let extent = ${LAYERED_OPAQUE_BRUSH_KERNEL_EXTENT};`,
@@ -10889,9 +11291,16 @@ fn ssim_tiles(
       "      normalized,",
       "      sampleScale.x >= sampleScale.y,",
       "      clamp(cfg(41u), 0.01, 0.49),",
-      "      illustrative_oil_family(baseScale, packedTag)",
+      "      illustrative_oil_family(baseScale, packedTag),",
+      "      taperAmount,",
+      "      cfg(94u) > 0.5,",
+      "      cfg(95u) > 0.5,",
+      "      cfg(101u),",
+      "      cfg(102u),",
+      "      cfg(103u),",
+      "      cfg(104u)",
       "    );",
-      "    if (sample.kernel <= 0.00000001) { return KernelSample(0.0, vec2<f32>(0.0), vec2<f32>(0.0), 0.0); }",
+      "    if (sample.kernel <= 0.00000001) { return KernelSample(0.0, vec2<f32>(0.0), vec2<f32>(0.0), 0.0, 0.0); }",
       "    let dLogDNormalized = sample.gradient / max(sample.kernel, 0.000001);",
       "    let dLogDr = dLogDNormalized / extentScale;",
       "    let dCenter = vec2<f32>(-c * dLogDr.x + s * dLogDr.y, -s * dLogDr.x - c * dLogDr.y);",
@@ -10899,7 +11308,7 @@ fn ssim_tiles(
       "    var dLogScale = -dLogDNormalized * normalized;",
       "    dLogScale *= baseRatio;",
       "    let dTheta = dLogDr.x * r.y - dLogDr.y * r.x;",
-      "    return KernelSample(sample.kernel, dCenter, dLogScale, dTheta);",
+      "    return KernelSample(sample.kernel, dCenter, dLogScale, dTheta, sample.taperGradient / max(sample.kernel, 0.000001));",
       "  }",
       "  if (cfg(40u) > 0.5) {",
       `    let extent = ${RECTANGLE_KERNEL_EXTENT};`,
@@ -10910,18 +11319,18 @@ fn ssim_tiles(
       "    let normalized = r / extentScale;",
       `    let asymmetricSoftness = rectangle_flag_enabled(cfg(97u), ${RECTANGLE_FLAG_ASYMMETRIC_SOFTNESS}u);`,
       "    let sample = rectangle_trapezoid_kernel_sample(normalized, feather, widthRatios.x, widthRatios.y, asymmetricSoftness);",
-      "    if (sample.kernel <= 0.00000001) { return KernelSample(0.0, vec2<f32>(0.0), vec2<f32>(0.0), 0.0); }",
+      "    if (sample.kernel <= 0.00000001) { return KernelSample(0.0, vec2<f32>(0.0), vec2<f32>(0.0), 0.0, 0.0); }",
       "    let dLogDNormalized = sample.gradient / max(sample.kernel, 0.000001);",
       "    let dLogDr = dLogDNormalized / extentScale;",
       "    let dCenter = vec2<f32>(-c * dLogDr.x + s * dLogDr.y, -s * dLogDr.x - c * dLogDr.y);",
       "    let baseRatio = (baseScale * baseScale) / max(sampleScale * sampleScale, vec2<f32>(0.00000001));",
       "    let dLogScale = -dLogDNormalized * normalized * baseRatio;",
       "    let dTheta = dLogDr.x * r.y - dLogDr.y * r.x;",
-      "    return KernelSample(sample.kernel, dCenter, dLogScale, dTheta);",
+      "    return KernelSample(sample.kernel, dCenter, dLogScale, dTheta, 0.0);",
       "  }",
       "  let invS2 = 1.0 / (sampleScale * sampleScale);",
       "  let q = dot(r * r, invS2);",
-      "  if (q > 16.0) { return KernelSample(0.0, vec2<f32>(0.0), vec2<f32>(0.0), 0.0); }",
+      "  if (q > 16.0) { return KernelSample(0.0, vec2<f32>(0.0), vec2<f32>(0.0), 0.0, 0.0); }",
       "  let kernel = exp(-0.5 * q);",
       "  let dCenter = vec2<f32>(r.x * c * invS2.x - r.y * s * invS2.y, r.x * s * invS2.x + r.y * c * invS2.y);",
       "  var dLogScale = vec2<f32>(r.x * r.x * baseScale.x * baseScale.x / pow(sampleScale.x, 4.0), r.y * r.y * baseScale.y * baseScale.y / pow(sampleScale.y, 4.0));",
@@ -10930,7 +11339,7 @@ fn ssim_tiles(
       "    dLogScale += 0.5 * (vec2<f32>(1.0) - ratio);",
       "  }",
       "  let dTheta = -r.x * r.y * (invS2.x - invS2.y);",
-      "  return KernelSample(kernel, dCenter, dLogScale, dTheta);",
+      "  return KernelSample(kernel, dCenter, dLogScale, dTheta, 0.0);",
       "}",
       "fn evaluate_kernel(g: u32, p: vec2<f32>, outputPoint: vec2<f32>, sourceCenter: vec2<f32>, rawDepth: f32, sourceT: vec4<f32>, width: u32, height: u32) -> KernelEvaluation {",
       "  let center = sourceCenter;",
@@ -10953,30 +11362,33 @@ fn ssim_tiles(
       "    var screenCenterDerivative = vec2<f32>(0.0);",
       "    var projectedScaleDerivative = vec2<f32>(0.0);",
       "    var projectedThetaDerivative = 0.0;",
+      "    var taperDerivative = 0.0;",
       "    if (!useEwa) {",
-      "      let sample = kernel_sample(outputPoint - projected.center, projectedC, projectedS, projectedScale, projectedEffective, true, t.w);",
+      "      let sample = kernel_sample(outputPoint - projected.center, projectedC, projectedS, projectedScale, projectedEffective, true, t.w, rawDepth);",
       "      let mip = select(sqrt((projectedScale.x * projectedScale.y) / max(projectedEffective.x * projectedEffective.y, 0.00000001)), 1.0, cfg(40u) > 0.5);",
       "      rawKernel = sample.kernel;",
       "      weightedKernel = sample.kernel * mip;",
       "      screenCenterDerivative = sample.kernel * mip * sample.dCenter;",
       "      projectedScaleDerivative = sample.kernel * mip * sample.dLogScale;",
       "      projectedThetaDerivative = sample.kernel * mip * sample.dTheta;",
+      "      taperDerivative = sample.kernel * mip * sample.dTaper;",
       "    } else {",
       "      let sampleOffset = select(0.5, 0.28867513459481287, cfg(31u) > 0.5);",
       "      let ox = select(0.0, sampleOffset / f32(width - 1u), width > 1u);",
       "      let oy = select(0.0, sampleOffset / f32(height - 1u), height > 1u);",
-      "      let sample0 = kernel_sample(clamp(outputPoint + vec2<f32>(-ox, -oy), vec2<f32>(-1.0), vec2<f32>(1.0)) - projected.center, projectedC, projectedS, projectedScale, projectedScale, false, t.w);",
-      "      let sample1 = kernel_sample(clamp(outputPoint + vec2<f32>( ox, -oy), vec2<f32>(-1.0), vec2<f32>(1.0)) - projected.center, projectedC, projectedS, projectedScale, projectedScale, false, t.w);",
-      "      let sample2 = kernel_sample(clamp(outputPoint + vec2<f32>(-ox,  oy), vec2<f32>(-1.0), vec2<f32>(1.0)) - projected.center, projectedC, projectedS, projectedScale, projectedScale, false, t.w);",
-      "      let sample3 = kernel_sample(clamp(outputPoint + vec2<f32>( ox,  oy), vec2<f32>(-1.0), vec2<f32>(1.0)) - projected.center, projectedC, projectedS, projectedScale, projectedScale, false, t.w);",
+      "      let sample0 = kernel_sample(clamp(outputPoint + vec2<f32>(-ox, -oy), vec2<f32>(-1.0), vec2<f32>(1.0)) - projected.center, projectedC, projectedS, projectedScale, projectedScale, false, t.w, rawDepth);",
+      "      let sample1 = kernel_sample(clamp(outputPoint + vec2<f32>( ox, -oy), vec2<f32>(-1.0), vec2<f32>(1.0)) - projected.center, projectedC, projectedS, projectedScale, projectedScale, false, t.w, rawDepth);",
+      "      let sample2 = kernel_sample(clamp(outputPoint + vec2<f32>(-ox,  oy), vec2<f32>(-1.0), vec2<f32>(1.0)) - projected.center, projectedC, projectedS, projectedScale, projectedScale, false, t.w, rawDepth);",
+      "      let sample3 = kernel_sample(clamp(outputPoint + vec2<f32>( ox,  oy), vec2<f32>(-1.0), vec2<f32>(1.0)) - projected.center, projectedC, projectedS, projectedScale, projectedScale, false, t.w, rawDepth);",
       "      rawKernel = 0.25 * (sample0.kernel + sample1.kernel + sample2.kernel + sample3.kernel);",
       "      weightedKernel = rawKernel;",
       "      screenCenterDerivative = 0.25 * (sample0.kernel * sample0.dCenter + sample1.kernel * sample1.dCenter + sample2.kernel * sample2.dCenter + sample3.kernel * sample3.dCenter);",
       "      projectedScaleDerivative = 0.25 * (sample0.kernel * sample0.dLogScale + sample1.kernel * sample1.dLogScale + sample2.kernel * sample2.dLogScale + sample3.kernel * sample3.dLogScale);",
       "      projectedThetaDerivative = 0.25 * (sample0.kernel * sample0.dTheta + sample1.kernel * sample1.dTheta + sample2.kernel * sample2.dTheta + sample3.kernel * sample3.dTheta);",
+      "      taperDerivative = 0.25 * (sample0.kernel * sample0.dTaper + sample1.kernel * sample1.dTaper + sample2.kernel * sample2.dTaper + sample3.kernel * sample3.dTaper);",
       "    }",
       "    let sourceGradient = source_projection_gradient(center, layerZ, t, screenCenterDerivative, projectedScaleDerivative, projectedThetaDerivative);",
-      "    let depthDerivative = select(0.0, sourceGradient.layerZ, cfg(67u) > 0.5);",
+      "    let depthDerivative = select(select(0.0, taperDerivative, cfg(95u) > 0.5), sourceGradient.layerZ, cfg(67u) > 0.5);",
       "    return KernelEvaluation(rawKernel, weightedKernel, sourceGradient.center, sourceGradient.logScale, sourceGradient.theta, depthDerivative);",
       "  }",
       "  let splatPoint = virtual_inverse_point_at_z(outputPoint, layerZ).xy;",
@@ -10988,10 +11400,11 @@ fn ssim_tiles(
       "    inverseDepthDerivative = (after - before) / (2.0 * epsilon);",
       "  }",
       "  if (!useEwa) {",
-      "    let sample = kernel_sample(splatPoint - center, c, s, baseScale, effective, true, t.w);",
+      "    let sample = kernel_sample(splatPoint - center, c, s, baseScale, effective, true, t.w, rawDepth);",
       "    let mip = select(sqrt((baseScale.x * baseScale.y) / max(effective.x * effective.y, 0.00000001)), 1.0, cfg(40u) > 0.5);",
       "    let weightedCenter = sample.kernel * mip * sample.dCenter;",
-      "    return KernelEvaluation(sample.kernel, sample.kernel * mip, weightedCenter, sample.kernel * mip * sample.dLogScale, sample.kernel * mip * sample.dTheta, -dot(weightedCenter, inverseDepthDerivative));",
+      "    let auxiliaryDerivative = select(select(0.0, sample.kernel * mip * sample.dTaper, cfg(95u) > 0.5), -dot(weightedCenter, inverseDepthDerivative), cfg(67u) > 0.5);",
+      "    return KernelEvaluation(sample.kernel, sample.kernel * mip, weightedCenter, sample.kernel * mip * sample.dLogScale, sample.kernel * mip * sample.dTheta, auxiliaryDerivative);",
       "  }",
       "  let sampleOffset = select(0.5, 0.28867513459481287, cfg(31u) > 0.5);",
       "  let ox = select(0.0, sampleOffset / f32(width - 1u), width > 1u);",
@@ -11000,15 +11413,17 @@ fn ssim_tiles(
       "  let q1 = virtual_inverse_point_at_z(clamp(outputPoint + vec2<f32>( ox, -oy), vec2<f32>(-1.0), vec2<f32>(1.0)), layerZ).xy;",
       "  let q2 = virtual_inverse_point_at_z(clamp(outputPoint + vec2<f32>(-ox,  oy), vec2<f32>(-1.0), vec2<f32>(1.0)), layerZ).xy;",
       "  let q3 = virtual_inverse_point_at_z(clamp(outputPoint + vec2<f32>( ox,  oy), vec2<f32>(-1.0), vec2<f32>(1.0)), layerZ).xy;",
-      "  let sample0 = kernel_sample(q0 - center, c, s, baseScale, baseScale, false, t.w);",
-      "  let sample1 = kernel_sample(q1 - center, c, s, baseScale, baseScale, false, t.w);",
-      "  let sample2 = kernel_sample(q2 - center, c, s, baseScale, baseScale, false, t.w);",
-      "  let sample3 = kernel_sample(q3 - center, c, s, baseScale, baseScale, false, t.w);",
+      "  let sample0 = kernel_sample(q0 - center, c, s, baseScale, baseScale, false, t.w, rawDepth);",
+      "  let sample1 = kernel_sample(q1 - center, c, s, baseScale, baseScale, false, t.w, rawDepth);",
+      "  let sample2 = kernel_sample(q2 - center, c, s, baseScale, baseScale, false, t.w, rawDepth);",
+      "  let sample3 = kernel_sample(q3 - center, c, s, baseScale, baseScale, false, t.w, rawDepth);",
       "  let rawKernel = 0.25 * (sample0.kernel + sample1.kernel + sample2.kernel + sample3.kernel);",
       "  let dCenter = 0.25 * (sample0.kernel * sample0.dCenter + sample1.kernel * sample1.dCenter + sample2.kernel * sample2.dCenter + sample3.kernel * sample3.dCenter);",
       "  let dLogScale = 0.25 * (sample0.kernel * sample0.dLogScale + sample1.kernel * sample1.dLogScale + sample2.kernel * sample2.dLogScale + sample3.kernel * sample3.dLogScale);",
       "  let dTheta = 0.25 * (sample0.kernel * sample0.dTheta + sample1.kernel * sample1.dTheta + sample2.kernel * sample2.dTheta + sample3.kernel * sample3.dTheta);",
-      "  return KernelEvaluation(rawKernel, rawKernel, dCenter, dLogScale, dTheta, -dot(dCenter, inverseDepthDerivative));",
+      "  let dTaper = 0.25 * (sample0.kernel * sample0.dTaper + sample1.kernel * sample1.dTaper + sample2.kernel * sample2.dTaper + sample3.kernel * sample3.dTaper);",
+      "  let auxiliaryDerivative = select(select(0.0, dTaper, cfg(95u) > 0.5), -dot(dCenter, inverseDepthDerivative), cfg(67u) > 0.5);",
+      "  return KernelEvaluation(rawKernel, rawKernel, dCenter, dLogScale, dTheta, auxiliaryDerivative);",
       "}",
       ...(fixedPointExactGradientEnabled
         ? [
@@ -11144,17 +11559,23 @@ fn ssim_tiles(
       "          let unclampedAlpha = evaluation.weightedKernel * effectiveOpacity;",
       "          let alpha = clamp(unclampedAlpha, 0.0, alphaLimit);",
       "          if (alpha >= 0.0039215686) {",
+      "            let exactD = p - xy[g].center;",
+      "            let exactC = cos(t.z);",
+      "            let exactS = sin(t.z);",
       "            let surfaceRgb = rgba.rgb;",
       "            let transBefore = transAfter / max(1.0 - alpha, select(0.01, 0.005, fixedOpaque));",
       "            let dAlpha = transBefore * dot(dColor, surfaceRgb) - gradTransmittance * transBefore;",
       "            let differentiableAlpha = select(0.0, dAlpha, unclampedAlpha > 0.0 && unclampedAlpha < alphaLimit);",
       "            let dWeightedKernel = differentiableAlpha * effectiveOpacity;",
-      "            let gradCenter = dWeightedKernel * evaluation.dCenter;",
-      "            let gradLogScale = dWeightedKernel * evaluation.dLogScale;",
-      "            let gradTheta = dWeightedKernel * evaluation.dTheta;",
+      "            var gradCenter = dWeightedKernel * evaluation.dCenter;",
+      "            var gradLogScale = dWeightedKernel * evaluation.dLogScale;",
+      "            var gradTheta = dWeightedKernel * evaluation.dTheta;",
       "            let influence = transBefore * alpha;",
-      "            let anchor = sign(surfaceRgb - targetAndError.rgb) * (cfg(44u) * influence / 3.0);",
-      "            let gradColor = dColor * influence + anchor;",
+      "            let fullLabTraining = (u32(round(cfg(93u))) & 2u) != 0u;",
+      "            let underpaintingActive = (u32(round(cfg(93u))) & 4u) != 0u && cfg(8u) < cfg(100u);",
+      "            let anchor = select(sign(surfaceRgb - targetAndError.rgb) * (cfg(44u) * influence / 3.0), vec3<f32>(0.0), fullLabTraining || underpaintingActive);",
+      "            let surfaceGradient = dColor * influence + anchor;",
+      "            let gradColor = surfaceGradient;",
       "            let gradLogit = select(differentiableAlpha * evaluation.weightedKernel * rgba.a * (1.0 - rgba.a), 0.0, fixedOpaque);",
       "            geom = vec4<f32>(gradCenter, gradLogScale) * cfg(35u);",
       "            appearance = vec4<f32>(gradColor, gradLogit) * cfg(36u);",
@@ -11214,17 +11635,23 @@ fn ssim_tiles(
       "        let unclampedAlpha = evaluation.weightedKernel * effectiveOpacity;",
       "        let alpha = clamp(unclampedAlpha, 0.0, alphaLimit);",
       "        if (alpha >= 0.0039215686) {",
+      "          let exactD = inversePoint.xy - xy[g].center;",
+      "          let exactC = cos(t.z);",
+      "          let exactS = sin(t.z);",
       "          let surfaceRgb = rgba.rgb;",
       "          let transBefore = transAfter / max(1.0 - alpha, select(0.01, 0.005, fixedOpaque));",
       "          let dAlpha = transBefore * dot(dColor, surfaceRgb) - gradTransmittance * transBefore;",
       "          let differentiableAlpha = select(0.0, dAlpha, unclampedAlpha > 0.0 && unclampedAlpha < alphaLimit);",
       "          let dWeightedKernel = differentiableAlpha * effectiveOpacity;",
-      "          let gradCenter = dWeightedKernel * evaluation.dCenter;",
-      "          let gradLogScale = dWeightedKernel * evaluation.dLogScale;",
-      "          let gradTheta = dWeightedKernel * evaluation.dTheta;",
+      "          var gradCenter = dWeightedKernel * evaluation.dCenter;",
+      "          var gradLogScale = dWeightedKernel * evaluation.dLogScale;",
+      "          var gradTheta = dWeightedKernel * evaluation.dTheta;",
       "          let influence = transBefore * alpha;",
-      "          let anchor = sign(surfaceRgb - targetAndError.rgb) * (cfg(44u) * influence / 3.0);",
-      "          let gradColor = dColor * influence + anchor;",
+      "          let fullLabTraining = (u32(round(cfg(93u))) & 2u) != 0u;",
+      "          let underpaintingActive = (u32(round(cfg(93u))) & 4u) != 0u && cfg(8u) < cfg(100u);",
+      "          let anchor = select(sign(surfaceRgb - targetAndError.rgb) * (cfg(44u) * influence / 3.0), vec3<f32>(0.0), fullLabTraining || underpaintingActive);",
+      "          let surfaceGradient = dColor * influence + anchor;",
+      "          let gradColor = surfaceGradient;",
       "          let gradLogit = select(differentiableAlpha * evaluation.weightedKernel * rgba.a * (1.0 - rgba.a), 0.0, fixedOpaque);",
       "          let geom = vec4<f32>(gradCenter, gradLogScale) * cfg(35u);",
       "          let appearance = vec4<f32>(gradColor, gradLogit) * cfg(36u);",
@@ -11316,19 +11743,26 @@ fn ssim_tiles(
       "            let unclampedAlpha = evaluation.weightedKernel * effectiveOpacity;",
       "            let alpha = clamp(unclampedAlpha, 0.0, alphaLimit);",
       "            if (alpha >= 0.0039215686) {",
+      "              let exactD = points[i] - xy[g].center;",
+      "              let exactC = cos(t.z);",
+      "              let exactS = sin(t.z);",
       "              let surfaceRgb = rgba.rgb;",
       "              let transBefore = transAfters[i] / max(1.0 - alpha, select(0.01, 0.005, fixedOpaque));",
       "              let dAlpha = transBefore * dot(dColors[i], surfaceRgb) - gradTransmittances[i] * transBefore;",
       "              let differentiableAlpha = select(0.0, dAlpha, unclampedAlpha > 0.0 && unclampedAlpha < alphaLimit);",
       "              let dWeightedKernel = differentiableAlpha * effectiveOpacity;",
-      "              let gradCenter = dWeightedKernel * evaluation.dCenter;",
-      "              let gradLogScale = dWeightedKernel * evaluation.dLogScale;",
-      "              let gradTheta = dWeightedKernel * evaluation.dTheta;",
+      "              var gradCenter = dWeightedKernel * evaluation.dCenter;",
+      "              var gradLogScale = dWeightedKernel * evaluation.dLogScale;",
+      "              var gradTheta = dWeightedKernel * evaluation.dTheta;",
       "              let influence = transBefore * alpha;",
-      "              let anchor = sign(surfaceRgb - targetsAndErrors[i].rgb) * (cfg(44u) * influence / 3.0);",
+      "              let fullLabTraining = (u32(round(cfg(93u))) & 2u) != 0u;",
+      "              let underpaintingActive = (u32(round(cfg(93u))) & 4u) != 0u && cfg(8u) < cfg(100u);",
+      "              let anchor = select(sign(surfaceRgb - targetsAndErrors[i].rgb) * (cfg(44u) * influence / 3.0), vec3<f32>(0.0), fullLabTraining || underpaintingActive);",
+      "              let surfaceGradient = dColors[i] * influence + anchor;",
       "              geom += vec4<f32>(gradCenter, gradLogScale) * cfg(35u);",
       "              let gradLogit = select(differentiableAlpha * evaluation.weightedKernel * rgba.a * (1.0 - rgba.a), 0.0, fixedOpaque);",
-      "              appearance += vec4<f32>(dColors[i] * influence + anchor, gradLogit) * cfg(36u);",
+      "              let gradColor = surfaceGradient;",
+      "              appearance += vec4<f32>(gradColor, gradLogit) * cfg(36u);",
       "              misc += vec4<f32>(gradTheta * cfg(35u), influence, targetsAndErrors[i].a * cfg(37u), cfg(37u));",
       "              density += vec4<f32>(abs(gradCenter), length(gradCenter), 0.0) * cfg(37u);",
       "              depth += dWeightedKernel * evaluation.dDepth * cfg(38u);",
@@ -11345,7 +11779,7 @@ fn ssim_tiles(
     ].join("\n");
 
     const segmentedReferenceShader = `
-struct Config { values: array<vec4<f32>, 25>, };
+struct Config { values: array<vec4<f32>, 27>, };
 @group(0) @binding(0) var<uniform> config: Config;
 @group(0) @binding(1) var<storage, read> tileOffsets: array<u32>;
 @group(0) @binding(2) var<storage, read> tileIndices: array<u32>;
@@ -11400,7 +11834,7 @@ fn fill_references(
 }`;
 
     const segmentedGradientReduceShader = `
-struct Config { values: array<vec4<f32>, 25>, };
+struct Config { values: array<vec4<f32>, 27>, };
 @group(0) @binding(0) var<uniform> config: Config;
 @group(0) @binding(1) var<storage, read> referenceOffsets: array<u32>;
 @group(0) @binding(2) var<storage, read> references: array<u32>;
@@ -11664,7 +12098,7 @@ fn virtual_order_penalty(
 `;
 
     const optimizerShader = `
-struct Config { values: array<vec4<f32>, 25>, };
+struct Config { values: array<vec4<f32>, 27>, };
 struct AdamState {
   mGeom: vec4<f32>,
   vGeom: vec4<f32>,
@@ -11958,6 +12392,9 @@ fn apply_optimizer(
     ? "1.0 / max((1.0 / baseScale) * max(vec2<f32>(0.5), vec2<f32>(1.0) - geomAdam.zw * scaleLr), vec2<f32>(0.0001))"
     : "exp(log(baseScale) - geomAdam.zw * scaleLr)"};
   var nextColor = clamp(rgba.rgb - colorAdam.rgb * colorLr, vec3<f32>(0.0), vec3<f32>(1.0));
+  if ((u32(round(cfg(93u))) & 4u) != 0u && step < cfg(100u)) {
+    nextColor = vec3<f32>(dot(nextColor, vec3<f32>(1.0 / 3.0)));
+  }
   let currentLogit = log(clamp(rgba.a, 0.005, 0.995) / (1.0 - clamp(rgba.a, 0.005, 0.995)));
   var nextOpacity = select(
     1.0 / (1.0 + exp(-(currentLogit - colorAdam.w * opacityLr))),
@@ -12001,6 +12438,24 @@ fn apply_optimizer(
       accumulatedDepthGradient = 0.0;
       depthObservationCount = 0.0;
     }
+  } else if (cfg(40u) > 3.5 && cfg(95u) > 0.5) {
+    let taperGradient = gradDepth * normalizer;
+    let taperM = beta1 * previousDepthM + (1.0 - beta1) * taperGradient;
+    let taperV = beta2 * previousDepthV + (1.0 - beta2) * taperGradient * taperGradient;
+    let taperUpdates = previousDepthUpdates + 1.0;
+    let taperBias1 = max(0.000001, 1.0 - pow(beta1, taperUpdates));
+    let taperBias2 = max(0.000001, 1.0 - pow(beta2, taperUpdates));
+    let taperAdam = (taperM / taperBias1) / (sqrt(taperV / taperBias2) + 0.00000001);
+    nextVirtualDepthRaw = clamp(
+      nextVirtualDepthRaw - taperAdam * cfg(87u) * lrScale * spatialGate,
+      0.0,
+      1.0
+    );
+    opt.mTheta.y = taperM;
+    opt.vTheta.y = taperV;
+    opt.mTheta.z = taperUpdates;
+    accumulatedDepthGradient = 0.0;
+    depthObservationCount = 0.0;
   } else {
     nextVirtualDepthRaw = 0.0;
     accumulatedDepthGradient = 0.0;
@@ -12211,6 +12666,9 @@ fn optimize(@builtin(global_invocation_id) id: vec3<u32>) {
     ? "1.0 / max((1.0 / baseScale) * max(vec2<f32>(0.5), vec2<f32>(1.0) - geomAdam.zw * scaleLr), vec2<f32>(0.0001))"
     : "exp(log(baseScale) - geomAdam.zw * scaleLr)"};
   var nextColor = clamp(rgba.rgb - colorAdam.rgb * colorLr, vec3<f32>(0.0), vec3<f32>(1.0));
+  if ((u32(round(cfg(93u))) & 4u) != 0u && step < cfg(100u)) {
+    nextColor = vec3<f32>(dot(nextColor, vec3<f32>(1.0 / 3.0)));
+  }
   let currentLogit = log(clamp(rgba.a, 0.005, 0.995) / (1.0 - clamp(rgba.a, 0.005, 0.995)));
   var nextOpacity = select(
     1.0 / (1.0 + exp(-(currentLogit - colorAdam.w * opacityLr))),
@@ -14249,12 +14707,40 @@ fn hash_unit(seed: f32) -> f32 {
   return x - floor(x);
 }
 
+fn underpaint_decode_srgb(value: f32) -> f32 {
+  let c = clamp(value, 0.0, 1.0);
+  return select(pow((c + 0.055) / 1.055, 2.4), c / 12.92, c <= 0.04045);
+}
+
+fn underpaint_encode_srgb(value: f32) -> f32 {
+  let c = clamp(value, 0.0, 1.0);
+  return select(1.055 * pow(c, 1.0 / 2.4) - 0.055, 12.92 * c, c <= 0.0031308);
+}
+
+fn underpaint_neutral_lab_l(rgb: vec3<f32>) -> vec3<f32> {
+  let relativeY = dot(
+    vec3<f32>(
+      underpaint_decode_srgb(rgb.r),
+      underpaint_decode_srgb(rgb.g),
+      underpaint_decode_srgb(rgb.b)
+    ),
+    vec3<f32>(0.2126729, 0.7151522, 0.0721750)
+  );
+  return vec3<f32>(underpaint_encode_srgb(relativeY));
+}
+
+fn monochrome_underpainting_active() -> bool {
+  return (u32(round(config[93])) & 4u) != 0u &&
+    config[4] < config[100];
+}
+
 fn target_at(pos: vec2<f32>, width: u32, height: u32) -> vec3<f32> {
   let safePos = min(max(pos, vec2<f32>(-1.0)), vec2<f32>(1.0));
   let px = min(width - 1u, u32(floor((safePos.x * 0.5 + 0.5) * f32(width - 1u) + 0.5)));
   let py = min(height - 1u, u32(floor((safePos.y * 0.5 + 0.5) * f32(height - 1u) + 0.5)));
   let index = (py * width + px) * 3u;
-  return vec3<f32>(targetRgb[index], targetRgb[index + 1u], targetRgb[index + 2u]);
+  let rgb = vec3<f32>(targetRgb[index], targetRgb[index + 1u], targetRgb[index + 2u]);
+  return select(rgb, underpaint_neutral_lab_l(rgb), monochrome_underpainting_active());
 }
 
 // Paint kernels cover an oriented area, so center-pixel RGB alone is not a
@@ -15265,7 +15751,11 @@ fn apply_grow(@builtin(global_invocation_id) id: vec3u) {
     // reach the surface after its source-footprint color has been fitted.
     let reseedLayer = select(randomizedReseedLayer, 0.0, config[40] > 3.5 && config[65] > 0.5);
     xy[index].center = nextPos;
-    xy[index].rawDepth = 0.0;
+    xy[index].rawDepth = select(
+      0.0,
+      ${DEFAULT_LAYERED_BRUSH_TAPER},
+      config[40] > 3.5 && config[95] > 0.5
+    );
     xy[index].depthGradient = 0.0;
     transform[index] = vec4<f32>(nextScale, nextTheta, select(1.0, 2.0, adaptiveDetail) + reseedLayer);
     color[index] = vec4<f32>(
@@ -17430,6 +17920,7 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
     config[82] = Math.max(MIN_DISCRETE_LAYER_COUNT, Math.min(MAX_DISCRETE_LAYER_COUNT, Math.round(params.discreteLayerCount || DEFAULT_DISCRETE_LAYER_COUNT)));
     config[83] = Math.max(0, Math.min(config[82] - 1, Math.round(params.discreteLayerMoveRadius ?? DEFAULT_DISCRETE_LAYER_MOVE_RADIUS)));
     config[84] = params.layerAwareAccumulationEnabled ? 1 : 0;
+    config[49] = experimentalDensifySteps(state.metrics?.steps_requested || 1);
     configurePaintKernel(config, params);
     const sourceDomainActive = config[72] > 0.5;
     const segmentedExactBackwardActive = Boolean(
@@ -18214,10 +18705,16 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
       const mapped = readBuffer.getMappedRange(0, totalBytes);
       const positions = new Float32Array(mapped, 0, params.count * 4);
       if (!params.virtualDepth || params.virtualDepth.length !== params.count) params.virtualDepth = new Float32Array(params.count);
+      if (!params.brushTaper || params.brushTaper.length !== params.count) {
+        params.brushTaper = new Float32Array(params.count).fill(DEFAULT_LAYERED_BRUSH_TAPER);
+      }
       for (let i = 0; i < params.count; i += 1) {
         params.xy[i * 2] = positions[i * 4];
         params.xy[i * 2 + 1] = positions[i * 4 + 1];
         params.virtualDepth[i] = params.virtualDepthEnabled ? positions[i * 4 + 2] : 0;
+        if (params.brushWidthTaperEnabled) {
+          params.brushTaper[i] = Math.max(0, Math.min(1, positions[i * 4 + 2]));
+        }
       }
       const transforms = new Float32Array(mapped, xyBytes, params.count * 4);
       params.detailTags = new Float32Array(params.count);
@@ -18246,6 +18743,25 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
         state.metrics.detail_splat_ratio = detailSplatCount / Math.max(1, params.count);
         state.metrics.detail_anisotropy_max = detailAnisotropyMax;
         state.metrics.surface_anisotropy_max = surfaceAnisotropyMax;
+        if (params.brushWidthTaperEnabled) {
+          let minimumTaper = 1;
+          let maximumTaper = 0;
+          let taperSum = 0;
+          for (let i = 0; i < params.count; i += 1) {
+            const taper = params.brushTaper[i];
+            minimumTaper = Math.min(minimumTaper, taper);
+            maximumTaper = Math.max(maximumTaper, taper);
+            taperSum += taper;
+          }
+          state.metrics.brush_taper_stats = {
+            minimum: minimumTaper,
+            mean: taperSum / Math.max(1, params.count),
+            maximum: maximumTaper,
+            learned_on_gpu: true,
+          };
+        } else {
+          state.metrics.brush_taper_stats = null;
+        }
       }
       const colors = new Float32Array(mapped, xyBytes + transformBytes, params.count * 4);
       for (let i = 0; i < params.count; i += 1) {
@@ -18808,7 +19324,9 @@ function packPositions(params) {
     positions[i * 4 + 1] = params.xy[i * 2 + 1];
     positions[i * 4 + 2] = params.virtualDepthEnabled
       ? Math.max(-VIRTUAL_DEPTH_RAW_LIMIT, Math.min(VIRTUAL_DEPTH_RAW_LIMIT, params.virtualDepth?.[i] || 0))
-      : 0;
+      : params.brushWidthTaperEnabled
+        ? Math.max(0, Math.min(1, params.brushTaper?.[i] ?? DEFAULT_LAYERED_BRUSH_TAPER))
+        : 0;
     positions[i * 4 + 3] = 0;
   }
   return positions;
@@ -19020,6 +19538,9 @@ function setInputControlsDisabled(disabled) {
     els.stepCount,
     els.previewRefresh,
     els.liveQualityMetrics,
+    els.stageAwareLabTraining,
+    els.monochromeUnderpainting,
+    els.colorFinishStart,
     els.tileCullingToggle,
     els.trainLayerOrder,
     els.layerAwareAccumulation,
@@ -19039,6 +19560,12 @@ function setInputControlsDisabled(disabled) {
     els.alphaLossWeight,
     els.opaquePaintOpacity,
     els.layeredBrushOpacity,
+    els.layeredBrushOpacityGradient,
+    els.layeredBrushOpacityGradientStart,
+    els.layeredBrushOpacityGradientEnd,
+    els.layeredBrushWidthTaper,
+    els.layeredBrushWidthTaperStart,
+    els.layeredBrushWidthTaperEnd,
     els.rectangleTopRatio,
     els.rectangleTopRatioMax,
     els.rectangleMaxAspectRatio,
@@ -19047,8 +19574,6 @@ function setInputControlsDisabled(disabled) {
     els.rectangleEdgeDirectedTaper,
     els.rectangleStructureAwareRatio,
     els.rectangleAsymmetricSoftness,
-    els.opacitySupportAggressive,
-    els.adaptiveGpuThroughput,
     els.virtualBoundedDepth,
     els.virtualGofDensity,
     els.virtualCameraShare,
@@ -19084,13 +19609,7 @@ function setInputControlsDisabled(disabled) {
   if (!disabled) {
     syncLayerOrderDependency();
     syncVirtualCameraDependency();
-    syncExperimentalPerformanceControls();
   }
-}
-
-function syncExperimentalPerformanceControls() {
-  els.opacitySupportAggressive.disabled = state.running;
-  els.adaptiveGpuThroughput.disabled = state.running;
 }
 
 function syncAlgorithmRequirements() {
@@ -19170,7 +19689,20 @@ function syncAlgorithmRequirements() {
     "Minimum learned opacity for Rectangle Splats; individual opacity may train above this floor.";
   els.layeredBrushOpacity.disabled = state.running || !brushSelected;
   els.layeredBrushOpacity.title =
-    "Minimum learned opacity for Layered Opaque Brush paint splats; training may raise individual splats above this floor and the value is independent from Rectangle Splats.";
+    "Minimum learned opacity for Brush Splats; training may raise individual splats above this floor and the value is independent from Rectangle Splats.";
+  els.layeredBrushOpacityGradient.disabled = state.running || !brushSelected;
+  els.layeredBrushOpacityGradientStart.disabled =
+    state.running || !brushSelected || !els.layeredBrushOpacityGradient.checked;
+  els.layeredBrushOpacityGradientEnd.disabled =
+    state.running || !brushSelected || !els.layeredBrushOpacityGradient.checked;
+  els.layeredBrushWidthTaper.disabled = state.running || !brushSelected;
+  els.layeredBrushWidthTaperStart.disabled =
+    state.running || !brushSelected || !els.layeredBrushWidthTaper.checked;
+  els.layeredBrushWidthTaperEnd.disabled =
+    state.running || !brushSelected || !els.layeredBrushWidthTaper.checked;
+  els.stageAwareLabTraining.disabled = state.running;
+  els.monochromeUnderpainting.disabled = state.running;
+  els.colorFinishStart.disabled = state.running || !els.monochromeUnderpainting.checked;
   els.rectangleTopRatio.disabled = state.running || !rectangleSelected;
   els.rectangleTopRatioMax.disabled = state.running || !rectangleSelected;
   els.rectangleMaxAspectRatio.disabled = state.running || !rectangleSelected;
@@ -19694,13 +20226,17 @@ async function updatePreview(step, final = false, { present = true, readOnlyPeri
   const reusableMetricRender = Boolean(
     !final && state.webgpu.renderer?.canReuseMetricRender(state.image)
   );
-  if (readOnlyPeriodic && !reusableMetricRender) {
-    throw new Error("Periodic metrics require the existing full-resolution training render.");
-  }
   const reuseMetricRender = Boolean(
     reusableMetricRender &&
     (readOnlyPeriodic || performanceVariants().metricTileReuse)
   );
+  if (readOnlyPeriodic && !reuseMetricRender && els.tileCullingToggle.checked) {
+    await awaitTrainingRun(run, state.webgpu.renderer.prepareTileLists(
+      state.image,
+      state.params,
+      { sync: true },
+    ));
+  }
   if (!readOnlyPeriodic && els.tileCullingToggle.checked && state.webgpu.renderer?.trainState) {
     const includeTileDistribution = Boolean(
       performanceProfileRequested() &&
@@ -20190,13 +20726,6 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   const renderer = run.renderer;
   const performanceSelection = renderer.configureExperimentalPerformance();
   document.documentElement.dataset.opacityAwareSupport = performanceSelection.opacityAwareSupportMode;
-  document.documentElement.dataset.adaptiveGpuThroughput = String(performanceSelection.adaptiveGpuThroughput);
-  if (
-    performanceSelection.opacityAwareSupportMode !== "off" ||
-    performanceSelection.adaptiveGpuThroughput
-  ) {
-    log(`experimental GPU performance adaptive_throughput=${performanceSelection.adaptiveGpuThroughput} opacity_support=${performanceSelection.opacityAwareSupportMode}`);
-  }
   const requestedSteps = normalizeStepInteger(els.stepCount.value, {
     min: LIMITS.stepsMin,
     max: LIMITS.stepsMax,
@@ -20279,6 +20808,8 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   let finalCount = baseFinalCount;
   const runRectanglePaintOpacity = selectedOpaquePaintOpacity();
   const runLayeredBrushOpacity = selectedLayeredBrushOpacity();
+  const runBrushDirectionalEffects = selectedLayeredBrushDirectionalEffects();
+  const runSharedColorWorkflow = selectedSharedColorWorkflow();
   const runOpaquePaintOpacity = algorithmUsesLayeredOpaqueBrush(algorithm)
     ? runLayeredBrushOpacity
     : runRectanglePaintOpacity;
@@ -20355,6 +20886,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   els.hiddenRgbRecolorStrength.value = String(runHiddenRgbRecolorSettings.strength * 100);
   els.opaquePaintOpacity.value = String(runRectanglePaintOpacity);
   els.layeredBrushOpacity.value = String(runLayeredBrushOpacity);
+  els.colorFinishStart.value = String(runSharedColorWorkflow.colorFinishStartPercent);
   els.rectangleTopRatio.value = String(runRectangleTopRatio);
   els.rectangleTopRatioMax.value = String(runRectangleTopRatioMax);
   els.rectangleMaxAspectRatio.value = String(runRectangleMaxAspectRatio);
@@ -20377,12 +20909,24 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   if (budget.overBudget) {
     log(`settings exceed safety budget ${budget.estimatedMB}MB > ${budget.budgetMB}MB; recommended ${budget.recommendedTrainSize}px ${budget.recommendedFinalSplats} splats`);
   }
-  const initialization = algorithmUsesPaintKernel(algorithm)
-    ? "image-rgb-importance-bsp"
+  const initialization = runSharedColorWorkflow.monochromeUnderpainting
+    ? algorithmUsesPaintKernel(algorithm)
+      ? "image-lab-l-monochrome-importance-bsp"
+      : "image-lab-l-monochrome-grid"
+    : algorithmUsesPaintKernel(algorithm)
+      ? "image-rgb-importance-bsp"
     : runAdaptiveGridInitialization.requested
       ? "image-rgb-grid-adaptive-placement"
       : "image-rgb-grid";
   state.params = algorithm.initialize(state.image, baseInitialCount);
+  state.params.stageAwareLabTrainingEnabled = runSharedColorWorkflow.stageAwareLab;
+  state.params.monochromeUnderpaintingEnabled = runSharedColorWorkflow.monochromeUnderpainting;
+  state.params.colorFinishStartPercent = runSharedColorWorkflow.colorFinishStartPercent;
+  state.params.colorFinishStartStep = colorFinishStartStep(
+    steps,
+    runSharedColorWorkflow.colorFinishStartPercent,
+  );
+  if (state.params.monochromeUnderpaintingEnabled) convertRgbToNeutralLabL(state.params.rgb);
   initialCount = state.params.count;
   finalCount = Math.max(initialCount, finalCount);
   state.params.layerAwareAccumulationEnabled = runDiscreteLayerSettings.accumulationEnabled;
@@ -20426,6 +20970,18 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       : DEFAULT_RECTANGLE_ASYMMETRIC_SOFTNESS;
     state.params.minimumOpacity = runOpaquePaintOpacity;
     state.params.opacity.fill(runOpaquePaintOpacity);
+    const brushSelected = algorithmUsesLayeredOpaqueBrush(algorithm);
+    state.params.brushOpacityGradientEnabled =
+      brushSelected && runBrushDirectionalEffects.opacity;
+    state.params.brushOpacityGradientStart = runBrushDirectionalEffects.opacityStart;
+    state.params.brushOpacityGradientEnd = runBrushDirectionalEffects.opacityEnd;
+    state.params.brushWidthTaperEnabled =
+      brushSelected && runBrushDirectionalEffects.widthTaper;
+    state.params.brushWidthTaperStart = runBrushDirectionalEffects.widthStart;
+    state.params.brushWidthTaperEnd = runBrushDirectionalEffects.widthEnd;
+    if (!state.params.brushTaper || state.params.brushTaper.length !== state.params.count) {
+      state.params.brushTaper = new Float32Array(state.params.count).fill(DEFAULT_LAYERED_BRUSH_TAPER);
+    }
     state.params.layerOrderEnabled = true;
     state.params.layerAwareAccumulationEnabled = true;
     state.params.discreteLayersEnabled = true;
@@ -20480,6 +21036,48 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
           surface_recovery_start_step: experimentalDensifySteps(steps),
         }
       : null,
+    color_objective: runSharedColorWorkflow.monochromeUnderpainting
+      ? {
+          domain: runSharedColorWorkflow.stageAwareLab
+            ? "cielab-l-underpainting-then-stage-aware-cielab"
+            : "cielab-l-underpainting-then-signal-srgb",
+          loss: runSharedColorWorkflow.stageAwareLab
+            ? "percentage-scheduled-l-star-then-stage-aware-normalized-lab-l1"
+            : "percentage-scheduled-l-star-then-rgb-l1-dssim-frequency",
+          components: runSharedColorWorkflow.stageAwareLab
+            ? ["L*", "a*", "b*"]
+            : ["L*", "RGB"],
+          schedule: {
+            initialization: "neutral-srgb-preserving-cielab-l-star",
+            monochrome_until_percent:
+              runSharedColorWorkflow.colorFinishStartPercent,
+            color_finish_start_step: state.params.colorFinishStartStep,
+            before_color_finish: "L*-only; R=G=B projection",
+            from_color_finish: runSharedColorWorkflow.stageAwareLab
+              ? "stage-aware CIELAB D65 L1 using the current global training stage"
+              : "signal-sRGB L1/DSSIM/frequency",
+            phase_independent: true,
+          },
+          rgb_storage_and_final_metrics_unchanged: true,
+        }
+      : runSharedColorWorkflow.stageAwareLab
+        ? {
+          domain: "cielab-d65",
+          loss: "stage-aware-normalized-lab-l1",
+          components: ["L*", "a*", "b*"],
+          schedule: {
+            p1: { l: 1, ab: 0.10 },
+            p2: { l: 1, ab_start: 0.10, ab_end: 0.20 },
+            p3: { l: 1, ab_start: 0.20, ab_end: 1, full_ab_at_fraction: 0.90 },
+            normalization: "sum-to-one",
+          },
+          rgb_render_and_metrics_unchanged: true,
+          }
+        : {
+          domain: "signal-srgb",
+          loss: "rgb-l1-dssim-frequency",
+          rgb_render_and_metrics_unchanged: true,
+        },
     initial_splats: initialCount,
     final_splats: finalCount,
     num_gaussians: initialCount,
@@ -20524,6 +21122,21 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         algorithmUsesRectangleKernel(algorithm) ? runRectanglePaintOpacity : null,
       layeredBrushMinimumPaintOpacity:
         algorithmUsesLayeredOpaqueBrush(algorithm) ? runLayeredBrushOpacity : null,
+      layeredBrushOpacityGradient:
+        algorithmUsesLayeredOpaqueBrush(algorithm) ? runBrushDirectionalEffects.opacity : null,
+      layeredBrushOpacityGradientRange:
+        algorithmUsesLayeredOpaqueBrush(algorithm)
+          ? [runBrushDirectionalEffects.opacityStart, runBrushDirectionalEffects.opacityEnd]
+          : null,
+      layeredBrushWidthTaper:
+        algorithmUsesLayeredOpaqueBrush(algorithm) ? runBrushDirectionalEffects.widthTaper : null,
+      layeredBrushWidthTaperRange:
+        algorithmUsesLayeredOpaqueBrush(algorithm)
+          ? [runBrushDirectionalEffects.widthStart, runBrushDirectionalEffects.widthEnd]
+          : null,
+      stageAwareLabTraining: runSharedColorWorkflow.stageAwareLab,
+      monochromeUnderpainting: runSharedColorWorkflow.monochromeUnderpainting,
+      colorFinishStartPercent: runSharedColorWorkflow.colorFinishStartPercent,
       discreteLayers: runDiscreteLayerSettings.enabled,
       discreteLayerCount: runDiscreteLayerSettings.count,
       discreteLayerMoveRadius: runDiscreteLayerSettings.moveRadius,
@@ -20628,6 +21241,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
     detail_splat_ratio: null,
     detail_anisotropy_max: null,
     surface_anisotropy_max: null,
+    brush_taper_stats: null,
     thin_line_metrics: null,
     fusion_events: emptyFusionEvents(),
     fusion_refine_events: [],
@@ -21370,13 +21984,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         step < steps &&
         (step % metricInterval === 0 || traceProfileLabels.length > 0)
       );
-      const periodicReadOnlyReady = Boolean(
-        periodicEvaluationDue &&
-        state.webgpu.renderer?.canReuseMetricRender(state.image)
-      );
-      if (periodicEvaluationDue && !periodicReadOnlyReady) {
-        state.metrics.training_evaluation.skipped_non_full_evaluations += 1;
-      }
+      const periodicReadOnlyReady = periodicEvaluationDue;
       if (periodicReadOnlyReady) {
         const presentationStarted = performance.now();
         presentation = "metrics";
@@ -21763,7 +22371,7 @@ function updateExportPanel() {
   els.savePngButton.textContent = state.exporting ? "Saving..." : "Save Splat PNG";
   els.savePlyButton.textContent = state.exporting ? "Exporting..." : "Export PLY";
   els.exportDescription.textContent = algorithm.capabilities.kernelShape === "opaque-brush"
-    ? "Layered Opaque Brush exports exactly as PNG. Standard Gaussian Splatting PLY cannot represent the opaque superellipse kernel."
+    ? "Brush Splats export exactly as PNG. Standard Gaussian Splatting PLY cannot represent the analytic brush kernel."
     : algorithm.capabilities.kernelShape === "rectangle"
       ? "Rectangle Splats export exactly as PNG. Standard Gaussian Splatting PLY cannot represent the rectangular kernel."
       : EXPORT_FORMATS.ply.description;
@@ -23441,15 +24049,6 @@ const commitFinalSplatCount = () => {
 els.finalSplatCount.addEventListener("change", commitFinalSplatCount);
 els.finalSplatCount.addEventListener("blur", commitFinalSplatCount);
 els.tileCullingToggle.addEventListener("change", publishState);
-for (const element of [
-  els.opacitySupportAggressive,
-  els.adaptiveGpuThroughput,
-]) {
-  element.addEventListener("change", () => {
-    syncExperimentalPerformanceControls(element);
-    publishState();
-  });
-}
 els.trainLayerOrder.addEventListener("change", () => {
   syncLayerOrderDependency();
   publishState();
@@ -23490,6 +24089,41 @@ els.layeredBrushOpacity.addEventListener("change", () => {
   els.layeredBrushOpacity.value = String(selectedLayeredBrushOpacity());
   publishState();
 });
+for (const control of [els.layeredBrushOpacityGradient, els.layeredBrushWidthTaper]) {
+  control.addEventListener("change", () => {
+    syncAlgorithmRequirements();
+    publishState();
+  });
+}
+els.stageAwareLabTraining.addEventListener("change", () => {
+  syncAlgorithmRequirements();
+  publishState();
+});
+els.monochromeUnderpainting.addEventListener("change", () => {
+  syncAlgorithmRequirements();
+  publishState();
+});
+els.colorFinishStart.addEventListener("change", () => {
+  els.colorFinishStart.value = String(
+    selectedSharedColorWorkflow().colorFinishStartPercent,
+  );
+  publishState();
+});
+for (const control of [
+  els.layeredBrushOpacityGradientStart,
+  els.layeredBrushOpacityGradientEnd,
+  els.layeredBrushWidthTaperStart,
+  els.layeredBrushWidthTaperEnd,
+]) {
+  control.addEventListener("change", () => {
+    const effects = selectedLayeredBrushDirectionalEffects();
+    els.layeredBrushOpacityGradientStart.value = String(effects.opacityStart);
+    els.layeredBrushOpacityGradientEnd.value = String(effects.opacityEnd);
+    els.layeredBrushWidthTaperStart.value = String(effects.widthStart);
+    els.layeredBrushWidthTaperEnd.value = String(effects.widthEnd);
+    publishState();
+  });
+}
 els.rectangleTopRatio.addEventListener("change", () => {
   const minimum = selectedRectangleTopRatio();
   els.rectangleTopRatio.value = String(minimum);
@@ -23975,6 +24609,8 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
   deepPruneDue,
   sharedTiltOrbitRadius,
   optimizerFootprintHistogram,
+  brushColorNeutrality,
+  colorFinishStartStep,
   phase39ContractProbe,
   layerOrderComparatorProbe,
   layerEfficiencyVariants,
@@ -24261,6 +24897,7 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
       final_alpha_objective: m.final_alpha_objective,
       initial_objective_loss: m.initial_objective_loss,
       final_objective_loss: m.final_objective_loss,
+      color_objective: m.color_objective,
       initial_ssim: m.initial_ssim,
       final_ssim: m.final_ssim,
       initial_global_ssim: m.initial_global_ssim,

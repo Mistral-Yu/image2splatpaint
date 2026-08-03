@@ -370,6 +370,7 @@ label {
 .actions,
 .webgpu-notice,
 .lr-panel,
+.planar-gaussian-panel,
 .rectangle-paint-panel,
 .opaque-paint-panel,
 .virtual-camera-panel,
@@ -567,6 +568,7 @@ select {
 
 .budget-panel,
 .lr-panel,
+.planar-gaussian-settings,
 .opaque-paint-settings,
 .virtual-camera-settings {
   padding: 8px;
@@ -577,6 +579,7 @@ select {
 
 .budget-panel summary,
 .lr-panel summary,
+.planar-gaussian-settings summary,
 .opaque-paint-settings summary,
 .virtual-camera-settings summary {
   cursor: pointer;
@@ -615,6 +618,12 @@ select {
   gap: 6px;
 }
 
+.planar-gaussian-panel {
+  display: grid;
+  gap: 6px;
+}
+
+.planar-gaussian-panel > details,
 .rectangle-paint-panel > details,
 .opaque-paint-panel > details {
   width: 100%;
@@ -720,10 +729,6 @@ select {
 
 .layer-toggle-grid .inline-option input {
   margin-top: 2px;
-}
-
-.experimental-performance-options {
-  padding-bottom: 0;
 }
 
 .panel-title {

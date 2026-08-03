@@ -132,7 +132,7 @@
                   <select id="algorithmSelect" data-testid="algorithm-select">
                     <option value="planar-gaussian" selected>Planar Gaussian</option>
                     <option value="rectangle-splats">Rectangle Splats</option>
-                    <option value="layered-opaque-brush">Layered Opaque Brush</option>
+                    <option value="layered-opaque-brush">Brush Splats</option>
                     <option value="gs-virtual-camera-sampling">GS Virtual Camera Sampling</option>
                   </select>
                 </label>
@@ -162,14 +162,29 @@
                 </label>
               </div>
 
-              <details class="lr-panel" data-testid="lr-panel">
-                <summary>Learning rates</summary>
+              <details class="lr-panel" data-testid="lr-panel" data-settings-scope="shared">
+                <summary>Shared training settings</summary>
                 <div class="lr-body">
                   <section class="lr-section" aria-labelledby="trainingFeedbackHeading">
                     <strong id="trainingFeedbackHeading" class="lr-section-heading">Training feedback</strong>
                     <label class="inline-option field-wide" title="Runs read-only full-image L1, global and local SSIM, and PSNR evaluations at a bounded interval. This may reduce training speed. Final metrics are always calculated. Applied at the next Train start.">
                       <input id="liveQualityMetrics" data-testid="live-quality-metrics" type="checkbox" />
                       Update quality metrics during training
+                    </label>
+                  </section>
+                  <section class="lr-section" aria-labelledby="colorWorkflowHeading">
+                    <strong id="colorWorkflowHeading" class="lr-section-heading">Color workflow</strong>
+                    <label class="inline-option field-wide" title="Trains CIELAB D65 with L* dominant early, then progressively adds a*/b*. Rendering, standard alpha, PNG output, and RGB quality metrics remain unchanged. Applied to every algorithm at the next Train start.">
+                      <input id="stageAwareLabTraining" data-testid="stage-aware-lab-training" type="checkbox" />
+                      Stage-aware Lab color training
+                    </label>
+                    <label class="inline-option field-wide" title="Initializes splat colors as neutral CIELAB-L* grayscale and keeps an L*-only objective until the configured iteration percentage. Color then uses RGB, or stage-aware Lab when that option is enabled. Applied to every algorithm at the next Train start.">
+                      <input id="monochromeUnderpainting" data-testid="monochrome-underpainting" type="checkbox" />
+                      Monochrome underpainting
+                    </label>
+                    <label class="field-wide" title="Starts color training at this percentage of the requested iterations. 0% starts color on the first iteration; 100% keeps the complete run monochrome. Independent from P1/P2/P3 boundaries.">
+                      Color finish starts at (%)
+                      <input id="colorFinishStart" data-testid="color-finish-start" type="number" min="0" max="100" step="1" value="43" />
                     </label>
                   </section>
                   <section class="lr-section" aria-labelledby="layerVisibilityHeading">
@@ -195,19 +210,12 @@
                         <input id="discreteLayers" data-testid="discrete-layers" type="checkbox" checked />
                         Discrete layers
                       </label>
-                      <label class="inline-option" title="During P2 and P3, recolor a small set of low-visibility splats whose hidden RGB harms the 0.25x render. Geometry, opacity, and splat count stay unchanged.">
-                        <input id="hiddenRgbRecolor" data-testid="hidden-rgb-recolor" type="checkbox" />
-                        Hidden RGB recolor
-                      </label>
                     </div>
                     <div class="lr-grid">
                       <label title="Optimize layer-order micro-depth every N iterations. 1 updates every iteration.">Layer update interval<input id="layerUpdateInterval" data-testid="layer-update-interval" type="number" min="1" max="3000" step="1" value="500" /></label>
                       <label title="Iteration interval for low-contribution deep-splat pruning during P2 and P3.">Deep prune interval<input id="deepPruneInterval" data-testid="deep-prune-interval" type="number" min="100" max="5000" step="100" value="500" /></label>
                       <label title="Number of discrete layers used by the overlap-aware layer assignment.">Layer count<input id="discreteLayerCount" data-testid="discrete-layer-count" type="number" min="2" max="32" step="1" value="32" /></label>
                       <label title="Maximum number of adjacent layers a splat may move during the final overlap-aware assignment. Set 0 to disable overlap reassignment.">Layer move radius<input id="discreteLayerMoveRadius" data-testid="discrete-layer-move-radius" type="number" min="0" max="32" step="1" value="0" /></label>
-                      <label title="Iteration interval for Hidden RGB recolor during P2 and P3.">Recolor interval<input id="hiddenRgbRecolorInterval" data-testid="hidden-rgb-recolor-interval" type="number" min="100" max="5000" step="100" value="500" /></label>
-                      <label title="Maximum percentage of splats recolored at each event.">Recolor target (%)<input id="hiddenRgbRecolorFraction" data-testid="hidden-rgb-recolor-fraction" type="number" min="0.1" max="5" step="0.1" value="1" /></label>
-                      <label title="How far selected colors move toward the footprint-weighted teacher color.">Recolor strength (%)<input id="hiddenRgbRecolorStrength" data-testid="hidden-rgb-recolor-strength" type="number" min="1" max="100" step="1" value="50" /></label>
                     </div>
                   </section>
 
@@ -249,19 +257,28 @@
                     </div>
                   </section>
 
-                  <section class="lr-section experimental-performance-options" aria-labelledby="experimentalGpuHeading">
-                    <strong id="experimentalGpuHeading" class="lr-section-heading">Experimental GPU performance</strong>
-                    <label class="inline-option" title="Submit multiple iterations together, avoid animation-frame waits, and reuse the current full-resolution render for intermediate metrics. Applied at the next Train start.">
-                      <input id="adaptiveGpuThroughput" data-testid="adaptive-gpu-throughput" type="checkbox" />
-                      Adaptive GPU throughput
-                    </label>
-                    <label class="inline-option" title="Default off. Reduces tile support using opacity and the 1/255 render cutoff. Previously faster, but produced a small render-parity mismatch.">
-                      <input id="opacitySupportAggressive" data-testid="opacity-support-aggressive" type="checkbox" />
-                      Opacity-aware support (aggressive)
-                    </label>
-                  </section>
                 </div>
               </details>
+
+              <section class="planar-gaussian-panel settings-section" data-testid="planar-gaussian-panel">
+                <details class="planar-gaussian-settings" data-testid="planar-gaussian-settings">
+                  <summary>Planar Gaussian settings</summary>
+                  <div class="opaque-paint-body">
+                    <section class="lr-section" aria-labelledby="planarVisibilityHeading">
+                      <strong id="planarVisibilityHeading" class="lr-section-heading">Hidden color correction</strong>
+                      <label class="inline-option field-wide" title="Planar Gaussian only. During P2 and P3, recolor a small set of low-visibility splats whose hidden RGB harms the 0.25x render. Geometry, opacity, and splat count stay unchanged.">
+                        <input id="hiddenRgbRecolor" data-testid="hidden-rgb-recolor" type="checkbox" />
+                        Hidden RGB recolor
+                      </label>
+                      <div class="lr-grid">
+                        <label title="Iteration interval for Hidden RGB recolor during P2 and P3.">Recolor interval<input id="hiddenRgbRecolorInterval" data-testid="hidden-rgb-recolor-interval" type="number" min="100" max="5000" step="100" value="500" /></label>
+                        <label title="Maximum percentage of splats recolored at each event.">Recolor target (%)<input id="hiddenRgbRecolorFraction" data-testid="hidden-rgb-recolor-fraction" type="number" min="0.1" max="5" step="0.1" value="1" /></label>
+                        <label title="How far selected colors move toward the footprint-weighted teacher color.">Recolor strength (%)<input id="hiddenRgbRecolorStrength" data-testid="hidden-rgb-recolor-strength" type="number" min="1" max="100" step="1" value="50" /></label>
+                      </div>
+                    </section>
+                  </div>
+                </details>
+              </section>
 
               <section class="rectangle-paint-panel settings-section" data-testid="rectangle-paint-panel">
                 <details class="opaque-paint-settings" data-testid="opaque-paint-settings">
@@ -321,15 +338,31 @@
 
               <section id="opaquePaintPanel" class="opaque-paint-panel settings-section" data-testid="opaque-paint-panel">
                 <details class="opaque-paint-settings" data-testid="layered-opaque-brush-settings">
-                  <summary id="opaquePaintSummary">Layered Opaque Brush settings</summary>
+                  <summary id="opaquePaintSummary">Brush Splats settings</summary>
                   <div class="opaque-paint-body">
                     <section class="lr-section" aria-labelledby="brushPaintAppearanceHeading">
                       <strong id="brushPaintAppearanceHeading" class="lr-section-heading">Paint appearance</strong>
                       <div class="lr-grid">
-                        <label class="field-wide" title="Minimum learned opacity for Layered Opaque Brush paint splats. Training may raise individual splats above this floor. This is independent from Rectangle Splats and is applied at the next Train start.">
+                        <label class="field-wide" title="Minimum learned opacity for Brush Splats. Training may raise individual splats above this floor. This is independent from Rectangle Splats and is applied at the next Train start.">
                           Minimum paint opacity
                           <input id="layeredBrushOpacity" data-testid="layered-brush-opacity" type="number" min="0.05" max="1" step="0.005" value="0.995" />
                         </label>
+                        <label class="inline-option field-wide" title="Along the Brush long axis, paint deposition transitions from the configured tail value to the tip value. Applied during training, preview, and PNG export at the next Train start.">
+                          <input id="layeredBrushOpacityGradient" data-testid="layered-brush-opacity-gradient" type="checkbox" />
+                          Opacity gradient
+                        </label>
+                        <div class="rectangle-edge-ratio-row field-wide">
+                          <label>Tail<input id="layeredBrushOpacityGradientStart" data-testid="layered-brush-opacity-gradient-start" type="number" min="0" max="1" step="0.01" value="0" /></label>
+                          <label>Tip<input id="layeredBrushOpacityGradientEnd" data-testid="layered-brush-opacity-gradient-end" type="number" min="0" max="1" step="0.01" value="1" /></label>
+                        </div>
+                        <label class="inline-option field-wide" title="Learns a separate taper amount for every Brush splat. At full taper, width transitions from the configured tail value to the tip value along the long axis. Applied at the next Train start.">
+                          <input id="layeredBrushWidthTaper" data-testid="layered-brush-width-taper" type="checkbox" />
+                          Train directional width taper
+                        </label>
+                        <div class="rectangle-edge-ratio-row field-wide">
+                          <label>Tail<input id="layeredBrushWidthTaperStart" data-testid="layered-brush-width-taper-start" type="number" min="0" max="1" step="0.01" value="1" /></label>
+                          <label>Tip<input id="layeredBrushWidthTaperEnd" data-testid="layered-brush-width-taper-end" type="number" min="0" max="1" step="0.01" value="0" /></label>
+                        </div>
                       </div>
                     </section>
                   </div>
@@ -468,7 +501,7 @@
                   <div class="splat-shape-options" role="group" aria-label="Splat preview shape">
                     <button id="splatShapeGaussian" class="active" data-testid="splat-shape-gaussian" type="button" aria-pressed="true">Gaussian</button>
                     <button id="splatShapeRectangle" data-testid="splat-shape-rectangle" type="button" aria-pressed="false">Rectangle</button>
-                    <button id="splatShapeOpaqueBrush" data-testid="splat-shape-opaque-brush" type="button" aria-pressed="false">Layered Opaque Brush</button>
+                    <button id="splatShapeOpaqueBrush" data-testid="splat-shape-opaque-brush" type="button" aria-pressed="false">Brush Splats</button>
                   </div>
                 </div>
                 <label class="adjustment-row" title="Multiplies each splat opacity. At 10x every splat opacity saturates, so its center blocks lower layers under standard alpha compositing.">Opacity <output id="splatOpacityValue">1.00x</output><input id="splatOpacity" data-testid="splat-opacity" type="range" min="0" max="10" step="0.01" value="1" /></label>
