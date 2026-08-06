@@ -46,7 +46,7 @@ const MIP_PIXEL_SIGMA = 0.35;
 const INITIAL_SPLAT_COVERAGE_MULTIPLIER = 2.0;
 const PHASE_ONE_MAX_PLANAR_SCALE = 0.32;
 const PHASE_ONE_SHAPE_LR_MULTIPLIER = 2.5;
-const DENSITY_EVENT_SLOTS = 25;
+const DENSITY_EVENT_SLOTS = 27;
 const PHASE33_IMPORTANCE_EMA = 0.05;
 const PHASE33_COVERAGE_TARGET = 0.05;
 const PHASE33_COVERAGE_LOSS_WEIGHT = 0.02;
@@ -126,6 +126,8 @@ const VIRTUAL_CAMERA_GOLDEN_ANGLE_RADIANS = Math.PI * (3 - Math.sqrt(5));
 // 98 carry Rectangle's minimum and maximum parallel-edge width ratios. Slot 97
 // carries Rectangle shape flags. Slot 100 carries the phase-independent shared
 // monochrome-underpainting cutoff; slots 101-104 carry Brush effect endpoints.
+// Slots 105-106 are the QA-only opaque-Paint scale-biased surface-layer prior:
+// enabled and maximum deterministic promotion probability.
 const TRAIN_CONFIG_FLOATS = 108;
 const TRAIN_CONFIG_BYTES = TRAIN_CONFIG_FLOATS * 4;
 const MAX_TRAIN_BATCH_SIZE = 16;
@@ -138,6 +140,7 @@ const DEFAULT_DEEP_PRUNE_INTERVAL = 500;
 const MIN_DEEP_PRUNE_INTERVAL = 100;
 const MAX_DEEP_PRUNE_INTERVAL = 5000;
 const DEFAULT_HIDDEN_RGB_RECOLOR_INTERVAL = 500;
+const DEFAULT_SCALE_BIASED_SURFACE_LAYER_PRIOR_PROBABILITY = 0.20;
 const MIN_HIDDEN_RGB_RECOLOR_INTERVAL = 100;
 const MAX_HIDDEN_RGB_RECOLOR_INTERVAL = 5000;
 const DEFAULT_HIDDEN_RGB_RECOLOR_FRACTION = 0.01;
@@ -465,6 +468,13 @@ function configurePaintKernel(config, params = state.params) {
   config[102] = clampNumber(params?.brushOpacityGradientEnd, 0, 1, 1);
   config[103] = clampNumber(params?.brushWidthTaperStart, 0, 1, 1);
   config[104] = clampNumber(params?.brushWidthTaperEnd, 0, 1, 0);
+  config[105] = params?.surfaceLayerPriorEnabled ? 1 : 0;
+  config[106] = clampNumber(
+    params?.surfaceLayerPriorProbability,
+    0,
+    1,
+    DEFAULT_SCALE_BIASED_SURFACE_LAYER_PRIOR_PROBABILITY,
+  );
   return config;
 }
 
@@ -1462,6 +1472,25 @@ function opaqueBrushDetailRefinementEnabled() {
 function opaquePaintCurrentVisibilityCompactionEnabled() {
   const override = qaOverrides("__image2SplatCurrentVisibilityCompaction");
   return override.enabled !== false;
+}
+
+function scaleBiasedSurfaceLayerPriorSettings(algorithm = selectedAlgorithm()) {
+  const override = qaOverrides("__image2SplatSurfaceLayerPrior");
+  return {
+    // Rectangle passed the current gate. Brush has its own accepted detail-child
+    // promotion and this global size prior exposed incorrect pigment fragments.
+    // Keep the candidate rectangle-only until another algorithm passes its own A/B.
+    enabled: algorithmUsesRectangleKernel(algorithm) && override.enabled === true,
+    probability: clampNumber(
+      override.probability,
+      0,
+      1,
+      DEFAULT_SCALE_BIASED_SURFACE_LAYER_PRIOR_PROBABILITY,
+    ),
+    // Final per-splat deciles require a readback. Keep that opt-in even in QA;
+    // the training prior itself must not add a data transfer.
+    diagnostics: override.diagnostics === true,
+  };
 }
 
 function opaquePaintLateSettleFraction() {
@@ -5680,6 +5709,17 @@ function snapshotParams(params) {
     ),
     illustrativeOilVersion: Math.max(0, Math.round(Number(params.illustrativeOilVersion) || 0)),
     brushDetailRefinementEnabled: Boolean(params.brushDetailRefinementEnabled),
+    surfaceLayerPriorEnabled: Boolean(params.surfaceLayerPriorEnabled),
+    surfaceLayerPriorProbability: clampNumber(
+      params.surfaceLayerPriorProbability,
+      0,
+      1,
+      DEFAULT_SCALE_BIASED_SURFACE_LAYER_PRIOR_PROBABILITY,
+    ),
+    surfaceLayerPriorDiagnostics: Boolean(params.surfaceLayerPriorDiagnostics),
+    surfaceLayerPriorInitialization: params.surfaceLayerPriorInitialization
+      ? structuredClone(params.surfaceLayerPriorInitialization)
+      : null,
     brushOpacityGradientEnabled: Boolean(params.brushOpacityGradientEnabled),
     brushOpacityGradientStart: clampNumber(params.brushOpacityGradientStart, 0, 1, 0),
     brushOpacityGradientEnd: clampNumber(params.brushOpacityGradientEnd, 0, 1, 1),
@@ -6642,6 +6682,10 @@ function initOpaqueLayeredPaint(image, count, kernelShape) {
       : DEFAULT_RECTANGLE_ASYMMETRIC_SOFTNESS;
   params.opaqueLayered = true;
   params.currentVisibilityCompactionEnabled = opaquePaintCurrentVisibilityCompactionEnabled();
+  const surfaceLayerPrior = scaleBiasedSurfaceLayerPriorSettings();
+  params.surfaceLayerPriorEnabled = surfaceLayerPrior.enabled;
+  params.surfaceLayerPriorProbability = surfaceLayerPrior.probability;
+  params.surfaceLayerPriorDiagnostics = surfaceLayerPrior.diagnostics;
   params.minimumOpacityEnabled = true;
   params.minimumOpacity = kernelShape === "rectangle"
     ? selectedOpaquePaintOpacity()
@@ -6746,6 +6790,7 @@ function initOpaqueLayeredPaint(image, count, kernelShape) {
         edge_accent: illustrativeOilFamilyCounts[2],
       }
     : null;
+  params.surfaceLayerPriorInitialization = applyScaleBiasedSurfaceLayerInitialization(params);
   for (let i = 0; i < baseCount; i += 1) {
     footprintWeightedTargetColor(image, params, i, params.rgb.subarray(i * 3, i * 3 + 3));
   }
@@ -6757,6 +6802,62 @@ function initialDepthOrder(count) {
   const denominator = Math.max(1, count - 1);
   for (let i = 0; i < count; i += 1) values[i] = 1 - i / denominator;
   return values;
+}
+
+function deterministicLayerPriorUnit(index) {
+  let value = (Math.imul((index + 1) >>> 0, 1664525) + 1013904223) >>> 0;
+  value ^= value >>> 16;
+  value = Math.imul(value, 2246822519) >>> 0;
+  value ^= value >>> 13;
+  return (value >>> 0) / 4294967296;
+}
+
+function applyScaleBiasedSurfaceLayerInitialization(params) {
+  const count = Math.max(0, Math.round(Number(params?.count) || 0));
+  const enabled = Boolean(params?.surfaceLayerPriorEnabled);
+  const maximumProbability = clampNumber(
+    params?.surfaceLayerPriorProbability,
+    0,
+    1,
+    DEFAULT_SCALE_BIASED_SURFACE_LAYER_PRIOR_PROBABILITY,
+  );
+  if (!enabled || count < 2 || !params?.scale || !params?.depthOrder) {
+    return {
+      enabled,
+      candidate_count: 0,
+      promoted_count: 0,
+      contract: "off-or-insufficient-splats",
+    };
+  }
+  const ordered = Array.from({ length: count }, (_, index) => index).sort((left, right) => {
+    const leftArea = Math.max(MIN_SPLAT_SCALE ** 2, params.scale[left * 2] * params.scale[left * 2 + 1]);
+    const rightArea = Math.max(MIN_SPLAT_SCALE ** 2, params.scale[right * 2] * params.scale[right * 2 + 1]);
+    return leftArea - rightArea || left - right;
+  });
+  const layerCount = Math.max(2, Math.round(Number(params.discreteLayerCount) || LAYERED_OPAQUE_BRUSH_LAYER_COUNT));
+  const layerStep = 1 / (layerCount - 1);
+  let candidateCount = 0;
+  let promotedCount = 0;
+  for (let rank = 0; rank < count; rank += 1) {
+    const index = ordered[rank];
+    const smallness = 1 - rank / Math.max(1, count - 1);
+    const currentLayer = Math.max(0, Math.min(1, Number(params.depthOrder[index]) || 0));
+    // The smallest 75% may move at most one discrete layer. Larger strokes
+    // remain the coverage scaffold; a pre-existing top-layer stroke stays put.
+    if (smallness < 0.25 || currentLayer >= 1 - layerStep * 0.25) continue;
+    candidateCount += 1;
+    const promotionProbability = maximumProbability * (0.25 + 0.75 * smallness);
+    if (deterministicLayerPriorUnit(index) >= promotionProbability) continue;
+    params.depthOrder[index] = Math.min(1, currentLayer + layerStep);
+    promotedCount += 1;
+  }
+  return {
+    enabled: true,
+    candidate_count: candidateCount,
+    promoted_count: promotedCount,
+    layer_step: layerStep,
+    contract: "initial-smallest-75-percent; deterministic; at-most-one-paint-layer",
+  };
 }
 
 function packedLayerOrder(packedTag) {
@@ -7355,6 +7456,17 @@ function growParamPlaceholders(params, targetCount) {
       params.rectangleAsymmetricSoftness ?? DEFAULT_RECTANGLE_ASYMMETRIC_SOFTNESS,
     illustrativeOilVersion: Math.max(0, Math.round(Number(params.illustrativeOilVersion) || 0)),
     brushDetailRefinementEnabled: Boolean(params.brushDetailRefinementEnabled),
+    surfaceLayerPriorEnabled: Boolean(params.surfaceLayerPriorEnabled),
+    surfaceLayerPriorProbability: clampNumber(
+      params.surfaceLayerPriorProbability,
+      0,
+      1,
+      DEFAULT_SCALE_BIASED_SURFACE_LAYER_PRIOR_PROBABILITY,
+    ),
+    surfaceLayerPriorDiagnostics: Boolean(params.surfaceLayerPriorDiagnostics),
+    surfaceLayerPriorInitialization: params.surfaceLayerPriorInitialization
+      ? structuredClone(params.surfaceLayerPriorInitialization)
+      : null,
     brushOpacityGradientEnabled: Boolean(params.brushOpacityGradientEnabled),
     brushOpacityGradientStart: clampNumber(params.brushOpacityGradientStart, 0, 1, 0),
     brushOpacityGradientEnd: clampNumber(params.brushOpacityGradientEnd, 0, 1, 1),
@@ -7446,6 +7558,61 @@ function compactSplatParams(params, keepIndices) {
     virtualDepth: copy(params.virtualDepth, 1),
     brushTaper: copy(params.brushTaper, 1, DEFAULT_LAYERED_BRUSH_TAPER),
     detailTags: copy(params.detailTags, 1, 1),
+  };
+}
+
+function summarizeScaleBiasedSurfaceLayerPrior(params, importanceData = null) {
+  const count = Math.max(0, Math.round(Number(params?.count) || 0));
+  if (!count || !params?.scale || !params?.depthOrder) {
+    return { supported: false, reason: "missing-final-splat-geometry" };
+  }
+  // This diagnostic is QA-only and runs once after the final GPU readback. It
+  // deliberately does not run during training or feed any optimizer signal.
+  const indices = Array.from({ length: count }, (_, index) => index).sort((a, b) => {
+    const areaA = Math.max(MIN_SPLAT_SCALE ** 2, params.scale[a * 2] * params.scale[a * 2 + 1]);
+    const areaB = Math.max(MIN_SPLAT_SCALE ** 2, params.scale[b * 2] * params.scale[b * 2 + 1]);
+    return areaA - areaB || a - b;
+  });
+  const bins = Array.from({ length: 10 }, (_, decile) => ({
+    decile,
+    footprint_order: decile === 0 ? "smallest" : decile === 9 ? "largest" : "",
+    splats: 0,
+    area_min: Number.POSITIVE_INFINITY,
+    area_max: 0,
+    area_mean: 0,
+    layer_mean: 0,
+    observed_coverage_mean: 0,
+    integrated_influence_mean: 0,
+    exact_zero_count: 0,
+  }));
+  for (let rank = 0; rank < count; rank += 1) {
+    const index = indices[rank];
+    const bin = bins[Math.min(9, Math.floor(rank * 10 / count))];
+    const area = Math.max(MIN_SPLAT_SCALE ** 2, params.scale[index * 2] * params.scale[index * 2 + 1]);
+    const coverage = Math.max(0, Number(importanceData?.observedCoverage?.[index]) || 0);
+    const influence = Math.max(0, Number(importanceData?.integratedInfluence?.[index]) || 0);
+    bin.splats += 1;
+    bin.area_min = Math.min(bin.area_min, area);
+    bin.area_max = Math.max(bin.area_max, area);
+    bin.area_mean += area;
+    bin.layer_mean += Math.max(0, Math.min(1, Number(params.depthOrder[index]) || 0));
+    bin.observed_coverage_mean += coverage;
+    bin.integrated_influence_mean += influence;
+    if (coverage === 0 && influence === 0) bin.exact_zero_count += 1;
+  }
+  for (const bin of bins) {
+    const divisor = Math.max(1, bin.splats);
+    bin.area_min = Number.isFinite(bin.area_min) ? bin.area_min : 0;
+    bin.area_mean /= divisor;
+    bin.layer_mean /= divisor;
+    bin.observed_coverage_mean /= divisor;
+    bin.integrated_influence_mean /= divisor;
+  }
+  return {
+    supported: true,
+    ordering: "footprint-area ascending; decile 0 is smallest; layer 1 is front",
+    signal: "final accepted-pixel coverage and integrated T_before*alpha",
+    bins,
   };
 }
 
@@ -7799,6 +7966,8 @@ function emptyFusionEvents() {
     paint_outlier_recycle: 0,
     paint_outlier_recolor: 0,
     paint_outlier_trim: 0,
+    surface_layer_candidates: 0,
+    surface_layer_promotions: 0,
   };
 }
 
@@ -15100,6 +15269,43 @@ fn importance_residual(g: u32) -> f32 {
   return im.z / max(im.x, 1.0);
 }
 
+fn scale_biased_surface_layer_probability(
+  sourceT: vec4<f32>,
+  nextScale: vec2<f32>,
+  detailTagged: bool,
+  localError: f32,
+  childTargetColorError: f32,
+  sourceImportance: vec4<f32>
+) -> f32 {
+  // This QA-only prior applies only while opaque Paint is training. It does
+  // not alter tile sort order, raw 3D depth, PLY coordinates, or a parent.
+  if (
+    config[105] <= 0.5 ||
+    config[65] <= 0.5
+  ) { return 0.0; }
+  let parentArea = max(0.00000001, sourceT.x * sourceT.y);
+  let childArea = max(0.00000001, nextScale.x * nextScale.y);
+  // A duplicate at 96% scale is not a detail child. A normal split is about
+  // 68% of the parent area and therefore receives a high, but non-unit, prior.
+  let shrink = clamp((1.0 - childArea / parentArea - 0.05) / 0.30, 0.0, 1.0);
+  if (shrink <= 0.0) { return 0.0; }
+  let expectedInfluence = max(1.0, config[0] * config[1] / max(1.0, config[2]));
+  let parentVisibility = clamp(sourceImportance.y / expectedInfluence, 0.0, 1.0);
+  // A child's colour is deliberately nudged toward the target during a
+  // split/recycle. Both residual and colour consistency are therefore smooth
+  // weights: neither may turn the scale-driven prior off for every useful
+  // detail child before it can learn.
+  let residual = clamp(localError / 0.10, 0.0, 1.0);
+  let colorConsistency = 1.0 - 0.45 * clamp(childTargetColorError / 0.75, 0.0, 1.0);
+  let detailWeight = select(0.75, 1.0, detailTagged);
+  return clamp(
+    config[106] * shrink * (0.65 + 0.35 * parentVisibility) *
+      (0.55 + 0.45 * residual) * colorConsistency * detailWeight,
+    0.0,
+    1.0
+  );
+}
+
 fn distribution_weight(g: u32, adc: bool) -> f32 {
   let t = transform[g];
   let c = color[g];
@@ -15880,10 +16086,36 @@ fn apply_grow(@builtin(global_invocation_id) id: vec3u) {
     config[89] > 0.5 &&
     detailTagged;
   let layerStep = ${LAYER_CODE_RANGE} / max(1.0, config[82] - 1.0);
+  let scaleBiasedSurfaceProbability = select(
+    0.0,
+    scale_biased_surface_layer_probability(
+      sourceT,
+      nextScale,
+      detailTagged,
+      localError,
+      dot(abs(childColor - targetColor), vec3<f32>(0.33333334)),
+      sourceImportance
+    ),
+    !tiltTrueSplit && (mode == 1u || mode == 2u)
+  );
+  let scaleBiasedSurfaceCandidate =
+    scaleBiasedSurfaceProbability > 0.0 &&
+    !brushDetailChild &&
+    inheritedLayer < ${LAYER_CODE_RANGE} * 0.999999 - layerStep;
+  if (scaleBiasedSurfaceCandidate) { atomicAdd(&control[eventBase + 25u], 1u); }
+  let scaleBiasedSurfaceChild =
+    scaleBiasedSurfaceCandidate &&
+    hash_unit(f32(index) * 97.409 + f32(step) * 1.703) < scaleBiasedSurfaceProbability;
+  if (scaleBiasedSurfaceChild) { atomicAdd(&control[eventBase + 26u], 1u); }
   var childLayer = select(
     inheritedLayer,
     min(${LAYER_CODE_RANGE} * 0.999999, inheritedLayer + layerStep),
     brushDetailChild
+  );
+  childLayer = select(
+    childLayer,
+    min(${LAYER_CODE_RANGE} * 0.999999, inheritedLayer + layerStep),
+    scaleBiasedSurfaceChild
   );
   let parentLayerScaled =
     clamp(inheritedLayer / ${LAYER_CODE_RANGE}, 0.0, 0.999999) * max(2.0, config[82]);
@@ -15897,6 +16129,7 @@ fn apply_grow(@builtin(global_invocation_id) id: vec3u) {
     config[86] > 0.5 &&
     config[65] > 0.5 &&
     !brushDetailChild &&
+    !scaleBiasedSurfaceChild &&
     (mode == 1u || mode == 2u) &&
     localError > 0.02 &&
     childTargetColorError <= 0.075;
@@ -16030,6 +16263,7 @@ fn apply_relocation(@builtin(global_invocation_id) id: vec3u) {
   let maxAnisotropy = max(config[9], 1.0);
   let baseScale = vec2<f32>(config[52], config[53]);
   let capacity = u32(config[10]);
+  let eventBase = capacity * 2u;
   let stageMinScale = vec2<f32>(max(${MIN_SPLAT_SCALE}, config[60]));
   let baseScaleFloor = baseScale * clamp(config[61], 0.0, 1.0);
   if (g >= count) { return; }
@@ -16114,12 +16348,6 @@ fn apply_relocation(@builtin(global_invocation_id) id: vec3u) {
     );
   }
   let targetColor = target_at(nextPos, width, height);
-  xy[g].center = nextPos;
-  xy[g].rawDepth = xy[source].rawDepth;
-  xy[g].depthGradient = 0.0;
-  let inheritedLayer = min(fract(sourceT.w), ${LAYER_CODE_RANGE} * 0.999999);
-  let childTag = select(1.0, 2.0, detailTagged);
-  transform[g] = vec4<f32>(nextScale, nextTheta, childTag + inheritedLayer);
   var nextColor = select(
     sourceC.rgb * select(0.7, 0.6, adcRecycle) + targetColor * select(0.3, 0.4, adcRecycle),
     sourceC.rgb,
@@ -16128,6 +16356,38 @@ fn apply_relocation(@builtin(global_invocation_id) id: vec3u) {
   if ((config[40] > 3.5 || paintOutlierRecycle) && !tiltTrueSplit) {
     nextColor = targetColor;
   }
+  xy[g].center = nextPos;
+  xy[g].rawDepth = xy[source].rawDepth;
+  xy[g].depthGradient = 0.0;
+  let inheritedLayer = min(fract(sourceT.w), ${LAYER_CODE_RANGE} * 0.999999);
+  let childTag = select(1.0, 2.0, detailTagged);
+  let layerStep = ${LAYER_CODE_RANGE} / max(1.0, config[82] - 1.0);
+  let scaleBiasedSurfaceProbability = select(
+    0.0,
+    scale_biased_surface_layer_probability(
+      sourceT,
+      nextScale,
+      detailTagged,
+      localError,
+      dot(abs(nextColor - targetColor), vec3<f32>(0.33333334)),
+      sourceImportance
+    ),
+    !tiltTrueSplit && !paintOutlierRecycle
+  );
+  let scaleBiasedSurfaceCandidate =
+    scaleBiasedSurfaceProbability > 0.0 &&
+    inheritedLayer < ${LAYER_CODE_RANGE} * 0.999999 - layerStep;
+  if (scaleBiasedSurfaceCandidate) { atomicAdd(&control[eventBase + 25u], 1u); }
+  let scaleBiasedSurfaceChild =
+    scaleBiasedSurfaceCandidate &&
+    hash_unit(f32(g) * 97.409 + step * 1.703) < scaleBiasedSurfaceProbability;
+  if (scaleBiasedSurfaceChild) { atomicAdd(&control[eventBase + 26u], 1u); }
+  let childLayer = select(
+    inheritedLayer,
+    min(${LAYER_CODE_RANGE} * 0.999999, inheritedLayer + layerStep),
+    scaleBiasedSurfaceChild
+  );
+  transform[g] = vec4<f32>(nextScale, nextTheta, childTag + childLayer);
   color[g] = vec4<f32>(nextColor, childOpacity);
   stats[g] = select(sourceStats, sourceStats * 0.5, tiltTrueSplit);
   stats[capacity + g] = select(
@@ -16135,7 +16395,6 @@ fn apply_relocation(@builtin(global_invocation_id) id: vec3u) {
     sourceImportance * 0.5,
     tiltTrueSplit
   );
-  let eventBase = capacity * 2u;
   if (tiltTrueSplit) {
     xy[source].center = replacementSourcePos;
     xy[source].depthGradient = 0.0;
@@ -16932,6 +17191,8 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
       eligible_sources: Math.max(0, operationCounters?.growth_eligible_sources || 0),
       tilt_risk_candidates: Math.max(0, operationCounters?.tilt_risk_candidates || 0),
       tilt_true_splits: Math.max(0, operationCounters?.tilt_true_splits || 0),
+      surface_layer_candidates: Math.max(0, operationCounters?.surface_layer_candidates || 0),
+      surface_layer_promotions: Math.max(0, operationCounters?.surface_layer_promotions || 0),
     };
     this.trainState.count = targetCount;
     this.lastTrainStats = {
@@ -17313,6 +17574,8 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
         paint_outlier_recycle: values[22],
         paint_outlier_recolor: values[23],
         paint_outlier_trim: values[24],
+        surface_layer_candidates: values[25],
+        surface_layer_promotions: values[26],
       };
     } finally {
       readBuffer.destroy();
@@ -20385,6 +20648,14 @@ async function updatePreview(step, final = false, { present = true, readOnlyPeri
           metrics,
         ));
       }
+      if (state.params.surfaceLayerPriorDiagnostics && state.metrics.surface_layer_prior) {
+        const importanceData = await awaitTrainingRun(
+          run,
+          state.webgpu.renderer.readImportanceData(state.params.count, { includeSummary: false }),
+        );
+        state.metrics.surface_layer_prior.area_deciles =
+          summarizeScaleBiasedSurfaceLayerPrior(state.params, importanceData);
+      }
       const explicitFinalAudit = finalRenderAuditEnabled();
       state.metrics.overlap_diagnostics =
         !algorithmUsesPaintKernel() &&
@@ -20498,6 +20769,8 @@ async function updatePreview(step, final = false, { present = true, readOnlyPeri
       state.metrics.fusion_events.paint_outlier_recycle = densityCounters.paint_outlier_recycle;
       state.metrics.fusion_events.paint_outlier_recolor = densityCounters.paint_outlier_recolor;
       state.metrics.fusion_events.paint_outlier_trim = densityCounters.paint_outlier_trim;
+      state.metrics.fusion_events.surface_layer_candidates = densityCounters.surface_layer_candidates;
+      state.metrics.fusion_events.surface_layer_promotions = densityCounters.surface_layer_promotions;
       if (densityCounters.nonfinite_stats > 0) {
         throw runtimeSafetyError("safety_stop_nonfinite_density", `density-step-${step}`, {
           nonfinite_stats: densityCounters.nonfinite_stats,
@@ -20810,6 +21083,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   const runLayeredBrushOpacity = selectedLayeredBrushOpacity();
   const runBrushDirectionalEffects = selectedLayeredBrushDirectionalEffects();
   const runSharedColorWorkflow = selectedSharedColorWorkflow();
+  const runSurfaceLayerPrior = scaleBiasedSurfaceLayerPriorSettings();
   const runOpaquePaintOpacity = algorithmUsesLayeredOpaqueBrush(algorithm)
     ? runLayeredBrushOpacity
     : runRectanglePaintOpacity;
@@ -20941,6 +21215,11 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   state.params.discreteLayersEnabled = runDiscreteLayerSettings.enabled;
   state.params.discreteLayerCount = runDiscreteLayerSettings.count;
   state.params.discreteLayerMoveRadius = runDiscreteLayerSettings.moveRadius;
+  state.params.surfaceLayerPriorEnabled =
+    algorithmUsesRectangleKernel(algorithm) && runSurfaceLayerPrior.enabled;
+  state.params.surfaceLayerPriorProbability = runSurfaceLayerPrior.probability;
+  state.params.surfaceLayerPriorDiagnostics =
+    algorithmUsesOpaqueLayeredPaint(algorithm) && runSurfaceLayerPrior.diagnostics;
   if (algorithmUsesOpaqueLayeredPaint(algorithm)) {
     state.params.opaqueLayered = true;
     state.params.minimumOpacityEnabled = true;
@@ -21034,6 +21313,16 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
           enabled: Boolean(state.params.brushDetailRefinementEnabled),
           split: "detail-child-one-layer-promotion",
           surface_recovery_start_step: experimentalDensifySteps(steps),
+        }
+      : null,
+    surface_layer_prior: algorithmUsesRectangleKernel(algorithm)
+      ? {
+          enabled: Boolean(state.params.surfaceLayerPriorEnabled),
+          probability: state.params.surfaceLayerPriorProbability,
+          diagnostics: Boolean(state.params.surfaceLayerPriorDiagnostics),
+          initialization: state.params.surfaceLayerPriorInitialization || null,
+          contract: "initialization-and-growth-recycle; deterministic; at-most-one-paint-layer",
+          area_deciles: null,
         }
       : null,
     color_objective: runSharedColorWorkflow.monochromeUnderpainting
@@ -21690,6 +21979,8 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
           reseed_count: operations.reseed || 0,
           source_claims: operations.source_claims || 0,
           source_claim_conflicts: operations.source_claim_conflicts || 0,
+          surface_layer_candidates: operations.surface_layer_candidates || 0,
+          surface_layer_promotions: operations.surface_layer_promotions || 0,
           threshold_skipped: Boolean(growthResult && !growthResult.grown),
           skipped_reason: requestedTargetCount <= growthStartCount
             ? "schedule-no-growth"
@@ -25012,6 +25303,9 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
       layer_telemetry_enabled: Boolean(m.layer_telemetry_enabled),
       layer_telemetry: m.layer_telemetry || [],
       layer_efficiency: m.layer_efficiency ? structuredClone(m.layer_efficiency) : null,
+      surface_layer_prior: m.surface_layer_prior
+        ? structuredClone(m.surface_layer_prior)
+        : null,
       brush_detail_v1: m.brush_detail_v1
         ? structuredClone(m.brush_detail_v1)
         : null,
