@@ -721,6 +721,14 @@ select {
   gap: 7px 10px;
 }
 
+.compaction-v2-settings {
+  display: grid;
+  gap: 6px;
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
 .layer-toggle-grid .inline-option {
   min-width: 0;
   align-items: flex-start;
