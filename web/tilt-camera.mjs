@@ -1,4 +1,6 @@
-export const TILT_MAX_ANGLE_DEGREES = 75;
+// Stay inside the open front hemisphere. A camera at exactly 90 degrees makes
+// the planar inverse projection singular, but 75 degrees is not a hard limit.
+export const TILT_MAX_ANGLE_DEGREES = 89;
 export const TILT_FOV_DEGREES = 50;
 export const FIBONACCI_HEMISPHERE_POSE_COUNT = 49;
 export const FIBONACCI_GOLDEN_ANGLE_RADIANS = Math.PI * (3 - Math.sqrt(5));

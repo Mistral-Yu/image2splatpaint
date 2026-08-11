@@ -9,7 +9,7 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; worker-src 'self' blob:; connect-src 'self' blob:; img-src 'self' file: data: blob:; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
     <link rel="icon" href="data:," />
     <title>Image2SplatPaint</title>
-    <link rel="stylesheet" href="./styles.css?v=brush-detail-refinement-v1" />
+    <link rel="stylesheet" href="./styles.css?v=shared-layer-count-v1" />
   </head>
   <body>
     <main class="app">
@@ -47,7 +47,7 @@
             <strong id="splatText" data-testid="splat-text">-</strong>
           </div>
           <div>
-            <span>L1 loss</span>
+            <span>RGB L1</span>
             <strong id="lossText" data-testid="loss-text">-</strong>
           </div>
           <div title="Global SSIM / local-region SSIM 10th percentile">
@@ -62,8 +62,8 @@
             <span>image size</span>
             <strong id="imageSizeText" data-testid="image-size-text">-</strong>
           </div>
-          <div title="Exposed background pixel ratio / splats whose Gaussian footprint extends outside the image">
-            <span>background / outside</span>
+          <div title="Low-alpha coverage (alpha below 0.99) / splats whose Gaussian footprint extends outside the image">
+            <span>low-alpha / outside</span>
             <strong id="coverageText" data-testid="coverage-text">- / -</strong>
           </div>
           <div title="Current training iterations per second / active training time excluding pauses">
@@ -167,18 +167,14 @@
                 <div class="lr-body">
                   <section class="lr-section" aria-labelledby="trainingFeedbackHeading">
                     <strong id="trainingFeedbackHeading" class="lr-section-heading">Training feedback</strong>
-                    <label class="inline-option field-wide" title="Runs read-only full-image L1, global and local SSIM, and PSNR evaluations at a bounded interval. This may reduce training speed. Final metrics are always calculated. Applied at the next Train start.">
+                    <label class="inline-option field-wide" title="Runs read-only full-image L1, global and local SSIM, and PSNR evaluations at a bounded interval. It may reduce training speed and can trigger a safety stop if the evaluation exceeds the memory budget. Final metrics are always calculated. Applied at the next Train start.">
                       <input id="liveQualityMetrics" data-testid="live-quality-metrics" type="checkbox" />
                       Update quality metrics during training
                     </label>
                   </section>
                   <section class="lr-section" aria-labelledby="colorWorkflowHeading">
                     <strong id="colorWorkflowHeading" class="lr-section-heading">Color workflow</strong>
-                    <label class="inline-option field-wide" title="Trains CIELAB D65 with L* dominant early, then progressively adds a*/b*. Rendering, standard alpha, PNG output, and RGB quality metrics remain unchanged. Applied to every algorithm at the next Train start.">
-                      <input id="stageAwareLabTraining" data-testid="stage-aware-lab-training" type="checkbox" />
-                      Stage-aware Lab color training
-                    </label>
-                    <label class="inline-option field-wide" title="Initializes splat colors as neutral CIELAB-L* grayscale and keeps an L*-only objective until the configured iteration percentage. Color then uses RGB, or stage-aware Lab when that option is enabled. Applied to every algorithm at the next Train start.">
+                    <label class="inline-option field-wide" title="Initializes splat colors as neutral CIELAB-L* grayscale and keeps an L*-only objective until the configured iteration percentage. Color then uses the standard RGB objective. Applied to every algorithm at the next Train start.">
                       <input id="monochromeUnderpainting" data-testid="monochrome-underpainting" type="checkbox" />
                       Monochrome underpainting
                     </label>
@@ -213,9 +209,35 @@
                     </div>
                     <div class="lr-grid">
                       <label title="Optimize layer-order micro-depth every N iterations. 1 updates every iteration.">Layer update interval<input id="layerUpdateInterval" data-testid="layer-update-interval" type="number" min="1" max="3000" step="1" value="500" /></label>
-                      <label title="Iteration interval for low-contribution deep-splat pruning during P2 and P3.">Deep prune interval<input id="deepPruneInterval" data-testid="deep-prune-interval" type="number" min="100" max="5000" step="100" value="500" /></label>
-                      <label title="Number of discrete layers used by the overlap-aware layer assignment.">Layer count<input id="discreteLayerCount" data-testid="discrete-layer-count" type="number" min="2" max="32" step="1" value="32" /></label>
+                      <label title="Iteration interval for periodic low-contribution rear-splat pruning during P2 and P3. This is independent from Current-Visibility Compaction v2 and the layer-only Scale prior.">Deep prune interval<input id="deepPruneInterval" data-testid="deep-prune-interval" type="number" min="100" max="5000" step="100" value="500" /></label>
+                      <label title="Shared number of discrete layers used by the overlap-aware assignment for every non-virtual algorithm.">Layer count<input id="discreteLayerCount" data-testid="discrete-layer-count" type="number" min="2" max="32" step="1" value="16" /></label>
                       <label title="Maximum number of adjacent layers a splat may move during the final overlap-aware assignment. Set 0 to disable overlap reassignment.">Layer move radius<input id="discreteLayerMoveRadius" data-testid="discrete-layer-move-radius" type="number" min="0" max="32" step="1" value="0" /></label>
+                    </div>
+                    <div class="compaction-v2-settings">
+                      <label class="inline-option" title="Periodically reassigns currently verified contributors by footprint area: smaller splats go to front layers and larger splats go to rear layers. Hidden, unverified splats keep their layer for contribution compaction. The setting is shared by every algorithm and applied at the next Train start.">
+                        <input id="scaleBiasedSurfaceLayerPrior" data-testid="scale-biased-surface-layer-prior" type="checkbox" checked />
+                        Scale-biased Surface Layer Prior
+                      </label>
+                      <div class="lr-grid">
+                        <label title="Number of size-ordered layers used by the complete GPU sort of currently verified contributors. Existing order is retained inside each layer.">Size-sort layer count<input id="scaleBiasedSurfaceLayerPriorLayers" data-testid="scale-biased-surface-layer-prior-layers" type="number" min="2" max="32" step="1" value="32" /></label>
+                        <label title="Run the complete size sort every N iterations during P1. Set 0 to disable it in P1.">P1 sort interval<input id="scaleBiasedSurfaceLayerPriorP1Interval" data-testid="scale-biased-surface-layer-prior-p1-interval" type="number" min="0" max="100000" step="1" value="100" /></label>
+                        <label title="Run the complete size sort every N iterations during P2. Set 0 to disable it in P2.">P2 sort interval<input id="scaleBiasedSurfaceLayerPriorP2Interval" data-testid="scale-biased-surface-layer-prior-p2-interval" type="number" min="0" max="100000" step="1" value="100" /></label>
+                        <label title="Run the complete size sort every N iterations during P3. Set 0 to disable it in P3.">P3 sort interval<input id="scaleBiasedSurfaceLayerPriorP3Interval" data-testid="scale-biased-surface-layer-prior-p3-interval" type="number" min="0" max="100000" step="1" value="100" /></label>
+                        <label title="Stop running the size sort after this percentage of the complete training run. Set 0% to disable all scheduled sorts. This reorders layers only; it does not control Deep prune or remove splats.">Apply until (%)<input id="scaleBiasedSurfaceLayerPriorUntil" data-testid="scale-biased-surface-layer-prior-until" type="number" min="0" max="100" step="1" value="95" /></label>
+                      </div>
+                    </div>
+                    <div class="compaction-v2-settings">
+                      <label class="inline-option" title="Periodically removes only splats with no current rendered contribution plus a user-capped near-zero cohort. This is separate from periodic Deep prune. Applies to every algorithm; Virtual Camera Sampling measures at least one complete camera-pool window per event. Applied at the next Train start.">
+                        <input id="currentContributionCompaction" data-testid="current-contribution-compaction" type="checkbox" checked />
+                        Current-Visibility Compaction v2
+                      </label>
+                      <div class="lr-grid">
+                        <label title="Start measuring periodic contribution compaction at this percentage of the training run. Each event is skipped rather than merged with an incompatible structural mutation.">Contribution compaction starts at (%)<input id="currentContributionCompactionStart" data-testid="current-contribution-compaction-start" type="number" min="0" max="100" step="1" value="50" /></label>
+                        <label title="Run contribution compaction every N optimizer iterations after the requested start. The effective interval is never shorter than the contribution measurement window.">Contribution compaction interval<input id="currentContributionCompactionInterval" data-testid="current-contribution-compaction-interval" type="number" min="1" max="100000" step="1" value="500" /></label>
+                        <label title="Maximum active-splat percentage that one v2 compaction may remove. Exact-zero and near-zero removals share this cap; at least 256 active splats are retained.">Contribution removal cap (%)<input id="currentContributionCompactionMaxRemoval" data-testid="current-contribution-compaction-max-removal" type="number" min="0" max="100" step="0.1" value="100" /></label>
+                        <label title="Maximum active-splat percentage selected from the near-zero cohort. This remains inside the total removal cap; detail-tagged splats are protected.">Near-zero removal cap (%)<input id="currentContributionCompactionNearZero" data-testid="current-contribution-compaction-near-zero" type="number" min="0" max="100" step="0.1" value="15" /></label>
+                        <label title="Number of optimizer iterations used to measure exact contribution immediately before compaction. Virtual Camera Sampling automatically extends this to one complete camera-pool cycle.">Contribution window (iterations)<input id="currentContributionCompactionWindow" data-testid="current-contribution-compaction-window" type="number" min="1" max="1000000000" step="1" value="1" /></label>
+                      </div>
                     </div>
                   </section>
 
@@ -259,26 +281,6 @@
 
                 </div>
               </details>
-
-              <section class="planar-gaussian-panel settings-section" data-testid="planar-gaussian-panel">
-                <details class="planar-gaussian-settings" data-testid="planar-gaussian-settings">
-                  <summary>Planar Gaussian settings</summary>
-                  <div class="opaque-paint-body">
-                    <section class="lr-section" aria-labelledby="planarVisibilityHeading">
-                      <strong id="planarVisibilityHeading" class="lr-section-heading">Hidden color correction</strong>
-                      <label class="inline-option field-wide" title="Planar Gaussian only. During P2 and P3, recolor a small set of low-visibility splats whose hidden RGB harms the 0.25x render. Geometry, opacity, and splat count stay unchanged.">
-                        <input id="hiddenRgbRecolor" data-testid="hidden-rgb-recolor" type="checkbox" />
-                        Hidden RGB recolor
-                      </label>
-                      <div class="lr-grid">
-                        <label title="Iteration interval for Hidden RGB recolor during P2 and P3.">Recolor interval<input id="hiddenRgbRecolorInterval" data-testid="hidden-rgb-recolor-interval" type="number" min="100" max="5000" step="100" value="500" /></label>
-                        <label title="Maximum percentage of splats recolored at each event.">Recolor target (%)<input id="hiddenRgbRecolorFraction" data-testid="hidden-rgb-recolor-fraction" type="number" min="0.1" max="5" step="0.1" value="1" /></label>
-                        <label title="How far selected colors move toward the footprint-weighted teacher color.">Recolor strength (%)<input id="hiddenRgbRecolorStrength" data-testid="hidden-rgb-recolor-strength" type="number" min="1" max="100" step="1" value="50" /></label>
-                      </div>
-                    </section>
-                  </div>
-                </details>
-              </section>
 
               <section class="rectangle-paint-panel settings-section" data-testid="rectangle-paint-panel">
                 <details class="opaque-paint-settings" data-testid="opaque-paint-settings">
@@ -382,9 +384,9 @@
                       <input id="virtualGofDensity" data-testid="virtual-gof-density" type="checkbox" checked />
                       GOF density ranking
                     </label>
-                    <label title="Virtual-camera probability from Phase 1 onward. At 100%, the front and every virtual camera are sampled uniformly. Applied at the next training start.">Virtual camera share (%)<input id="virtualCameraShare" data-testid="virtual-camera-share" type="number" min="1" max="100" step="0.125" value="100" /></label>
-                    <label title="Maximum polar angle of the Fibonacci virtual-camera cap. Applied at the next training start.">Virtual camera max angle<input id="virtualCameraMaxAngle" data-testid="virtual-camera-max-angle" type="number" min="5" max="75" step="5" value="60" /></label>
-                    <label title="Number of virtual cameras placed on the Fibonacci cap. Applied at the next training start. The same camera catalog is used for final all-view evaluation.">Virtual camera count<input id="virtualCameraCount" data-testid="virtual-camera-count" type="number" min="4" max="128" step="1" value="50" /></label>
+                    <label title="Virtual-camera sampling probability from Phase 1 onward. At 100%, the front and every virtual camera are sampled once per deterministic cycle. Above 50%, every virtual step also carries a balanced canonical-front gradient so pseudo-views cannot dominate the single-image objective. Applied at the next training start.">Virtual camera share (%)<input id="virtualCameraShare" data-testid="virtual-camera-share" type="number" min="1" max="100" step="0.125" value="50" /></label>
+                    <label title="Maximum polar angle of the Fibonacci virtual-camera cap. The open front hemisphere is available up to 89 degrees; exactly 90 degrees is a singular edge-on projection. Applied at the next training start.">Virtual camera max angle<input id="virtualCameraMaxAngle" data-testid="virtual-camera-max-angle" type="number" min="5" max="89" step="1" value="75" /></label>
+                    <label title="Number of virtual cameras placed on the Fibonacci cap. Applied at the next training start. The same camera catalog is used for final all-view evaluation.">Virtual camera count<input id="virtualCameraCount" data-testid="virtual-camera-count" type="number" min="4" max="128" step="1" value="24" /></label>
                     <label title="Shared vertical pinhole FOV for the front and every virtual camera. A smaller FOV usually increases valid virtual-teacher coverage. Applied at the next training start.">Shared camera FOV<input id="virtualCameraFov" data-testid="virtual-camera-fov" type="number" min="25" max="55" step="1" value="50" /></label>
                     <small id="virtualCameraCoverageEstimate" class="field-wide" data-testid="virtual-camera-coverage">Teacher coverage: load an image to estimate.</small>
                   </div>
@@ -452,8 +454,8 @@
                   <option value="fit">Fit all splats</option>
                 </select>
               </label>
-              <label class="adjustment-row">Pitch X <output id="tiltPitchValue">0°</output><input id="tiltPitch" data-testid="tilt-pitch" type="range" min="-75" max="75" step="0.1" value="0" /></label>
-              <label class="adjustment-row">Yaw Y <output id="tiltYawValue">0°</output><input id="tiltYaw" data-testid="tilt-yaw" type="range" min="-75" max="75" step="0.1" value="0" /></label>
+              <label class="adjustment-row">Pitch X <output id="tiltPitchValue">0°</output><input id="tiltPitch" data-testid="tilt-pitch" type="range" min="-89" max="89" step="0.1" value="0" /></label>
+              <label class="adjustment-row">Yaw Y <output id="tiltYawValue">0°</output><input id="tiltYaw" data-testid="tilt-yaw" type="range" min="-89" max="89" step="0.1" value="0" /></label>
               <dl class="tilt-diagnostics" data-testid="tilt-diagnostics">
                 <div><dt>Camera</dt><dd id="tiltCameraMode">center orbit</dd></div>
                 <div><dt>Position</dt><dd id="tiltPositionValue">-</dd></div>
@@ -537,8 +539,8 @@
         </footer>
       </aside>
     </main>
-    <script src="./tilt-viewer.bundle.js?v=camera-summary-v2"></script>
+    <script src="./tilt-viewer.bundle.js?v=camera-summary-v3"></script>
     <script src="./sample-image-data.js?v=sample-v1"></script>
-    <script src="./app.js?v=brush-detail-refinement-v1"></script>
+    <script src="./app.js?v=shared-layer-count-v1"></script>
   </body>
 </html>

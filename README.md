@@ -29,7 +29,7 @@
 2. Select **Load image**, use **Sample**, or drop an image on the canvas.
 3. Set **Max image side**, splat counts, and **Iterations**, then select
    **Train**. Use **Pause** or **Stop** if needed.
-4. Switch between **Original** and **Splats**, then review L1, SSIM, PSNR, and
+4. Switch between **Original** and **Splats**, then review RGB L1, SSIM, PSNR, and
    the GPU/state indicators.
 5. Open **Export** to save the current rendering as PNG. Gaussian results can
    also be saved as a standard 3DGS PLY; virtual-camera results can be inspected
@@ -109,20 +109,21 @@ same aspect ratio when Train starts.
 ## Training feedback
 
 `Update quality metrics during training`, under `Shared training settings`, optionally
-refreshes L1, global/local SSIM, and PSNR at a bounded interval. It is off by
-default because the read-only full-image evaluations can slow training; final
-metrics are always calculated.
+refreshes RGB L1, global/local SSIM, and PSNR at a bounded interval. It is off by
+default because the read-only full-image evaluations can slow training and may
+trigger a memory safety stop when their temporary allocation would exceed the
+budget. Live values are the latest completed evaluation; final values are fixed
+only by the final evaluation.
 
 The following `Color workflow` is also shared by every algorithm. `Monochrome
-underpainting` initializes and optimizes lightness only until `Color finish
-starts at (%)`; `Stage-aware Lab color training` uses a CIELAB objective for
-the color stage. Both options are off by default and do not change RGB rendering
-or final RGB quality metrics.
+underpainting` initializes and optimizes CIELAB L* lightness only until `Color
+finish starts at (%)`, then returns to the standard RGB objective. It is off by
+default and does not change RGB rendering or final RGB quality metrics.
 
-The two-row status area reports iteration and splat counts, L1, global and local
-SSIM, RGB PSNR, image size, background/outside coverage, speed and elapsed time,
-tracked GPU allocation, and the current state. Starting a new run clears the
-previous run's quality values.
+The two-row status area reports iteration and splat counts, RGB L1, global and
+local SSIM, RGB PSNR, image size, low-alpha (alpha below 0.99) and outside
+coverage, speed and elapsed time, tracked GPU allocation, and the current state.
+Starting a new run clears the previous run's quality values.
 
 ## Exports
 
@@ -157,6 +158,9 @@ Run the dependency-free public release contract before publishing:
 ```sh
 node verify-release.mjs
 ```
+
+The Pages workflow rebuilds `_site` from scratch and then runs
+`node verify-release.mjs _site` to require byte parity with the reviewed source.
 
 The `Tilt` tab uses a pinned, self-hosted build of
 [PlayCanvas Engine](https://github.com/playcanvas/engine) 2.20.6 (MIT) to load

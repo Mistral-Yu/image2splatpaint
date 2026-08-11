@@ -13,6 +13,7 @@ import {
 } from "./vendor/playcanvas-2.20.6.min.mjs";
 import {
   TILT_FOV_DEGREES,
+  TILT_MAX_ANGLE_DEGREES,
   cameraDiagnostics,
   canonicalOrbitRadius,
   clampOrbitAngles,
@@ -132,6 +133,13 @@ export async function createTiltViewer({
       toneMapping: TONEMAP_NONE,
     });
     app.root.addChild(camera);
+    const maxCameraAngleDegrees = Math.max(
+      0,
+      Math.min(
+        TILT_MAX_ANGLE_DEGREES,
+        Number(cameraPool?.max_angle_degrees) || TILT_MAX_ANGLE_DEGREES,
+      ),
+    );
 
     const asset = new Asset("Image2SplatPaint PLY", "gsplat", {
       url: blobUrl,
@@ -154,7 +162,7 @@ export async function createTiltViewer({
       ? Math.max(0.01, Number(cameraPool.orbit_radius))
       : canonicalOrbitRadius(frame, {
         fovDegrees: sharedFovDegrees,
-        maxAngleDegrees: 75,
+        maxAngleDegrees: maxCameraAngleDegrees,
       });
     let radiusMode = "training";
     let fitAllOrbitRadius = orbitRadius;
@@ -162,6 +170,8 @@ export async function createTiltViewer({
     let lastCameraDiagnostics = null;
     let destroyed = false;
     let cameraMarkersVisible = true;
+    let cameraUpdates = 0;
+    let sortedFrames = 0;
     let cameraPoolSnapshot = cameraPool ? structuredClone(cameraPool) : null;
     let cameraMarkers = trainingCameraMarkerGeometry(cameraPoolSnapshot);
     const markerOverviewPitch = 20;
@@ -206,7 +216,10 @@ export async function createTiltViewer({
     };
 
     const onSorted = () => {
-      if (!destroyed) app.renderNextFrame = true;
+      if (!destroyed) {
+        sortedFrames += 1;
+        app.renderNextFrame = true;
+      }
     };
     app.scene.on("gsplat:sorted", onSorted);
 
@@ -220,6 +233,7 @@ export async function createTiltViewer({
 
     const updateCamera = () => {
       if (destroyed) return;
+      cameraUpdates += 1;
       const viewport = {
         width: Math.max(1, canvas.clientWidth),
         height: Math.max(1, canvas.clientHeight),
@@ -264,7 +278,7 @@ export async function createTiltViewer({
         height: Math.max(1, canvas.clientHeight),
       }, {
         fovDegrees: sharedFovDegrees,
-        maxAngleDegrees: 75,
+        maxAngleDegrees: maxCameraAngleDegrees,
       });
       viewerOrbitRadius = radiusMode === "fit" ? fitAllOrbitRadius : orbitRadius;
       markerOverviewRadius = Math.max(orbitRadius, viewerOrbitRadius) * 2.65;
@@ -277,7 +291,7 @@ export async function createTiltViewer({
       height: Math.max(1, canvas.clientHeight),
     }, {
       fovDegrees: sharedFovDegrees,
-      maxAngleDegrees: 75,
+      maxAngleDegrees: maxCameraAngleDegrees,
     });
     viewerOrbitRadius = orbitRadius;
     markerOverviewRadius = Math.max(orbitRadius, viewerOrbitRadius) * 2.65;
@@ -347,6 +361,11 @@ export async function createTiltViewer({
           plyByteLength: plyBuffer.byteLength,
           vertices,
           firstSortMs,
+          presentation: {
+            mode: "playcanvas-default-async-sort",
+            cameraUpdates,
+            sortedFrames,
+          },
           pitch,
           yaw,
           orbitRadius,
