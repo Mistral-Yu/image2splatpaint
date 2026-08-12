@@ -289,25 +289,50 @@
                     <section class="lr-section" aria-labelledby="paintAppearanceHeading">
                       <strong id="paintAppearanceHeading" class="lr-section-heading">Paint appearance</strong>
                       <div class="lr-grid">
-                        <label class="field-wide" title="Minimum learned opacity for Rectangle Splats. Training may raise individual splats above this floor. Applied at the next Train start.">
-                          Minimum paint opacity
-                          <input id="opaquePaintOpacity" data-testid="opaque-paint-opacity" type="number" min="0.05" max="1" step="0.005" value="0.995" />
-                        </label>
+                        <div class="rectangle-edge-ratio-row field-wide" role="group" aria-labelledby="rectangleLearnedOpacityHeading">
+                          <span id="rectangleLearnedOpacityHeading" class="rectangle-edge-ratio-heading">Learned opacity (before gradient)</span>
+                          <label title="Minimum learned Rectangle opacity before the fixed directional gradient is multiplied. Applied at the next Train start.">
+                            Min
+                            <input id="rectangleLearnedOpacityMin" data-testid="rectangle-learned-opacity-min" type="number" min="0.005" max="0.995" step="0.005" value="0.995" />
+                          </label>
+                          <label title="Maximum learned Rectangle opacity before the fixed directional gradient is multiplied. Applied at the next Train start.">
+                            Max
+                            <input id="rectangleLearnedOpacityMax" data-testid="rectangle-learned-opacity-max" type="number" min="0.005" max="0.995" step="0.005" value="0.995" />
+                          </label>
+                        </div>
+                        <div class="rectangle-edge-ratio-row field-wide" role="group" aria-labelledby="rectangleOpacityGradientHeading">
+                          <span id="rectangleOpacityGradientHeading" class="rectangle-edge-ratio-heading">Opacity gradient multiplier (short / long)</span>
+                          <label title="Fixed opacity multiplier at the trapezoid short side. It is multiplied by learned opacity and is not trained.">
+                            Min
+                            <input id="rectangleOpacityGradientMin" data-testid="rectangle-opacity-gradient-min" type="number" min="0" max="1" step="0.005" value="1" />
+                          </label>
+                          <label title="Fixed opacity multiplier at the trapezoid long side. It is multiplied by learned opacity and is not trained.">
+                            Max
+                            <input id="rectangleOpacityGradientMax" data-testid="rectangle-opacity-gradient-max" type="number" min="0" max="1" step="0.005" value="1" />
+                          </label>
+                        </div>
                         <div class="rectangle-edge-ratio-row field-wide" role="group" aria-labelledby="rectangleEdgeRatioHeading">
-                          <span id="rectangleEdgeRatioHeading" class="rectangle-edge-ratio-heading">Short edge / long edge</span>
-                          <label title="Minimum short-edge ratio in the deterministic Rectangle shape range. 0 allows triangle tips. Applied at the next Train start.">
+                          <span id="rectangleEdgeRatioHeading" class="rectangle-edge-ratio-heading">Trapezoid edge ratio (top / base)</span>
+                          <label title="Minimum top-edge / base-edge ratio in the deterministic Rectangle shape range. 0 allows triangle tips. Applied at the next Train start.">
                             Min
                             <input id="rectangleTopRatio" data-testid="rectangle-top-ratio" type="number" min="0" max="1" step="0.05" value="1" />
                           </label>
-                          <label title="Maximum short-edge ratio in the deterministic Rectangle shape range. 1 allows full rectangles. Must be at least the minimum. Applied at the next Train start.">
+                          <label title="Maximum top-edge / base-edge ratio in the deterministic Rectangle shape range. 1 makes the parallel edges equal. Must be at least the minimum. Applied at the next Train start.">
                             Max
                             <input id="rectangleTopRatioMax" data-testid="rectangle-top-ratio-max" type="number" min="0" max="1" step="0.05" value="1" />
                           </label>
                         </div>
-                        <label title="Maximum long-edge / short-edge aspect ratio for Rectangle splats. 1 makes square footprints. The default 8 matches the current limit. Applied at the next Train start.">
-                          Max aspect ratio
-                          <input id="rectangleMaxAspectRatio" data-testid="rectangle-max-aspect-ratio" type="number" min="1" max="32" step="0.1" value="8" />
-                        </label>
+                        <div class="rectangle-edge-ratio-row field-wide" role="group" aria-labelledby="rectangleAspectRatioHeading">
+                          <span id="rectangleAspectRatioHeading" class="rectangle-edge-ratio-heading">Aspect ratio (long side / short side)</span>
+                          <label title="Minimum long-side / short-side ratio for Rectangle splats. 1 allows square footprints. Applied at the next Train start.">
+                            Min
+                            <input id="rectangleMinAspectRatio" data-testid="rectangle-min-aspect-ratio" type="number" min="1" max="32" step="0.1" value="1" />
+                          </label>
+                          <label title="Maximum long-side / short-side ratio for Rectangle splats. This Rectangle-specific value overrides Shared Max anisotropy. Applied at the next Train start.">
+                            Max
+                            <input id="rectangleMaxAspectRatio" data-testid="rectangle-max-aspect-ratio" type="number" min="1" max="32" step="0.1" value="4" />
+                          </label>
+                        </div>
                         <label title="Constrains the Rectangle long axis. Free preserves the current structure-guided orientation. Applied at the next Train start.">
                           Orientation
                           <select id="rectangleOrientation" data-testid="rectangle-orientation">
@@ -345,25 +370,60 @@
                     <section class="lr-section" aria-labelledby="brushPaintAppearanceHeading">
                       <strong id="brushPaintAppearanceHeading" class="lr-section-heading">Paint appearance</strong>
                       <div class="lr-grid">
-                        <label class="field-wide" title="Minimum learned opacity for Brush Splats. Training may raise individual splats above this floor. This is independent from Rectangle Splats and is applied at the next Train start.">
-                          Minimum paint opacity
-                          <input id="layeredBrushOpacity" data-testid="layered-brush-opacity" type="number" min="0.05" max="1" step="0.005" value="0.995" />
-                        </label>
-                        <label class="inline-option field-wide" title="Along the Brush long axis, paint deposition transitions from the configured tail value to the tip value. Applied during training, preview, and PNG export at the next Train start.">
-                          <input id="layeredBrushOpacityGradient" data-testid="layered-brush-opacity-gradient" type="checkbox" />
-                          Opacity gradient
-                        </label>
-                        <div class="rectangle-edge-ratio-row field-wide">
-                          <label>Tail<input id="layeredBrushOpacityGradientStart" data-testid="layered-brush-opacity-gradient-start" type="number" min="0" max="1" step="0.01" value="0" /></label>
-                          <label>Tip<input id="layeredBrushOpacityGradientEnd" data-testid="layered-brush-opacity-gradient-end" type="number" min="0" max="1" step="0.01" value="1" /></label>
+                        <div class="rectangle-edge-ratio-row field-wide" role="group" aria-labelledby="brushLearnedOpacityHeading">
+                          <span id="brushLearnedOpacityHeading" class="rectangle-edge-ratio-heading">Learned opacity (before gradient)</span>
+                          <label title="Minimum learned Brush opacity before the fixed directional gradient is multiplied. Applied at the next Train start.">
+                            Min
+                            <input id="layeredBrushLearnedOpacityMin" data-testid="layered-brush-learned-opacity-min" type="number" min="0.005" max="0.995" step="0.005" value="0.995" />
+                          </label>
+                          <label title="Maximum learned Brush opacity before the fixed directional gradient is multiplied. Applied at the next Train start.">
+                            Max
+                            <input id="layeredBrushLearnedOpacityMax" data-testid="layered-brush-learned-opacity-max" type="number" min="0.005" max="0.995" step="0.005" value="0.995" />
+                          </label>
                         </div>
-                        <label class="inline-option field-wide" title="Learns a separate taper amount for every Brush splat. At full taper, width transitions from the configured tail value to the tip value along the long axis. Applied at the next Train start.">
-                          <input id="layeredBrushWidthTaper" data-testid="layered-brush-width-taper" type="checkbox" />
-                          Train directional width taper
+                        <div class="rectangle-edge-ratio-row field-wide" role="group" aria-labelledby="brushOpacityGradientHeading">
+                          <span id="brushOpacityGradientHeading" class="rectangle-edge-ratio-heading">Opacity gradient multiplier</span>
+                          <label title="Fixed minimum directional Brush opacity multiplier. It is multiplied by learned opacity and is not trained.">
+                            Min
+                            <input id="layeredBrushOpacityGradientStart" data-testid="layered-brush-opacity-gradient-start" type="number" min="0" max="1" step="0.005" value="1" />
+                          </label>
+                          <label title="Fixed maximum directional Brush opacity multiplier. It is multiplied by learned opacity and is not trained.">
+                            Max
+                            <input id="layeredBrushOpacityGradientEnd" data-testid="layered-brush-opacity-gradient-end" type="number" min="0" max="1" step="0.005" value="1" />
+                          </label>
+                        </div>
+                        <div class="rectangle-edge-ratio-row field-wide" role="group" aria-labelledby="brushAspectRatioHeading">
+                          <span id="brushAspectRatioHeading" class="rectangle-edge-ratio-heading">Aspect ratio (long side / short side)</span>
+                          <label title="Brush-specific minimum long-side / short-side ratio. Applied at the next Train start.">
+                            Min
+                            <input id="layeredBrushMinAspectRatio" data-testid="layered-brush-min-aspect-ratio" type="number" min="1" max="32" step="0.1" value="1" />
+                          </label>
+                          <label title="Brush-specific maximum long-side / short-side ratio. These Brush values override Shared Max anisotropy during Brush training.">
+                            Max
+                            <input id="layeredBrushMaxAspectRatio" data-testid="layered-brush-max-aspect-ratio" type="number" min="1" max="32" step="0.1" value="8" />
+                          </label>
+                        </div>
+                        <div class="rectangle-edge-ratio-row field-wide" role="group" aria-labelledby="brushWidthTaperHeading">
+                          <span id="brushWidthTaperHeading" class="rectangle-edge-ratio-heading">Train directional width taper</span>
+                          <label>Min<input id="layeredBrushWidthTaperStart" data-testid="layered-brush-width-taper-start" type="number" min="0" max="1" step="0.01" value="1" /></label>
+                          <label>Max<input id="layeredBrushWidthTaperEnd" data-testid="layered-brush-width-taper-end" type="number" min="0" max="1" step="0.01" value="1" /></label>
+                        </div>
+                        <label class="inline-option field-wide" title="Keeps newly split detail strokes in their inherited layer until the shared contribution and footprint check confirms that they should move forward. Experimental; applied at the next Train start.">
+                          <input id="layeredBrushContributionConfirmedPromotion" data-testid="layered-brush-contribution-confirmed-promotion" type="checkbox" />
+                          Contribution-confirmed detail promotion
                         </label>
-                        <div class="rectangle-edge-ratio-row field-wide">
-                          <label>Tail<input id="layeredBrushWidthTaperStart" data-testid="layered-brush-width-taper-start" type="number" min="0" max="1" step="0.01" value="1" /></label>
-                          <label>Tip<input id="layeredBrushWidthTaperEnd" data-testid="layered-brush-width-taper-end" type="number" min="0" max="1" step="0.01" value="0" /></label>
+                        <label class="inline-option field-wide" title="Softly aligns nearby, similarly colored directional Brush splats in the same paint layer. Broad patches and strong direction crossings are excluded. Experimental; applied at the next Train start.">
+                          <input id="layeredBrushLocalColorFlow" data-testid="layered-brush-local-color-flow" type="checkbox" />
+                          Local color-flow orientation
+                        </label>
+                        <div class="brush-setting-divider field-wide" aria-hidden="true"></div>
+                        <label class="inline-option field-wide" title="Softly maintains a minimum long/short scale ratio for directional Brush marks while preserving area. Base patches, splitting, and additive detail growth are unchanged. Experimental; applied at the next Train start.">
+                          <input id="layeredBrushStrokePersistence" data-testid="layered-brush-stroke-persistence" type="checkbox" />
+                          Directional stroke aspect floor
+                        </label>
+                        <div class="rectangle-edge-ratio-row field-wide" title="Minimum long-edge / short-edge ratios used only when Directional stroke aspect floor is enabled. The values cannot exceed the Brush maximum ratio.">
+                          <label>Ribbon minimum<input id="layeredBrushRibbonAspectFloor" data-testid="layered-brush-ribbon-aspect-floor" type="number" min="1" max="8" step="0.1" value="2.2" /></label>
+                          <label>Accent minimum<input id="layeredBrushAccentAspectFloor" data-testid="layered-brush-accent-aspect-floor" type="number" min="1" max="8" step="0.1" value="2.8" /></label>
                         </div>
                       </div>
                     </section>

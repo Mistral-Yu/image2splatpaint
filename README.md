@@ -1,9 +1,9 @@
 <div align="center">
   <h1>Image2SplatPaint</h1>
-  <p><strong>Rebuild a single image from trainable splats, directly in your browser.</strong></p>
+  <p><strong>Explore a new differentiable stylization medium built from trainable splats, directly in your browser.</strong></p>
   <p>
-    Compare Gaussian, geometric, and paint-like representations,
-    inspect reconstruction quality, and export the result.
+    Turn one image into Gaussian, geometric, and paint-like representations,
+    inspect how they transform it, and export the result.
   </p>
   <p>
     <a href="https://mistral-yu.github.io/image2splatpaint/web/index.html"><strong>Launch the app</strong></a>
@@ -21,6 +21,24 @@
   <img src="assets/readme-ui.png" width="1280" alt="Image2SplatPaint with a loaded image, training controls, and two-row status display" />
 </p>
 
+## Project direction
+
+Image2SplatPaint explores both faithful image representation and a new form of
+**differentiable image stylization inspired by Gaussian Splatting**.
+
+Instead of treating splats only as compression primitives, the project treats
+their position, scale, anisotropy, orientation, opacity, layer order, and
+paint-like shape as an image-making vocabulary. `Planar Gaussian` and
+`GS Virtual Camera Sampling` aim for faithful reproduction: the former targets
+a stable front view, while the latter extends that goal to bounded tilted
+views. `Rectangle Splats` and `Brush Splats` instead explore geometric and
+illustrative stylization that may deliberately depart from the source.
+Its discrete paint layers, layer-aware optimization and ordering, Brush and
+Rectangle shape semantics, and paint-oriented controls are original parts of
+Image2SplatPaint rather than features inherited from the referenced methods.
+For the stylization algorithms, visible style, stroke structure, and the
+character of the rendered image matter alongside numerical quality metrics.
+
 ## Quick start
 
 1. Choose an **Algorithm**. Algorithm and setting changes apply to the next
@@ -29,8 +47,10 @@
 2. Select **Load image**, use **Sample**, or drop an image on the canvas.
 3. Set **Max image side**, splat counts, and **Iterations**, then select
    **Train**. Use **Pause** or **Stop** if needed.
-4. Switch between **Original** and **Splats**, then review RGB L1, SSIM, PSNR, and
-   the GPU/state indicators.
+4. Switch between **Original** and **Splats**, then review the visible result.
+   RGB L1, SSIM, and PSNR help evaluate fidelity and compare runs; for Rectangle
+   and Brush results, also evaluate their visible style and stroke structure.
+   The status area reports GPU and runtime state.
 5. Open **Export** to save the current rendering as PNG. Gaussian results can
    also be saved as a standard 3DGS PLY; virtual-camera results can be inspected
    in **Tilt**.
@@ -83,15 +103,36 @@ layers. Optional Rectangle-only controls can preserve each footprint area
 while tapering, point the narrow edge toward stronger local structure, prefer
 the selected Max ratio in flat regions, and use a harder narrow edge with a
 softer wide edge. `1 / 1` retains the existing Rectangle training path.
+`Learned opacity (before gradient)` bounds each Rectangle's trainable opacity
+to `0.005...0.995`. `Opacity gradient multiplier (short / long)` is a fixed
+`0...1` multiplier that changes linearly from the trapezoid's short edge to its
+long edge. Final opacity is `learned opacity × gradient multiplier`. The defaults
+`0.995 / 0.995` and `1 / 1` preserve the former uniform `0.995` behavior.
 
-`Rectangle Splats` uses a trainable minimum opacity floor. `Brush Splats`
-instead has its own minimum paint opacity and does not share that Rectangle
-setting. Its optional opacity gradient and learned directional width taper each
-provide separate tail/tip values. The former saturation gradient, Brush Line
-layer, and Brush-profile choices are no longer part of the product UI. The
-rejected Sector-aware, optical-smoothing,
-and residual-matching Brush experiments are also absent from the product UI;
-their comparison records remain in the local Brush experiment registry.
+### Brush Splats settings
+
+Brush settings apply at the next Train start. Experimental checkboxes remain
+off by default. Equal directional endpoints are treated as a uniform/no-taper
+setting, so the defaults retain the accepted Brush path.
+
+| Setting | What it changes |
+| --- | --- |
+| `Learned opacity (before gradient)` | Bounds each trainable Brush opacity to Min...Max in the safe `0.005...0.995` range. The default is `0.995 / 0.995`. |
+| `Opacity gradient multiplier` | A fixed `0...1` directional multiplier; it is not trained. Final opacity is learned opacity multiplied by this gradient in training, preview, standard-alpha overlap, and PNG export. The default `1 / 1` is uniform. |
+| `Aspect ratio (long side / short side)` | Sets Brush-specific Min and Max anisotropy in one row. Defaults are `1 / 8`; both values override the Shared `Max anisotropy` behavior during Brush training. |
+| `Train directional width taper` | Learns a separate taper amount per splat between the configured directional Min and Max widths. Equal endpoints disable the directional change; the default `1 / 1` preserves the prior untapered path. |
+| `Contribution-confirmed detail promotion` | Keeps a newly split detail stroke in its inherited paint layer until contribution and footprint checks confirm that moving it forward is useful. This is experimental. |
+| `Local color-flow orientation` | Softly aligns nearby directional splats when their colors and paint layers are similar. Broad patches and strong direction crossings are excluded. This is experimental. |
+| `Directional stroke aspect floor` | Softly maintains a minimum long/short ratio while preserving footprint area. `Ribbon minimum` defaults to `2.2`; `Accent minimum` defaults to `2.8`; Base Patches are unchanged. These are lower bounds, while `Maximum long / short ratio` is the upper bound. This is experimental. |
+
+The general Brush Min/Max applies to every Brush splat. When Directional stroke
+aspect floor is enabled, Ribbon and Accent additionally use their stronger
+family-specific minimums, capped by the Brush Max.
+
+The former training-teacher preprocessing, saturation gradient, Brush Line
+layer, Brush-profile choices, and rejected Sector-aware, optical-smoothing, and
+residual-matching experiments are not part of the product UI. Their comparison
+records remain in the local Brush experiment registry.
 
 </details>
 
@@ -171,9 +212,35 @@ See [Third-Party Notices](THIRD_PARTY_NOTICES.md).
 This repository is an experiment in AI-assisted implementation and validation
 built with GPT-5.6.
 
+## Research inspiration
+
+The project is independently implemented, but its direction has been informed
+by research that treats images as learnable sets of spatial primitives:
+
+- [Image-GS: Content-Adaptive Image Representation via 2D Gaussians](https://arxiv.org/abs/2407.01866)
+  demonstrates adaptive image representation with progressively optimized
+  anisotropic 2D Gaussians.
+- [Soft Anisotropic Diagrams for Differentiable Image Representation](https://luckyiyi.github.io/SAD/index.html)
+  explores learnable anisotropic sites, differentiable spatial ownership, and
+  content-aligned boundaries.
+
+Image2SplatPaint takes inspiration from those broader ideas, but it is not a
+reimplementation of either method. In particular, its discrete paint-layer
+model, layer-aware ordering and optimization, Brush and Rectangle primitives,
+opacity semantics, and paint-oriented training controls are independently
+designed for this project. The implementation combines those original elements
+with standard front-to-back alpha compositing in its own WebGPU optimizer,
+extending the design space toward editable, paint-like, and deliberately
+stylized splat representations.
+
 ## Roadmap
 
-- Improve training methods for paint-oriented effects.
+- Improve faithful image representation for the Planar Gaussian and Virtual
+  Camera paths.
+- Develop Rectangle and Brush splats as distinct stylization and image-making
+  media.
+- Improve training methods for paint-oriented effects, stroke structure, and
+  controllable visual character.
 - Improve compatibility with conventional 3D Gaussian Splatting workflows.
 
 ## License

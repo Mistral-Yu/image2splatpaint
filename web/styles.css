@@ -673,6 +673,12 @@ select {
   min-width: 0;
 }
 
+.brush-setting-divider {
+  border-top: 1px solid var(--line);
+  margin-top: 4px;
+  padding-top: 2px;
+}
+
 .inline-option {
   display: flex;
   align-items: center;
