@@ -23,21 +23,12 @@
 
 ## Project direction
 
-Image2SplatPaint explores both faithful image representation and a new form of
-**differentiable image stylization inspired by Gaussian Splatting**.
-
-Instead of treating splats only as compression primitives, the project treats
-their position, scale, anisotropy, orientation, opacity, layer order, and
-paint-like shape as an image-making vocabulary. `Planar Gaussian` and
-`GS Virtual Camera Sampling` aim for faithful reproduction: the former targets
-a stable front view, while the latter extends that goal to bounded tilted
-views. `Rectangle Splats` and `Brush Splats` instead explore geometric and
-illustrative stylization that may deliberately depart from the source.
-Its discrete paint layers, layer-aware optimization and ordering, Brush and
-Rectangle shape semantics, and paint-oriented controls are original parts of
-Image2SplatPaint rather than features inherited from the referenced methods.
-For the stylization algorithms, visible style, stroke structure, and the
-character of the rendered image matter alongside numerical quality metrics.
+Image2SplatPaint explores faithful image representation and differentiable
+stylization with trainable splats. `Planar Gaussian` and
+`GS Virtual Camera Sampling` focus on reproduction, while `Rectangle Splats`
+and `Brush Splats` use geometric shapes, strokes, and independent paint layers
+to create deliberately stylized results. For these stylization paths, visible
+character matters alongside numerical fidelity.
 
 ## Quick start
 
@@ -149,89 +140,43 @@ same aspect ratio when Train starts.
 
 ## Training feedback
 
-`Update quality metrics during training`, under `Shared training settings`, optionally
-refreshes RGB L1, global/local SSIM, and PSNR at a bounded interval. It is off by
-default because the read-only full-image evaluations can slow training and may
-trigger a memory safety stop when their temporary allocation would exceed the
-budget. Live values are the latest completed evaluation; final values are fixed
-only by the final evaluation.
-
-The following `Color workflow` is also shared by every algorithm. `Monochrome
-underpainting` initializes and optimizes CIELAB L* lightness only until `Color
-finish starts at (%)`, then returns to the standard RGB objective. It is off by
-default and does not change RGB rendering or final RGB quality metrics.
-
-The two-row status area reports iteration and splat counts, RGB L1, global and
-local SSIM, RGB PSNR, image size, low-alpha (alpha below 0.99) and outside
-coverage, speed and elapsed time, tracked GPU allocation, and the current state.
-Starting a new run clears the previous run's quality values.
+The status area reports progress, splat count, image quality, coverage, speed,
+elapsed time, and tracked GPU use. Optional live quality updates are off by
+default because full-image evaluation can slow training. The shared
+`Monochrome underpainting` option begins with lightness and switches to RGB at
+the selected point; final quality metrics always evaluate the RGB result.
 
 ## Exports
 
-- PNG: current Splats preview, including shape, effects, alpha background, and optional outside-image padding.
-- PLY: available for the Gaussian algorithms. It uses standard SH0 Gaussian
-  Splatting fields in aspect-preserving coordinates and stores the learned
-  layer-order depth plus any enabled bounded virtual depth in `z`.
+- PNG exports the current rendered result for every algorithm.
+- Standard SH0 3DGS PLY is available for the two Gaussian algorithms.
+  Rectangle and Brush use non-Gaussian kernels and therefore export PNG only.
 
-These PLY files are learned from one image and prioritize its front view.
-Rotated views—especially from `Planar Gaussian`—will generally be less complete
-than conventional 3DGS trained from calibrated multi-view photos. Virtual
-Camera Sampling improves bounded tilt, but does not replace true multi-view
+PLY results are learned from one image and prioritize its front view. Virtual
+Camera Sampling supports bounded tilt, but does not replace true multi-view
 geometry or view-dependent color.
-
-`Rectangle Splats` and `Brush Splats` use analytic non-Gaussian
-kernels, so their exact export is PNG and PLY is intentionally disabled.
-
-PLY opacity, color, scale, and rotation use standard pre-activation fields. The
-training renderer and exported result use standard front-to-back alpha blending.
 
 ## Development
 
-Open the root `index.html` directly, or serve the repository root with a static server.
-Training and the self-hosted PlayCanvas `Tilt` tab both work from `file://`.
-GitHub Pages is deployed by `.github/workflows/pages.yml`; the workflow publishes
-only the app, the generated geometric Sample image, and the author-owned ramen
-sample in `assets/source-images/`. Their provenance is recorded in
-`assets/source-images/README.md`.
-
-Run the dependency-free public release contract before publishing:
+Open `index.html` directly or serve the repository as static files. Before
+publishing, run:
 
 ```sh
 node verify-release.mjs
 ```
 
-The Pages workflow rebuilds `_site` from scratch and then runs
-`node verify-release.mjs _site` to require byte parity with the reviewed source.
-
-The `Tilt` tab uses a pinned, self-hosted build of
-[PlayCanvas Engine](https://github.com/playcanvas/engine) 2.20.6 (MIT) to load
-the generated PLY without uploading it. Training and the primary preview remain
-the custom WebGPU implementation; Tilt uses the backend negotiated by PlayCanvas.
-See [Third-Party Notices](THIRD_PARTY_NOTICES.md).
-
-This repository is an experiment in AI-assisted implementation and validation
-built with GPT-5.6.
+GitHub Pages publishes the reviewed static app. Training uses the custom WebGPU
+implementation; `Tilt` uses a pinned self-hosted
+[PlayCanvas Engine](https://github.com/playcanvas/engine) build. See
+[Third-Party Notices](THIRD_PARTY_NOTICES.md). This project is developed and
+validated with AI assistance.
 
 ## Research inspiration
 
-The project is independently implemented, but its direction has been informed
-by research that treats images as learnable sets of spatial primitives:
-
-- [Image-GS: Content-Adaptive Image Representation via 2D Gaussians](https://arxiv.org/abs/2407.01866)
-  demonstrates adaptive image representation with progressively optimized
-  anisotropic 2D Gaussians.
-- [Soft Anisotropic Diagrams for Differentiable Image Representation](https://luckyiyi.github.io/SAD/index.html)
-  explores learnable anisotropic sites, differentiable spatial ownership, and
-  content-aligned boundaries.
-
-Image2SplatPaint takes inspiration from those broader ideas, but it is not a
-reimplementation of either method. In particular, its discrete paint-layer
-model, layer-aware ordering and optimization, Brush and Rectangle primitives,
-opacity semantics, and paint-oriented training controls are independently
-designed for this project. The implementation combines those original elements
-with standard front-to-back alpha compositing in its own WebGPU optimizer,
-extending the design space toward editable, paint-like, and deliberately
-stylized splat representations.
+Image2SplatPaint was inspired by
+[Image-GS](https://arxiv.org/abs/2407.01866) and
+[Soft Anisotropic Diagrams](https://luckyiyi.github.io/SAD/index.html), while
+its implementation and paint-oriented design are developed independently.
 
 ## Roadmap
 
