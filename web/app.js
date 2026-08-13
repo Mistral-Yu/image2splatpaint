@@ -154,21 +154,14 @@ const ALPHA_STATE_BYTES_PER_PIXEL = 16;
 const LAYER_TRAIN_INTERVAL = 500;
 const DEFAULT_DISCRETE_LAYER_COUNT = 16;
 const DEFAULT_DISCRETE_LAYER_MOVE_RADIUS = 0;
-const DEFAULT_DEEP_PRUNE_INTERVAL = 500;
-const MIN_DEEP_PRUNE_INTERVAL = 100;
-const MAX_DEEP_PRUNE_INTERVAL = 5000;
 const DEFAULT_SCALE_BIASED_SURFACE_LAYER_SORT_LAYERS = 32;
 const DEFAULT_SCALE_BIASED_SURFACE_LAYER_SORT_INTERVAL = 100;
-const DEFAULT_SCALE_BIASED_SURFACE_LAYER_SORT_UNTIL = 0.95;
+const DEFAULT_SCALE_BIASED_SURFACE_LAYER_SORT_UNTIL = 0.90;
 const MAX_SCALE_BIASED_SURFACE_LAYER_SORT_INTERVAL = 100_000;
 const MIN_DISCRETE_LAYER_COUNT = 2;
 const MAX_DISCRETE_LAYER_COUNT = 32;
-const DEEP_PRUNE_FRACTION = 0.5;
-const DEEP_PRUNE_MAX_FRACTION = 0.025;
-const DEEP_PRUNE_P3_FRACTION = 0.01;
-const DEEP_PRUNE_EXPERIMENT_MAX_FRACTION = 0.1;
-const DEEP_PRUNE_EXPERIMENT_MAX_DEPTH_FRACTION = 0.75;
-const DEEP_PRUNE_MIN_SPLATS = 256;
+const MIN_COMPACTION_SPLATS = 256;
+const LAYER_DIAGNOSTIC_DEEP_FRACTION = 0.5;
 const EXACT_GRADIENT_STRIDE = 16;
 const OVERLAP_METRIC_STRIDE = 19;
 const TILE_SIZE = 16;
@@ -247,10 +240,7 @@ const DEFAULT_LAYERED_BRUSH_TAPER_LR = 0.01;
 const MIN_LEARNED_PAINT_OPACITY = 0.005;
 const MAX_LEARNED_PAINT_OPACITY = 0.995;
 const LAYERED_OPAQUE_BRUSH_LAYER_MOVE_RADIUS = 1;
-const LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL = 250;
-const LAYERED_OPAQUE_BRUSH_DEEP_FRACTION = 0.75;
-const LAYERED_OPAQUE_BRUSH_P2_PRUNE_FRACTION = 0.05;
-const LAYERED_OPAQUE_BRUSH_P3_PRUNE_FRACTION = 0.025;
+const OPAQUE_PAINT_DETAIL_RECOVERY_INTERVAL = 250;
 const OPAQUE_PAINT_LATE_SETTLE_FRACTION = 0.10;
 const MAX_OPAQUE_PAINT_LATE_SETTLE_FRACTION = 0.20;
 const OPAQUE_PAINT_VISIBILITY_GRACE_STEPS = 64;
@@ -303,7 +293,7 @@ const ALGORITHM_REGISTRY = Object.freeze({
       variableTopWidth: true,
       requiresLayerOrder: true,
       configurableLayerCount: true,
-      hiddenSplatPruning: true,
+      contributionCleanup: true,
     }),
   }),
   [LAYERED_OPAQUE_BRUSH_ALGORITHM_ID]: Object.freeze({
@@ -325,7 +315,7 @@ const ALGORITHM_REGISTRY = Object.freeze({
       minimumOpacity: true,
       requiresLayerOrder: true,
       configurableLayerCount: true,
-      hiddenSplatPruning: true,
+      contributionCleanup: true,
     }),
   }),
   [GS_VIRTUAL_CAMERA_ALGORITHM_ID]: Object.freeze({
@@ -1684,13 +1674,16 @@ function brushContributionDiagnosticsSettings(algorithm = selectedAlgorithm()) {
 
 function opaquePaintCurrentVisibilityChildPolicyEnabled() {
   const override = qaOverrides("__image2SplatCurrentVisibilityCompaction");
-  return override.enabled !== false;
+  if (typeof override.enabled === "boolean") return override.enabled;
+  return Boolean(document.querySelector("#currentContributionCompaction")?.checked);
 }
 
 function opaquePaintCurrentVisibilityCompactionEnabled() {
-  // v1 owns the physical compaction only.  Keep the shader's child policy
-  // enabled for a v2 A/B, and treat an explicit QA `enabled: false` as v2 off.
-  return opaquePaintCurrentVisibilityChildPolicyEnabled() &&
+  // The retired v1 physical compaction must not silently replace v2 when the
+  // public Current-Visibility checkbox is off. It remains QA-addressable only.
+  const override = qaOverrides("__image2SplatCurrentVisibilityCompaction");
+  return override.physicalCompaction === true &&
+    opaquePaintCurrentVisibilityChildPolicyEnabled() &&
     !currentContributionCompactionSettings().enabled;
 }
 
@@ -2022,10 +2015,6 @@ function layerEfficiencyVariants() {
   const overrides = qaOverrides("__image2SplatLayerEfficiency");
   const query = new URLSearchParams(globalThis.location?.search || "");
   const qa = QA_RUNTIME_ENABLED && query.get("qa") === "1";
-  const requestedPruneSelectionMode = String(overrides.deepPruneSelectionMode || "depth");
-  const deepPruneSelectionMode = ["depth", "depth-color", "color"].includes(requestedPruneSelectionMode)
-    ? requestedPruneSelectionMode
-    : "depth";
   const enabled = (name, queryName, fallback = false) => {
     if (typeof overrides[name] === "boolean") return overrides[name];
     if (qa && query.has(queryName)) return query.get(queryName) !== "0";
@@ -2036,37 +2025,9 @@ function layerEfficiencyVariants() {
     deepRelocation: enabled("deepRelocation", "deep-layer-relocation"),
     deepFraction: Math.max(
       0.05,
-      Math.min(DEEP_PRUNE_EXPERIMENT_MAX_DEPTH_FRACTION, Number(overrides.deepFraction) || DEEP_PRUNE_FRACTION),
+      Math.min(0.75, Number(overrides.deepFraction) || LAYER_DIAGNOSTIC_DEEP_FRACTION),
     ),
     influenceThreshold: Math.max(0.05, Math.min(1.5, Number(overrides.influenceThreshold) || 0.45)),
-    deepPruneP2Fraction: Math.max(
-      0,
-      Math.min(
-        DEEP_PRUNE_EXPERIMENT_MAX_FRACTION,
-        Number.isFinite(Number(overrides.deepPruneP2Fraction))
-          ? Number(overrides.deepPruneP2Fraction)
-          : DEEP_PRUNE_MAX_FRACTION,
-      ),
-    ),
-    deepPruneP3Fraction: Math.max(
-      0,
-      Math.min(
-        DEEP_PRUNE_EXPERIMENT_MAX_FRACTION,
-        Number.isFinite(Number(overrides.deepPruneP3Fraction))
-          ? Number(overrides.deepPruneP3Fraction)
-          : DEEP_PRUNE_P3_FRACTION,
-      ),
-    ),
-    deepPruneAlphaGamma: Math.max(
-      0.25,
-      Math.min(
-        4,
-        Number.isFinite(Number(overrides.deepPruneAlphaGamma))
-          ? Number(overrides.deepPruneAlphaGamma)
-          : 1,
-      ),
-    ),
-    deepPruneSelectionMode,
   };
 }
 
@@ -2839,10 +2800,8 @@ function discreteLayerSettings() {
   const opaqueLayered = algorithmUsesOpaqueLayeredPaint();
   const requested = Boolean(document.querySelector("#discreteLayers")?.checked);
   const accumulationRequested = Boolean(document.querySelector("#layerAwareAccumulation")?.checked);
-  const deepPruneRequested = Boolean(document.querySelector("#pruneLowContributionDeepSplats")?.checked);
   const rawCount = Number(document.querySelector("#discreteLayerCount")?.value);
   const rawMoveRadius = Number(document.querySelector("#discreteLayerMoveRadius")?.value);
-  const rawPruneInterval = Number(document.querySelector("#deepPruneInterval")?.value);
   const count = Math.max(
     MIN_DISCRETE_LAYER_COUNT,
     Math.min(MAX_DISCRETE_LAYER_COUNT, Math.round(Number.isFinite(rawCount) ? rawCount : DEFAULT_DISCRETE_LAYER_COUNT)),
@@ -2856,20 +2815,6 @@ function discreteLayerSettings() {
     opaquePaintSettleFraction: opaqueLayered ? opaquePaintLateSettleFraction() : 0,
     enabled: (opaqueLayered || requested) && Boolean(document.querySelector("#trainLayerOrder")?.checked) && !algorithmUsesVirtualCameras(),
     accumulationEnabled: (opaqueLayered || accumulationRequested) && Boolean(document.querySelector("#trainLayerOrder")?.checked) && !algorithmUsesVirtualCameras(),
-    deepPruneEnabled:
-      (opaqueLayered || deepPruneRequested) &&
-      Boolean(document.querySelector("#trainLayerOrder")?.checked) &&
-      !algorithmUsesVirtualCameras(),
-    deepPruneInterval: opaqueLayered
-      ? LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL
-      : Math.max(
-        MIN_DEEP_PRUNE_INTERVAL,
-        Math.min(
-          MAX_DEEP_PRUNE_INTERVAL,
-          Math.round(Number.isFinite(rawPruneInterval) ? rawPruneInterval : DEFAULT_DEEP_PRUNE_INTERVAL),
-        ),
-      ),
-    finalDeepPrune: opaqueLayered,
     count,
     moveRadius: opaqueLayered
       ? Math.max(
@@ -2965,6 +2910,7 @@ function experimentalVariants() {
 }
 
 const els = {
+  appRoot: document.querySelector("main.app"),
   viewer: document.querySelector(".viewer"),
   viewControls: document.querySelector(".view-controls"),
   previewCanvas: document.querySelector("#previewCanvas"),
@@ -2995,8 +2941,6 @@ const els = {
   tileCullingToggle: document.querySelector("#tileCullingToggle"),
   trainLayerOrder: document.querySelector("#trainLayerOrder"),
   layerAwareAccumulation: document.querySelector("#layerAwareAccumulation"),
-  pruneLowContributionDeepSplats: document.querySelector("#pruneLowContributionDeepSplats"),
-  deepPruneInterval: document.querySelector("#deepPruneInterval"),
   discreteLayers: document.querySelector("#discreteLayers"),
   discreteLayerCount: document.querySelector("#discreteLayerCount"),
   discreteLayerMoveRadius: document.querySelector("#discreteLayerMoveRadius"),
@@ -3173,6 +3117,7 @@ const state = {
   trainingGeneration: 0,
   trainingRun: null,
   sampleLoading: false,
+  imageLoading: false,
   paused: false,
   stopRequested: false,
   trainingTiming: {
@@ -3320,7 +3265,7 @@ function invalidateTrainingRun(reason = "lifecycle change") {
 }
 
 function trainingLifecycleInputLocked() {
-  return state.running || state.startPending || state.webGpuRecoveryPending;
+  return state.running || state.startPending || state.imageLoading || state.webGpuRecoveryPending;
 }
 
 function previewModeInputLocked() {
@@ -3477,6 +3422,7 @@ function publishState() {
   data.startPending = String(state.startPending);
   data.trainingGeneration = String(state.trainingGeneration);
   data.sampleLoading = String(state.sampleLoading);
+  data.imageLoading = String(state.imageLoading);
   data.paused = String(state.paused);
   data.runtimeSettingsRevision = String(state.runtimeSettingsRevision);
   data.stopRequested = String(state.stopRequested);
@@ -3509,7 +3455,9 @@ function publishState() {
   data.canvasViewScale = String(state.canvasView.scale);
   updateCanvasViewControls();
   updateTiltControlState();
-  const lifecycleLocked = state.running || state.startPending || state.webGpuRecoveryPending;
+  const lifecycleLocked = trainingLifecycleInputLocked();
+  els.appRoot.inert = state.imageLoading;
+  els.appRoot.setAttribute("aria-busy", String(state.imageLoading));
   const resultTabsLocked = lifecycleLocked;
   const splatsTabLocked = previewModeInputLocked() || !state.params;
   els.splatsTab.disabled = splatsTabLocked;
@@ -3627,8 +3575,6 @@ function publishState() {
   data.tileCullingEnabled = String(Boolean(els.tileCullingToggle?.checked));
   data.trainLayerOrderInput = String(Boolean(els.trainLayerOrder?.checked));
   data.layerAwareAccumulationInput = String(Boolean(els.layerAwareAccumulation?.checked));
-  data.pruneLowContributionDeepSplatsInput = String(Boolean(els.pruneLowContributionDeepSplats?.checked));
-  data.deepPruneIntervalInput = els.deepPruneInterval?.value || String(DEFAULT_DEEP_PRUNE_INTERVAL);
   data.discreteLayersInput = String(Boolean(els.discreteLayers?.checked));
   data.discreteLayerCountInput = els.discreteLayerCount?.value || String(DEFAULT_DISCRETE_LAYER_COUNT);
   data.discreteLayerMoveRadiusInput = els.discreteLayerMoveRadius?.value || String(DEFAULT_DISCRETE_LAYER_MOVE_RADIUS);
@@ -4941,7 +4887,7 @@ async function resizeLoadedImageToMaxSide(maxSide) {
 }
 
 async function loadFile(file) {
-  if (state.running || state.startPending || state.webGpuRecoveryPending) {
+  if (trainingLifecycleInputLocked()) {
     throw new Error("Stop training before loading another image.");
   }
   invalidateTrainingRun("image load");
@@ -4954,16 +4900,21 @@ async function loadFile(file) {
   }
   const loadGeneration = state.imageLoadGeneration + 1;
   state.imageLoadGeneration = loadGeneration;
+  state.imageLoading = true;
+  setStatus("loading image");
+  setTrainingMessage(`Loading ${file.name}...`);
+  publishState();
   state.webgpu.renderer?.disposeTrainState();
-  const decoded = await decodeImageFile(file);
+  let decoded = null;
   let cacheCanvas = null;
   let decodedReleased = false;
   const releaseDecoded = () => {
     if (decodedReleased) return;
     decodedReleased = true;
-    decoded.close?.();
+    decoded?.close?.();
   };
   try {
+    decoded = await decodeImageFile(file);
     if (loadGeneration !== state.imageLoadGeneration) return false;
     const originalWidth = decoded.originalWidth || decoded.width;
     const originalHeight = decoded.originalHeight || decoded.height;
@@ -5047,6 +4998,10 @@ async function loadFile(file) {
   } finally {
     releaseDecoded();
     releaseCanvasBackingStore(cacheCanvas);
+    if (loadGeneration === state.imageLoadGeneration) {
+      state.imageLoading = false;
+      publishState();
+    }
   }
 }
 
@@ -6326,6 +6281,19 @@ function snapshotParams(params) {
     illustrativeOilVersion: Math.max(0, Math.round(Number(params.illustrativeOilVersion) || 0)),
     brushDetailRefinementEnabled: Boolean(params.brushDetailRefinementEnabled),
     brushLocalColorFlowEnabled: Boolean(params.brushLocalColorFlowEnabled),
+    brushStrokePersistenceEnabled: Boolean(params.brushStrokePersistenceEnabled),
+    brushRibbonAspectFloor: clampNumber(
+      params.brushRibbonAspectFloor,
+      1,
+      LIMITS.maxAnisotropyMax,
+      BRUSH_STROKE_PERSISTENCE_RIBBON_MIN_RATIO,
+    ),
+    brushAccentAspectFloor: clampNumber(
+      params.brushAccentAspectFloor,
+      1,
+      LIMITS.maxAnisotropyMax,
+      BRUSH_STROKE_PERSISTENCE_ACCENT_MIN_RATIO,
+    ),
     surfaceLayerPriorEnabled: Boolean(params.surfaceLayerPriorEnabled),
     surfaceLayerPriorColorAwarePromotion:
       params.surfaceLayerPriorColorAwarePromotion !== false,
@@ -6390,11 +6358,6 @@ function snapshotParams(params) {
     boundarySigma: Number.isFinite(params.boundarySigma) ? params.boundarySigma : selectedBoundarySigma(),
     layerOrderEnabled: Boolean(params.layerOrderEnabled),
     layerAwareAccumulationEnabled: Boolean(params.layerAwareAccumulationEnabled),
-    pruneLowContributionDeepSplatsEnabled: Boolean(params.pruneLowContributionDeepSplatsEnabled),
-    deepPruneInterval: Math.max(
-      MIN_DEEP_PRUNE_INTERVAL,
-      Math.min(MAX_DEEP_PRUNE_INTERVAL, Math.round(params.deepPruneInterval || DEFAULT_DEEP_PRUNE_INTERVAL)),
-    ),
     discreteLayersEnabled: Boolean(params.discreteLayersEnabled),
     discreteLayerCount: Math.max(MIN_DISCRETE_LAYER_COUNT, Math.min(MAX_DISCRETE_LAYER_COUNT, Math.round(params.discreteLayerCount || DEFAULT_DISCRETE_LAYER_COUNT))),
     discreteLayerMoveRadius: Math.max(0, Math.round(params.discreteLayerMoveRadius ?? DEFAULT_DISCRETE_LAYER_MOVE_RADIUS)),
@@ -7367,8 +7330,6 @@ function initOpaqueLayeredPaint(image, count, kernelShape) {
   params.discreteLayerMoveRadius = LAYERED_OPAQUE_BRUSH_LAYER_MOVE_RADIUS;
   applyAdaptiveBspPaintInitialization(image, params, kernelShape);
   const baseCount = params.count;
-  params.pruneLowContributionDeepSplatsEnabled = true;
-  params.deepPruneInterval = LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL;
   params.opacity.fill(params.maximumOpacity);
   const illustrativeOil = kernelShape === "opaque-brush";
   params.brushOpacityGradientEnabled = illustrativeOil && directionalEffects.opacity;
@@ -7685,34 +7646,6 @@ function curriculumTrainingStage(step, steps, variants, coarseImage, midImage) {
   return "full";
 }
 
-function deepPruneStage(step, steps) {
-  if (step <= experimentalCoarseSteps(steps)) return "P1";
-  if (step <= experimentalDensifySteps(steps)) return "P2";
-  return "P3";
-}
-
-function deepPruneScheduled(step, steps, settings) {
-  if (!settings?.deepPruneEnabled) return false;
-  // A metric-display QA flag must not alter the learning event schedule.
-  const interval = Math.max(
-    MIN_DEEP_PRUNE_INTERVAL,
-    Math.min(MAX_DEEP_PRUNE_INTERVAL, Math.round(settings.deepPruneInterval || DEFAULT_DEEP_PRUNE_INTERVAL)),
-  );
-  return step > experimentalCoarseSteps(steps) && (
-    (step < steps && step % interval === 0) ||
-    (step === steps && settings.finalDeepPrune)
-  );
-}
-
-function deepPruneDue(step, steps, settings) {
-  return deepPruneScheduled(step, steps, settings) && opaquePaintStructuralMutationAllowed(
-    step,
-    steps,
-    Boolean(settings?.opaqueLayered),
-    settings?.opaquePaintSettleFraction,
-  );
-}
-
 function opaquePaintVisibilityCompactionStep(
   steps,
   fraction = OPAQUE_PAINT_LATE_SETTLE_FRACTION,
@@ -7730,7 +7663,6 @@ function opaquePaintVisibilityGraceSteps(steps) {
 function opaquePaintVisibilityCompactionDue(step, steps, settings) {
   if (
     !settings?.opaqueLayered ||
-    !settings?.deepPruneEnabled ||
     settings?.currentVisibilityCompactionEnabled === false ||
     settings?.currentContributionCompactionEnabled === true
   ) return false;
@@ -7805,10 +7737,10 @@ function currentContributionCompactionDue(step, steps, settings) {
   return currentContributionCompactionSchedule(step, steps, settings).compactionDue;
 }
 
-function opaquePaintDetailRecoveryDue(step, steps, interval) {
-  const cadence = Math.max(2, Math.round(interval || LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL));
+function opaquePaintDetailRecoveryDue(step, steps, interval = OPAQUE_PAINT_DETAIL_RECOVERY_INTERVAL) {
+  const cadence = Math.max(2, Math.round(interval || OPAQUE_PAINT_DETAIL_RECOVERY_INTERVAL));
   const offset = Math.floor(cadence / 2);
-  // Keep ownership moves away from deep-prune boundaries and leave a short
+  // Keep ownership moves on their established cadence and leave a short
   // settling window before the final result is presented.
   return step > 0 && step < Math.max(1, steps - 16) && step % cadence === offset;
 }
@@ -8211,6 +8143,19 @@ function growParamPlaceholders(params, targetCount) {
     illustrativeOilVersion: Math.max(0, Math.round(Number(params.illustrativeOilVersion) || 0)),
     brushDetailRefinementEnabled: Boolean(params.brushDetailRefinementEnabled),
     brushLocalColorFlowEnabled: Boolean(params.brushLocalColorFlowEnabled),
+    brushStrokePersistenceEnabled: Boolean(params.brushStrokePersistenceEnabled),
+    brushRibbonAspectFloor: clampNumber(
+      params.brushRibbonAspectFloor,
+      1,
+      LIMITS.maxAnisotropyMax,
+      BRUSH_STROKE_PERSISTENCE_RIBBON_MIN_RATIO,
+    ),
+    brushAccentAspectFloor: clampNumber(
+      params.brushAccentAspectFloor,
+      1,
+      LIMITS.maxAnisotropyMax,
+      BRUSH_STROKE_PERSISTENCE_ACCENT_MIN_RATIO,
+    ),
     surfaceLayerPriorEnabled: Boolean(params.surfaceLayerPriorEnabled),
     surfaceLayerPriorColorAwarePromotion:
       params.surfaceLayerPriorColorAwarePromotion !== false,
@@ -8272,8 +8217,6 @@ function growParamPlaceholders(params, targetCount) {
     boundarySigma: params.boundarySigma,
     layerOrderEnabled: Boolean(params.layerOrderEnabled),
     layerAwareAccumulationEnabled: Boolean(params.layerAwareAccumulationEnabled),
-    pruneLowContributionDeepSplatsEnabled: Boolean(params.pruneLowContributionDeepSplatsEnabled),
-    deepPruneInterval: params.deepPruneInterval || DEFAULT_DEEP_PRUNE_INTERVAL,
     discreteLayersEnabled: Boolean(params.discreteLayersEnabled),
     discreteLayerCount: params.discreteLayerCount,
     discreteLayerMoveRadius: params.discreteLayerMoveRadius,
@@ -8329,7 +8272,7 @@ function compactSplatParams(params, keepIndices) {
   };
 }
 
-const DEEP_PRUNE_COLOR_SAMPLES = [
+const FOOTPRINT_COLOR_SAMPLES = [
   [0, 0, 1],
   [-1, 0, Math.exp(-0.5)],
   [1, 0, Math.exp(-0.5)],
@@ -8375,7 +8318,7 @@ function footprintWeightedTargetColor(image, params, index, out = new Float32Arr
   const sample = new Float32Array(3);
   const target = new Float64Array(3);
   let weightSum = 0;
-  for (const [localX, localY, weight] of DEEP_PRUNE_COLOR_SAMPLES) {
+  for (const [localX, localY, weight] of FOOTPRINT_COLOR_SAMPLES) {
     const x = centerX + localX * sx * cosTheta - localY * sy * sinTheta;
     const y = centerY + localX * sx * sinTheta + localY * sy * cosTheta;
     sampleImageRgbBilinear(image, x, y, sample);
@@ -8386,129 +8329,6 @@ function footprintWeightedTargetColor(image, params, index, out = new Float32Arr
   return out;
 }
 
-function footprintWeightedTargetColorDistance(image, params, index) {
-  if (!params?.rgb) return 0;
-  const target = footprintWeightedTargetColor(image, params, index);
-  let distance = 0;
-  for (let channel = 0; channel < 3; channel += 1) {
-    distance += Math.abs(Number(params.rgb[index * 3 + channel]) - target[channel]);
-  }
-  return distance / 3;
-}
-
-function lowContributionDeepPrunePlan(
-  params,
-  importanceData,
-  maxPruneFraction = DEEP_PRUNE_MAX_FRACTION,
-  deepFraction = DEEP_PRUNE_FRACTION,
-  alphaGamma = 1,
-  selectionMode = "depth",
-  image = null,
-) {
-  const count = params?.count || 0;
-  if (count < DEEP_PRUNE_MIN_SPLATS || !params?.depthOrder || !importanceData?.normalizedInfluence) {
-    return { applied: false, reason: "insufficient-data", before: count, after: count, removed: 0 };
-  }
-  const boundedDeepFraction = Math.max(
-    0.05,
-    Math.min(DEEP_PRUNE_EXPERIMENT_MAX_DEPTH_FRACTION, deepFraction),
-  );
-  const boundedAlphaGamma = Math.max(0.25, Math.min(4, alphaGamma));
-  const boundedSelectionMode = ["depth", "depth-color", "color"].includes(selectionMode)
-    ? selectionMode
-    : "depth";
-  const useDepthGate = boundedSelectionMode !== "color";
-  const useColorGate = boundedSelectionMode !== "depth";
-  const deepCandidates = [];
-  for (let index = 0; index < count; index += 1) {
-    const depth = Number(params.depthOrder[index]);
-    const baseInfluence = Number(importanceData.normalizedInfluence[index]);
-    const opacity = Math.max(0.005, Math.min(0.995, Number(params.opacity?.[index]) || 0.005));
-    const influence = baseInfluence * opacity ** (boundedAlphaGamma - 1);
-    const integratedInfluence = Number(importanceData.integratedInfluence?.[index]) || 0;
-    if (
-      Number.isFinite(depth) &&
-      Number.isFinite(influence) &&
-      (!useDepthGate || depth <= boundedDeepFraction)
-    ) {
-      deepCandidates.push({ index, depth, influence, integratedInfluence });
-    }
-  }
-  if (!deepCandidates.length) {
-    return { applied: false, reason: "no-deep-candidates", before: count, after: count, removed: 0 };
-  }
-  const boundedPruneFraction = Math.max(0, Math.min(DEEP_PRUNE_EXPERIMENT_MAX_FRACTION, maxPruneFraction));
-  const candidateFraction = useDepthGate ? boundedDeepFraction : 1;
-  const maxRemove = Math.min(
-    Math.floor(count * boundedPruneFraction),
-    Math.floor(deepCandidates.length * (boundedPruneFraction / candidateFraction)),
-    count - DEEP_PRUNE_MIN_SPLATS,
-  );
-  if (maxRemove <= 0) {
-    return { applied: false, reason: "minimum-count-guard", before: count, after: count, removed: 0 };
-  }
-  deepCandidates.sort((a, b) => a.influence - b.influence || a.depth - b.depth || a.index - b.index);
-  let selectedCandidates = deepCandidates.slice(0, maxRemove);
-  let colorGateReport = null;
-  if (useColorGate) {
-    const poolSize = Math.min(deepCandidates.length, Math.max(maxRemove, maxRemove * 4));
-    const lowInfluencePool = deepCandidates.slice(0, poolSize);
-    for (const candidate of lowInfluencePool) {
-      candidate.colorDistance = footprintWeightedTargetColorDistance(image, params, candidate.index);
-    }
-    const colorDistances = lowInfluencePool.map((candidate) => candidate.colorDistance).sort((a, b) => a - b);
-    const integratedValues = deepCandidates
-      .map((candidate) => candidate.integratedInfluence)
-      .sort((a, b) => a - b);
-    const colorThreshold = percentileSorted(colorDistances, 0.5);
-    const coverageGuardThreshold = percentileSorted(integratedValues, 0.9);
-    const colorCandidates = lowInfluencePool.filter((candidate) => (
-      candidate.colorDistance >= colorThreshold &&
-      candidate.integratedInfluence <= coverageGuardThreshold
-    ));
-    colorCandidates.sort((a, b) => (
-      b.colorDistance - a.colorDistance ||
-      a.influence - b.influence ||
-      a.integratedInfluence - b.integratedInfluence ||
-      a.index - b.index
-    ));
-    selectedCandidates = colorCandidates.slice(0, maxRemove);
-    colorGateReport = {
-      reference: "nine-point-footprint-weighted-teacher-rgb",
-      low_influence_pool: lowInfluencePool.length,
-      color_candidate_count: colorCandidates.length,
-      color_distance_threshold: colorThreshold,
-      coverage_guard_integrated_influence_p90: coverageGuardThreshold,
-      condition_limited: selectedCandidates.length < maxRemove,
-    };
-  }
-  const influenceThreshold = deepCandidates[Math.max(0, Math.min(deepCandidates.length - 1, maxRemove - 1))].influence;
-  const removedIndices = selectedCandidates.map((item) => item.index);
-  const removed = new Set(removedIndices);
-  const keepIndices = [];
-  for (let index = 0; index < count; index += 1) if (!removed.has(index)) keepIndices.push(index);
-  return {
-    applied: true,
-    reason: boundedSelectionMode === "color"
-      ? "color-low-contribution"
-      : boundedSelectionMode === "depth-color"
-        ? "deep-color-low-contribution"
-        : "deep-low-contribution",
-    before: count,
-    after: keepIndices.length,
-    removed: removedIndices.length,
-    removed_ratio: removedIndices.length / count,
-    deep_fraction: useDepthGate ? boundedDeepFraction : null,
-    alpha_gamma: boundedAlphaGamma,
-    selection_mode: boundedSelectionMode,
-    color_gate: colorGateReport,
-    max_prune_fraction: boundedPruneFraction,
-    normalized_influence_threshold: influenceThreshold,
-    pruneIndices: removedIndices,
-    keepIndices,
-  };
-}
-
 function hardZeroContributionPlan(
   params,
   importanceData,
@@ -8516,7 +8336,7 @@ function hardZeroContributionPlan(
 ) {
   const count = params?.count || 0;
   if (
-    count < DEEP_PRUNE_MIN_SPLATS ||
+    count < MIN_COMPACTION_SPLATS ||
     !importanceData?.observedCoverage ||
     !importanceData?.integratedInfluence
   ) {
@@ -8527,7 +8347,7 @@ function hardZeroContributionPlan(
   const boundedFraction = Math.max(0, Math.min(1, maxPruneFraction));
   const maxRemove = Math.max(0, Math.min(
     Math.floor(count * boundedFraction),
-    count - DEEP_PRUNE_MIN_SPLATS,
+    count - MIN_COMPACTION_SPLATS,
   ));
   const depthBinCount = 4096;
   const depthBins = new Uint32Array(depthBinCount);
@@ -8603,7 +8423,7 @@ function currentContributionCompactionPlan(
 ) {
   const count = params?.count || 0;
   if (
-    count < DEEP_PRUNE_MIN_SPLATS ||
+    count < MIN_COMPACTION_SPLATS ||
     !importanceData?.observedCoverage ||
     !importanceData?.integratedInfluence
   ) {
@@ -8623,7 +8443,7 @@ function currentContributionCompactionPlan(
   );
   const maxRemove = Math.max(0, Math.min(
     Math.floor(count * boundedMaxRemovalFraction),
-    count - DEEP_PRUNE_MIN_SPLATS,
+    count - MIN_COMPACTION_SPLATS,
   ));
   const exactPlan = hardZeroContributionPlan(
     params,
@@ -9278,8 +9098,8 @@ class WebGpuPreview {
     this.tileSortPipeline = null;
     this.discreteLayerAssignPipeline = null;
     this.discreteLayerCommitPipeline = null;
-    this.deepPruneParamCompactPipeline = null;
-    this.deepPruneStateCompactPipeline = null;
+    this.compactionParamPipeline = null;
+    this.compactionStatePipeline = null;
     this.renderStatePipeline = null;
     this.tileCooperativeRenderPipeline = null;
     this.ssimTilePipeline = null;
@@ -9474,18 +9294,24 @@ class WebGpuPreview {
     pass.dispatchWorkgroups(x, y);
   }
 
-  trainBindGroup(key, pipeline, entries) {
+  trainBindGroup(key, pipeline, entriesFactory) {
     const state = this.trainState;
     if (!state?.bindGroupCacheEnabled) {
       if (state?.bindGroupCacheStats) state.bindGroupCacheStats.misses += 1;
-      return this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
+      return this.device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: entriesFactory(),
+      });
     }
     const cached = state.bindGroupCache.get(key);
     if (cached) {
       state.bindGroupCacheStats.hits += 1;
       return cached;
     }
-    const bindGroup = this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: entriesFactory(),
+    });
     state.bindGroupCache.set(key, bindGroup);
     state.bindGroupCacheStats.misses += 1;
     return bindGroup;
@@ -10523,20 +10349,27 @@ fn commit_layers(@builtin(global_invocation_id) id: vec3<u32>) {
   ) {
     if (!this.trainState || this.trainState.capacity < params.count) return false;
     await this.ensureTilePipelines();
-    const config = new Float32Array(TRAIN_CONFIG_FLOATS);
-    config.set([image.width, image.height, params.count, params.bg[0], params.bg[1], params.bg[2]], 0);
-    config[17] = currentMaxAnisotropy();
-    config[18] = experimentalDensifySteps(state.metrics?.steps_requested || 1);
-    config[19] = els.tileCullingToggle.checked ? 1 : 0;
-    config[26] = phase33Variants().ewa2x2 ? 1 : 0;
-    config[47] = 0;
-    config[45] = params.layerOrderEnabled ? 1 : 0;
-    config[67] = params.virtualDepthEnabled ? 1 : 0;
-    config[68] = params.virtualDepthEnabled ? Number(params.virtualDepthThickness) || DEFAULT_VIRTUAL_DEPTH_THICKNESS : 0;
-    configurePaintKernel(config, params);
-    if (writeConfig) this.device.queue.writeBuffer(this.trainState.configBuffer, 0, config);
+    if (writeConfig) {
+      const config = new Float32Array(TRAIN_CONFIG_FLOATS);
+      config.set([image.width, image.height, params.count, params.bg[0], params.bg[1], params.bg[2]], 0);
+      config[17] = currentMaxAnisotropy();
+      config[18] = experimentalDensifySteps(state.metrics?.steps_requested || 1);
+      config[19] = els.tileCullingToggle.checked ? 1 : 0;
+      config[26] = phase33Variants().ewa2x2 ? 1 : 0;
+      config[47] = 0;
+      config[45] = params.layerOrderEnabled ? 1 : 0;
+      config[67] = params.virtualDepthEnabled ? 1 : 0;
+      config[68] = params.virtualDepthEnabled ? Number(params.virtualDepthThickness) || DEFAULT_VIRTUAL_DEPTH_THICKNESS : 0;
+      configurePaintKernel(config, params);
+      this.device.queue.writeBuffer(this.trainState.configBuffer, 0, config);
+    }
     const front = this.trainState.front;
-    const common = [
+    const tileBindGroup = (kind, pipeline, entriesFactory) => this.trainBindGroup(
+      `tile-${kind}:${front}:${this.opacityAwareSupportMode}`,
+      pipeline,
+      entriesFactory,
+    );
+    const commonEntries = () => [
       { binding: 0, resource: { buffer: this.trainState.configBuffer } },
       { binding: 1, resource: { buffer: this.trainState.xyBuffers[front] } },
       { binding: 2, resource: { buffer: this.trainState.transformBuffers[front] } },
@@ -10544,28 +10377,23 @@ fn commit_layers(@builtin(global_invocation_id) id: vec3<u32>) {
         ? [{ binding: 8, resource: { buffer: this.trainState.colorBuffers[front] } }]
         : []),
     ];
-    const tileBindGroup = (kind, pipeline, entries) => this.trainBindGroup(
-      `tile-${kind}:${front}:${this.opacityAwareSupportMode}`,
-      pipeline,
-      entries,
-    );
-    const countBindGroup = tileBindGroup("count", this.tileCountPipeline, [
-        ...common,
+    const countBindGroup = tileBindGroup("count", this.tileCountPipeline, () => [
+        ...commonEntries(),
         { binding: 3, resource: { buffer: this.trainState.tileCountsBuffer } },
       ]);
-    const prefixBindGroup = tileBindGroup("prefix", this.tilePrefixPipeline, [
+    const prefixBindGroup = tileBindGroup("prefix", this.tilePrefixPipeline, () => [
         { binding: 3, resource: { buffer: this.trainState.tileCountsBuffer } },
         { binding: 4, resource: { buffer: this.trainState.tileOffsetsBuffer } },
         { binding: 6, resource: { buffer: this.trainState.tileIndicesBuffer } },
         { binding: 7, resource: { buffer: this.trainState.tileControlBuffer } },
       ]);
-    const fillBindGroup = tileBindGroup("fill", this.tileFillPipeline, [
-        ...common,
+    const fillBindGroup = tileBindGroup("fill", this.tileFillPipeline, () => [
+        ...commonEntries(),
         { binding: 4, resource: { buffer: this.trainState.tileOffsetsBuffer } },
         { binding: 5, resource: { buffer: this.trainState.tileCursorsBuffer } },
         { binding: 6, resource: { buffer: this.trainState.tileIndicesBuffer } },
       ]);
-    const sortBindGroup = tileBindGroup("sort", this.tileSortPipeline, [
+    const sortBindGroup = tileBindGroup("sort", this.tileSortPipeline, () => [
         { binding: 0, resource: { buffer: this.trainState.configBuffer } },
         { binding: 1, resource: { buffer: this.trainState.xyBuffers[front] } },
         { binding: 2, resource: { buffer: this.trainState.transformBuffers[front] } },
@@ -19363,8 +19191,8 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
     }
   }
 
-  async ensureDeepPruneCompactionPipelines() {
-    if (this.deepPruneParamCompactPipeline && this.deepPruneStateCompactPipeline) return;
+  async ensureCompactionPipelines() {
+    if (this.compactionParamPipeline && this.compactionStatePipeline) return;
     const parameterShader = `
 struct CompactConfig { oldCount: u32, newCount: u32, capacity: u32, _padding: u32, };
 struct SplatPosition { center: vec2<f32>, rawDepth: f32, depthGradient: f32, };
@@ -19421,7 +19249,7 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
       if (errors.length) throw new Error(errors.map((message) => message.message).join(" | "));
       return this.device.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint } });
     };
-    [this.deepPruneParamCompactPipeline, this.deepPruneStateCompactPipeline] = await Promise.all([
+    [this.compactionParamPipeline, this.compactionStatePipeline] = await Promise.all([
       compile(parameterShader, "compact_parameters"),
       compile(stateShader, "compact_state"),
     ]);
@@ -19429,11 +19257,11 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
 
   async compactTrainStateGpu(keepIndices) {
     const trainState = this.trainState;
-    if (!trainState) throw new Error("Deep prune requires active WebGPU training buffers.");
+    if (!trainState) throw new Error("Compaction requires active WebGPU training buffers.");
     const oldCount = trainState.count;
     const newCount = keepIndices.length;
     if (newCount <= 0 || newCount >= oldCount) return { compacted: false, oldCount, newCount: oldCount, gpu_ms: 0 };
-    await this.ensureDeepPruneCompactionPipelines();
+    await this.ensureCompactionPipelines();
     const started = performance.now();
     const transientBytes = 16 + newCount * (4 + 16 * 3 + 96 + 16 * 2);
     const trainingBytes = this.trainingMemorySnapshot().reservedBytes;
@@ -19490,7 +19318,7 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
       outputAdam = createOutput(newCount * 96);
       outputStats = createOutput(newCount * 2 * 16);
       const parameterBindGroup = this.device.createBindGroup({
-        layout: this.deepPruneParamCompactPipeline.getBindGroupLayout(0),
+        layout: this.compactionParamPipeline.getBindGroupLayout(0),
         entries: [
           { binding: 0, resource: { buffer: configBuffer } },
           { binding: 1, resource: { buffer: keepBuffer } },
@@ -19503,7 +19331,7 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
         ],
       });
       const stateBindGroup = this.device.createBindGroup({
-        layout: this.deepPruneStateCompactPipeline.getBindGroupLayout(0),
+        layout: this.compactionStatePipeline.getBindGroupLayout(0),
         entries: [
           { binding: 0, resource: { buffer: configBuffer } },
           { binding: 1, resource: { buffer: keepBuffer } },
@@ -19515,12 +19343,12 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
       });
       const encoder = this.device.createCommandEncoder();
       const parameterPass = encoder.beginComputePass();
-      parameterPass.setPipeline(this.deepPruneParamCompactPipeline);
+      parameterPass.setPipeline(this.compactionParamPipeline);
       parameterPass.setBindGroup(0, parameterBindGroup);
       this.dispatchLinear(parameterPass, newCount);
       parameterPass.end();
       const statePass = encoder.beginComputePass();
-      statePass.setPipeline(this.deepPruneStateCompactPipeline);
+      statePass.setPipeline(this.compactionStatePipeline);
       statePass.setBindGroup(0, stateBindGroup);
       this.dispatchLinear(statePass, newCount);
       statePass.end();
@@ -20038,7 +19866,7 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
         });
       }
       const front = this.trainState.front;
-      const optimizerStatsEntry = [{ binding: 8, resource: { buffer: this.trainState.statsBuffer } }];
+      const optimizerStatsEntries = () => [{ binding: 8, resource: { buffer: this.trainState.statsBuffer } }];
       const defaultRenderChoice = this.renderStatePipelineChoice();
       const renderChoice = sourceDomainActive
         ? { pipeline: this.renderStatePipeline, cooperative: false, supported: defaultRenderChoice.supported }
@@ -20051,12 +19879,12 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
         trainingStage,
         sourceDomainActive ? 1 : 0,
       ].join(":");
-      const cachedBindGroup = (kind, pipeline, entries, variant = "") => this.trainBindGroup(
+      const cachedBindGroup = (kind, pipeline, entriesFactory, variant = "") => this.trainBindGroup(
         `${kind}:${bindGroupKeyBase}:${variant}`,
         pipeline,
-        entries,
+        entriesFactory,
       );
-      const renderBindGroup = cachedBindGroup("render", renderChoice.pipeline, [
+      const renderBindGroup = cachedBindGroup("render", renderChoice.pipeline, () => [
           { binding: 0, resource: { buffer: this.trainState.configBuffer } },
           { binding: 1, resource: { buffer: this.trainState.xyBuffers[front] } },
           { binding: 2, resource: { buffer: this.trainState.transformBuffers[front] } },
@@ -20066,7 +19894,7 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
           { binding: 7, resource: { buffer: this.trainState.pixelStateBuffer } },
           { binding: 8, resource: { buffer: this.trainState.alphaStateBuffer } },
         ], renderChoice.cooperative ? "cooperative" : "linear");
-      const ssimBindGroup = cachedBindGroup("ssim", this.ssimTilePipeline, [
+      const ssimBindGroup = cachedBindGroup("ssim", this.ssimTilePipeline, () => [
           { binding: 0, resource: { buffer: this.trainState.configBuffer } },
           { binding: 1, resource: { buffer: targetBuffer } },
           { binding: 2, resource: { buffer: this.trainState.pixelStateBuffer } },
@@ -20077,7 +19905,7 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
       const optimizerPipeline = useExactBackward
         ? null
         : (phase37.parallelOptimizer ? this.parallelRenderGradientPipeline : this.renderGradientPipeline);
-      const optimizerBindGroup = useExactBackward ? null : cachedBindGroup("legacy-optimizer", optimizerPipeline, [
+      const optimizerBindGroup = useExactBackward ? null : cachedBindGroup("legacy-optimizer", optimizerPipeline, () => [
           { binding: 0, resource: { buffer: this.trainState.configBuffer } },
           { binding: 1, resource: { buffer: this.trainState.xyBuffers[front] } },
           { binding: 2, resource: { buffer: this.trainState.transformBuffers[front] } },
@@ -20086,9 +19914,9 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
           { binding: 5, resource: { buffer: this.trainState.pixelStateBuffer } },
           { binding: 6, resource: { buffer: this.trainState.ssimTileBuffer } },
           { binding: 7, resource: { buffer: this.trainState.optimizerStateBuffer } },
-          ...optimizerStatsEntry,
+          ...optimizerStatsEntries(),
         ], phase37.parallelOptimizer ? "parallel" : "serial");
-      const lossGradientBindGroup = useExactBackward ? cachedBindGroup("loss-gradient", this.lossGradientPipeline, [
+      const lossGradientBindGroup = useExactBackward ? cachedBindGroup("loss-gradient", this.lossGradientPipeline, () => [
           { binding: 0, resource: { buffer: this.trainState.configBuffer } },
           { binding: 1, resource: { buffer: targetBuffer } },
           { binding: 2, resource: { buffer: targetAlphaBuffer } },
@@ -20096,7 +19924,7 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
           { binding: 4, resource: { buffer: this.trainState.ssimTileBuffer } },
           { binding: 5, resource: { buffer: this.trainState.lossGradientBuffer } },
         ]) : null;
-      const exactBackwardBindGroup = useExactBackward ? cachedBindGroup("exact-backward", exactBackwardPipeline, [
+      const exactBackwardBindGroup = useExactBackward ? cachedBindGroup("exact-backward", exactBackwardPipeline, () => [
           { binding: 0, resource: { buffer: this.trainState.configBuffer } },
           { binding: 1, resource: { buffer: this.trainState.xyBuffers[front] } },
           { binding: 2, resource: { buffer: this.trainState.transformBuffers[front] } },
@@ -20115,7 +19943,7 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
               : []),
         ], sourceDomainActive ? "source" : "alpha") : null;
       const segmentedReferenceCountBindGroup = segmentedExactBackwardActive
-        ? cachedBindGroup("segmented-ref-count", this.segmentedReferenceCountPipeline, [
+        ? cachedBindGroup("segmented-ref-count", this.segmentedReferenceCountPipeline, () => [
             { binding: 0, resource: { buffer: this.trainState.configBuffer } },
             { binding: 1, resource: { buffer: this.trainState.tileOffsetsBuffer } },
             { binding: 2, resource: { buffer: this.trainState.tileIndicesBuffer } },
@@ -20123,14 +19951,14 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
           ])
         : null;
       const segmentedReferencePrefixBindGroup = segmentedExactBackwardActive
-        ? cachedBindGroup("segmented-ref-prefix", this.segmentedReferencePrefixPipeline, [
+        ? cachedBindGroup("segmented-ref-prefix", this.segmentedReferencePrefixPipeline, () => [
             { binding: 0, resource: { buffer: this.trainState.configBuffer } },
             { binding: 3, resource: { buffer: this.trainState.segmentedReferenceCountsBuffer } },
             { binding: 4, resource: { buffer: this.trainState.segmentedReferenceOffsetsBuffer } },
           ])
         : null;
       const segmentedReferenceFillBindGroup = segmentedExactBackwardActive
-        ? cachedBindGroup("segmented-ref-fill", this.segmentedReferenceFillPipeline, [
+        ? cachedBindGroup("segmented-ref-fill", this.segmentedReferenceFillPipeline, () => [
             { binding: 0, resource: { buffer: this.trainState.configBuffer } },
             { binding: 1, resource: { buffer: this.trainState.tileOffsetsBuffer } },
             { binding: 2, resource: { buffer: this.trainState.tileIndicesBuffer } },
@@ -20140,7 +19968,7 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
           ])
         : null;
       const segmentedGradientReduceBindGroup = segmentedExactBackwardActive
-        ? cachedBindGroup("segmented-gradient-reduce", this.segmentedGradientReducePipeline, [
+        ? cachedBindGroup("segmented-gradient-reduce", this.segmentedGradientReducePipeline, () => [
             { binding: 0, resource: { buffer: this.trainState.configBuffer } },
             { binding: 1, resource: { buffer: this.trainState.segmentedReferenceOffsetsBuffer } },
             { binding: 2, resource: { buffer: this.trainState.segmentedReferencesBuffer } },
@@ -20149,7 +19977,7 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
           ])
         : null;
       const virtualOrderPenaltyBindGroup = useExactBackward && tiltStep.enabled && tiltStep.orderPenaltyWeight > 0
-        ? cachedBindGroup("virtual-order", this.virtualOrderPenaltyPipeline, [
+        ? cachedBindGroup("virtual-order", this.virtualOrderPenaltyPipeline, () => [
               { binding: 0, resource: { buffer: this.trainState.configBuffer } },
               { binding: 2, resource: { buffer: this.trainState.transformBuffers[front] } },
               { binding: 3, resource: { buffer: this.trainState.colorBuffers[front] } },
@@ -20160,7 +19988,7 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
             ])
         : null;
       const brushLocalColorFlowBindGroup = useExactBackward && config[111] > 0
-        ? cachedBindGroup("brush-local-color-flow", this.brushLocalColorFlowPipeline, [
+        ? cachedBindGroup("brush-local-color-flow", this.brushLocalColorFlowPipeline, () => [
             { binding: 0, resource: { buffer: this.trainState.configBuffer } },
             { binding: 1, resource: { buffer: this.trainState.xyBuffers[front] } },
             { binding: 2, resource: { buffer: this.trainState.transformBuffers[front] } },
@@ -20171,7 +19999,7 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
               : []),
           ])
         : null;
-      const exactBackwardTelemetryBindGroup = useExactBackward && profileSample && !sourceDomainActive ? cachedBindGroup("exact-telemetry", this.exactBackwardTelemetryPipeline, [
+      const exactBackwardTelemetryBindGroup = useExactBackward && profileSample && !sourceDomainActive ? cachedBindGroup("exact-telemetry", this.exactBackwardTelemetryPipeline, () => [
           { binding: 0, resource: { buffer: this.trainState.configBuffer } },
           { binding: 1, resource: { buffer: this.trainState.xyBuffers[front] } },
           { binding: 2, resource: { buffer: this.trainState.transformBuffers[front] } },
@@ -20180,7 +20008,7 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
           { binding: 5, resource: { buffer: this.trainState.alphaStateBuffer } },
           { binding: 6, resource: { buffer: this.trainState.exactBackwardTelemetryBuffer } },
         ]) : null;
-      const exactOptimizerBindGroup = useExactBackward ? cachedBindGroup("exact-optimizer", this.exactOptimizerPipeline, [
+      const exactOptimizerBindGroup = useExactBackward ? cachedBindGroup("exact-optimizer", this.exactOptimizerPipeline, () => [
           { binding: 0, resource: { buffer: this.trainState.configBuffer } },
           { binding: 1, resource: { buffer: this.trainState.xyBuffers[front] } },
           { binding: 2, resource: { buffer: this.trainState.transformBuffers[front] } },
@@ -20188,7 +20016,7 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
           { binding: 4, resource: { buffer: targetBuffer } },
           { binding: 5, resource: { buffer: this.trainState.pixelStateBuffer } },
           { binding: 7, resource: { buffer: this.trainState.optimizerStateBuffer } },
-          ...optimizerStatsEntry,
+          ...optimizerStatsEntries(),
           { binding: 9, resource: { buffer: this.trainState.exactGradientBuffer } },
           { binding: 10, resource: { buffer: this.trainState.tileControlBuffer } },
         ]) : null;
@@ -20213,12 +20041,12 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
             opaquePaintDetailRecoveryDue(
               currentStep,
               requestedSteps,
-              params.deepPruneInterval || LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL,
+              OPAQUE_PAINT_DETAIL_RECOVERY_INTERVAL,
             )
           )
         )
       );
-      const discreteLayerEntries = discreteLayerPassDue ? [
+      const discreteLayerEntries = () => [
         { binding: 0, resource: { buffer: this.trainState.configBuffer } },
         { binding: 1, resource: { buffer: this.trainState.xyBuffers[front] } },
         { binding: 2, resource: { buffer: this.trainState.transformBuffers[front] } },
@@ -20229,12 +20057,12 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
         { binding: 7, resource: { buffer: this.trainState.colorBuffers[front] } },
         { binding: 8, resource: { buffer: this.trainState.optimizerStateBuffer } },
         { binding: 9, resource: { buffer: this.trainState.statsBuffer } },
-      ] : null;
+      ];
       const discreteLayerAssignBindGroup = discreteLayerPassDue
         ? cachedBindGroup("discrete-layer-assign", this.discreteLayerAssignPipeline, discreteLayerEntries)
         : null;
       const discreteLayerCommitBindGroup = discreteLayerPassDue
-        ? cachedBindGroup("discrete-layer-commit", this.discreteLayerCommitPipeline, [
+        ? cachedBindGroup("discrete-layer-commit", this.discreteLayerCommitPipeline, () => [
             { binding: 0, resource: { buffer: this.trainState.configBuffer } },
             { binding: 2, resource: { buffer: this.trainState.transformBuffers[front] } },
             { binding: 5, resource: { buffer: this.trainState.exactGradientBuffer } },
@@ -20850,8 +20678,12 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
         }
       }
       const transforms = new Float32Array(mapped, xyBytes, params.count * 4);
-      params.detailTags = new Float32Array(params.count);
-      params.depthOrder = new Float32Array(params.count);
+      if (!params.detailTags || params.detailTags.length !== params.count) {
+        params.detailTags = new Float32Array(params.count);
+      }
+      if (!params.depthOrder || params.depthOrder.length !== params.count) {
+        params.depthOrder = new Float32Array(params.count);
+      }
       let detailSplatCount = 0;
       let detailAnisotropyMax = 1;
       let surfaceAnisotropyMax = 1;
@@ -21540,9 +21372,10 @@ function plannedAdaptiveGpuBatch({
   growthSteps,
   growthSettings,
   runLayerSettings,
-  deepPruneSettings,
+  paintSettings,
   currentContributionSettings,
 }) {
+  if (performanceVariants().gpuSchedulingMode !== "adaptive") return 1;
   const safeMetricInterval = Math.max(1, Math.round(metricInterval) || 1);
   const startStage = curriculumTrainingStage(
     step,
@@ -21555,14 +21388,14 @@ function plannedAdaptiveGpuBatch({
     step,
     steps,
     Boolean(state.params?.opaqueLayered),
-    deepPruneSettings?.opaquePaintSettleFraction,
+    paintSettings?.opaquePaintSettleFraction,
   );
   const startPaintDetailRecoveryScheduled =
     Boolean(state.params?.opaqueLayered) &&
     opaquePaintDetailRecoveryDue(
       step,
       steps,
-      state.params?.deepPruneInterval || LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL,
+      OPAQUE_PAINT_DETAIL_RECOVERY_INTERVAL,
     );
   const startBrushSurfaceRecoveryScheduled =
     normalizedKernelShape(state.params?.kernelShape) === "opaque-brush" &&
@@ -21573,7 +21406,7 @@ function plannedAdaptiveGpuBatch({
     startStage,
     runLayerSettings,
     Boolean(state.params?.opaqueLayered),
-    deepPruneSettings?.opaquePaintSettleFraction,
+    paintSettings?.opaquePaintSettleFraction,
   );
   const startDiscreteLayerScheduled = Boolean(
     state.params?.discreteLayersEnabled &&
@@ -21594,7 +21427,6 @@ function plannedAdaptiveGpuBatch({
     surfaceLayerSortSettings,
   ).due;
   if (
-    performanceVariants().gpuSchedulingMode !== "adaptive" ||
     previewRefresh === "frame" ||
     structuralStep ||
     startLayerSchedule.due ||
@@ -21616,7 +21448,7 @@ function plannedAdaptiveGpuBatch({
       candidate,
       steps,
       Boolean(state.params?.opaqueLayered),
-      deepPruneSettings?.opaquePaintSettleFraction,
+      paintSettings?.opaquePaintSettleFraction,
     );
     const candidateStage = curriculumTrainingStage(
       candidate,
@@ -21636,7 +21468,7 @@ function plannedAdaptiveGpuBatch({
       opaquePaintDetailRecoveryDue(
         candidate,
         steps,
-        state.params?.deepPruneInterval || LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL,
+        OPAQUE_PAINT_DETAIL_RECOVERY_INTERVAL,
       );
     const brushSurfaceRecoveryScheduled =
       normalizedKernelShape(state.params?.kernelShape) === "opaque-brush" &&
@@ -21665,20 +21497,18 @@ function plannedAdaptiveGpuBatch({
       candidateStage,
       runLayerSettings,
       Boolean(state.params?.opaqueLayered),
-      deepPruneSettings?.opaquePaintSettleFraction,
+      paintSettings?.opaquePaintSettleFraction,
     );
     const layerDue = layerSchedule.due;
-    const pruneScheduled = deepPruneScheduled(candidate, steps, deepPruneSettings);
-    const pruneDue = deepPruneDue(candidate, steps, deepPruneSettings);
     const visibilityCompactionDue = opaquePaintVisibilityCompactionDue(
       candidate,
       steps,
-      deepPruneSettings,
+      paintSettings,
     );
     const contributionSettings = {
       ...currentContributionSettings,
-      opaqueLayered: deepPruneSettings?.opaqueLayered,
-      opaquePaintSettleFraction: deepPruneSettings?.opaquePaintSettleFraction,
+      opaqueLayered: paintSettings?.opaqueLayered,
+      opaquePaintSettleFraction: paintSettings?.opaquePaintSettleFraction,
     };
     const contributionCompactionResetDue = currentContributionCompactionResetDue(
       candidate,
@@ -21698,8 +21528,7 @@ function plannedAdaptiveGpuBatch({
     const suppressedPaintMutationScheduled = !paintMutationAllowed && (
       densityScheduled ||
       relocationScheduled ||
-      layerSchedule.scheduled ||
-      pruneScheduled
+      layerSchedule.scheduled
     );
     if (
       candidateStage !== startStage ||
@@ -21708,7 +21537,6 @@ function plannedAdaptiveGpuBatch({
       layerDue ||
       (paintMutationAllowed && paintDetailRecoveryScheduled) ||
       discreteLayerScheduled ||
-      pruneDue ||
       visibilityCompactionDue ||
       contributionCompactionResetDue ||
       contributionCompactionDue ||
@@ -21748,8 +21576,6 @@ function setInputControlsDisabled(disabled) {
     els.tileCullingToggle,
     els.trainLayerOrder,
     els.layerAwareAccumulation,
-    els.pruneLowContributionDeepSplats,
-    els.deepPruneInterval,
     els.discreteLayers,
     els.discreteLayerCount,
     els.discreteLayerMoveRadius,
@@ -21833,7 +21659,6 @@ function syncAlgorithmRequirements() {
   const brushSelected = algorithmUsesLayeredOpaqueBrush();
   const rectangleSelected = algorithmUsesRectangleKernel();
   document.documentElement.dataset.opaquePaintSettings = "visible";
-  const pruneLabel = els.pruneLowContributionDeepSplats.closest("label");
   if (brushSelected) {
     if (!els.discreteLayerMoveRadius.dataset.nonBrushValue) {
       els.discreteLayerMoveRadius.dataset.nonBrushValue =
@@ -21856,34 +21681,9 @@ function syncAlgorithmRequirements() {
     }
   }
   if (opaqueLayered) {
-    if (!els.deepPruneInterval.dataset.nonOpaqueValue) {
-      els.deepPruneInterval.dataset.nonOpaqueValue =
-        els.deepPruneInterval.value || String(DEFAULT_DEEP_PRUNE_INTERVAL);
-    }
-    if (!els.pruneLowContributionDeepSplats.dataset.nonOpaqueChecked) {
-      els.pruneLowContributionDeepSplats.dataset.nonOpaqueChecked =
-        String(els.pruneLowContributionDeepSplats.checked);
-    }
     els.trainLayerOrder.checked = true;
     els.layerAwareAccumulation.checked = true;
     els.discreteLayers.checked = true;
-    els.pruneLowContributionDeepSplats.checked = true;
-    els.deepPruneInterval.value = String(LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL);
-  } else {
-    if (els.deepPruneInterval.dataset.nonOpaqueValue) {
-      els.deepPruneInterval.value = els.deepPruneInterval.dataset.nonOpaqueValue;
-      delete els.deepPruneInterval.dataset.nonOpaqueValue;
-    }
-    if (els.pruneLowContributionDeepSplats.dataset.nonOpaqueChecked) {
-      els.pruneLowContributionDeepSplats.checked =
-        els.pruneLowContributionDeepSplats.dataset.nonOpaqueChecked === "true";
-      delete els.pruneLowContributionDeepSplats.dataset.nonOpaqueChecked;
-    }
-  }
-  if (pruneLabel) {
-    pruneLabel.title = opaqueLayered
-      ? "Opaque paint algorithms use the shared Layer count and remove low-influence splats from the rear 75% every 250 iterations."
-      : "Every configured interval during P2 and P3, compact low-contribution splats from the rear half of the learned layer order. P2 removes up to 2.5% per event and P3 uses a 1% detail-safe cap.";
   }
   els.opacityLearningRate.disabled = state.running;
   els.alphaLossWeight.disabled = state.running || brushSelected;
@@ -21971,8 +21771,6 @@ function syncLayerOrderDependency() {
   const opaqueLayered = algorithmUsesOpaqueLayeredPaint();
   els.trainLayerOrder.disabled = state.running || opaqueLayered;
   els.layerAwareAccumulation.disabled = state.running || !discreteAvailable || opaqueLayered;
-  els.pruneLowContributionDeepSplats.disabled = state.running || !discreteAvailable || opaqueLayered;
-  els.deepPruneInterval.disabled = state.running || !discreteAvailable || !els.pruneLowContributionDeepSplats.checked || opaqueLayered;
   els.discreteLayers.disabled = state.running || !discreteAvailable || opaqueLayered;
   els.discreteLayerCount.disabled = state.running || !discreteAvailable || (!els.discreteLayers.checked && !els.layerAwareAccumulation.checked);
   els.discreteLayerMoveRadius.disabled = state.running || !discreteAvailable || !els.discreteLayers.checked;
@@ -22227,83 +22025,6 @@ function linkDensityEventMetricSnapshot(step, metrics) {
   for (const event of state.metrics?.densify_events || []) {
     if (event.step === step && !event.metrics_after) event.metrics_after = snapshot;
   }
-}
-
-async function applyDeepPrune(step, steps, run = null) {
-  assertTrainingRun(run);
-  const renderer = state.webgpu.renderer;
-  const params = state.params;
-  if (!params?.pruneLowContributionDeepSplatsEnabled || state.metrics?.stopped || !renderer?.trainState) {
-    return false;
-  }
-  if ((state.metrics?.deep_layer_prune_events || []).some((event) => event.step === step)) {
-    return false;
-  }
-  await awaitTrainingRun(run, renderer.readTrainedColors(params));
-  assertFiniteParams(params, "mid-deep-prune-readback");
-  const importanceData = await awaitTrainingRun(
-    run,
-    renderer.readImportanceData(params.count, { includeSummary: false }),
-  );
-  const removedTotal = state.metrics?.deep_layer_prune_removed_total || 0;
-  const phase = deepPruneStage(step, steps);
-  const opaqueLayered = Boolean(params.opaqueLayered);
-  const eventPruneFraction = opaqueLayered
-    ? phase === "P2"
-      ? LAYERED_OPAQUE_BRUSH_P2_PRUNE_FRACTION
-      : LAYERED_OPAQUE_BRUSH_P3_PRUNE_FRACTION
-    : phase === "P2"
-      ? layerEfficiencyVariants().deepPruneP2Fraction
-      : layerEfficiencyVariants().deepPruneP3Fraction;
-  const plan = lowContributionDeepPrunePlan(
-    params,
-    importanceData,
-    eventPruneFraction,
-    opaqueLayered ? LAYERED_OPAQUE_BRUSH_DEEP_FRACTION : layerEfficiencyVariants().deepFraction,
-    layerEfficiencyVariants().deepPruneAlphaGamma,
-    opaqueLayered ? "depth" : layerEfficiencyVariants().deepPruneSelectionMode,
-    state.image,
-  );
-  const report = { ...plan };
-  delete report.keepIndices;
-  delete report.pruneIndices;
-  report.phase = phase;
-  report.step = step;
-  report.interval = params.deepPruneInterval || DEFAULT_DEEP_PRUNE_INTERVAL;
-  report.policy = opaqueLayered ? "opaque-hidden-layer-prune" : "standard-deep-prune";
-  report.final_sweep = false;
-  report.metrics_before = null;
-  report.metrics_evaluation = "deferred-to-final";
-  if (!plan.applied) {
-    state.metrics.deep_layer_prune = report;
-    return false;
-  }
-  const compactResult = await awaitTrainingRun(run, renderer.compactTrainStateGpu(plan.keepIndices));
-  if (!compactResult.compacted) {
-    report.applied = false;
-    report.reason = compactResult.reason || "gpu-compaction-skipped";
-    report.gpu_compaction_allocation = compactResult.allocation || null;
-    state.metrics.deep_layer_prune = report;
-    return false;
-  }
-  state.params = compactSplatParams(params, plan.keepIndices);
-  updateTrainingRunOwnership(run, { params: state.params });
-  if (els.tileCullingToggle.checked) {
-    await awaitTrainingRun(run, renderer.prepareTileLists(state.image, state.params, { sync: true }));
-  }
-  report.gpu_compaction_ms = compactResult.gpu_ms;
-  report.gpu_transient_bytes = compactResult.transient_bytes || 0;
-  report.gpu_compaction_allocation = compactResult.allocation || null;
-  report.optimizer_state_preserved = true;
-  report.metrics_after = null;
-  state.metrics.deep_layer_prune_removed_total = removedTotal + plan.removed;
-  state.metrics.deep_layer_prune_events.push(report);
-  state.metrics.deep_layer_prune = report;
-  state.metrics.num_gaussians = state.params.count;
-  state.metrics.params_revision = (state.metrics.params_revision || 0) + 1;
-  state.metrics.cpu_mirror_step = step;
-  state.metrics.cpu_mirror_count = state.params.count;
-  return true;
 }
 
 async function applyCurrentVisibilityCompaction(step, steps, run = null) {
@@ -23244,7 +22965,6 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   els.stepCount.value = String(steps);
   els.previewRefresh.value = previewRefresh;
   els.layerUpdateInterval.value = String(runLayerSettings.layerUpdateInterval);
-  els.deepPruneInterval.value = String(runDiscreteLayerSettings.deepPruneInterval);
   els.rectangleOpacityGradientMin.value = String(runRectangleOpacityGradient.min);
   els.rectangleOpacityGradientMax.value = String(runRectangleOpacityGradient.max);
   els.rectangleLearnedOpacityMin.value = String(runRectangleLearnedOpacity.min);
@@ -23317,8 +23037,6 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
     runDiscreteLayerSettings.currentVisibilityCompactionEnabled;
   state.params.currentContributionCompactionEnabled =
     runCurrentContributionCompaction.enabled;
-  state.params.pruneLowContributionDeepSplatsEnabled = runDiscreteLayerSettings.deepPruneEnabled;
-  state.params.deepPruneInterval = runDiscreteLayerSettings.deepPruneInterval;
   state.params.discreteLayersEnabled = runDiscreteLayerSettings.enabled;
   state.params.discreteLayerCount = runDiscreteLayerSettings.count;
   state.params.discreteLayerMoveRadius = runDiscreteLayerSettings.moveRadius;
@@ -23390,8 +23108,6 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
     state.params.layerAwareAccumulationEnabled = true;
     state.params.discreteLayersEnabled = true;
     state.params.discreteLayerMoveRadius = LAYERED_OPAQUE_BRUSH_LAYER_MOVE_RADIUS;
-    state.params.pruneLowContributionDeepSplatsEnabled = true;
-    state.params.deepPruneInterval = LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL;
   }
   state.params.virtualDepthEnabled = Boolean(runVirtualCameraSampling.enabled && runVirtualCameraSampling.boundedDepth);
   state.params.virtualCameraSamplingEnabled = Boolean(runVirtualCameraSampling.enabled);
@@ -23579,8 +23295,6 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       trainLayerOrder: Boolean(els.trainLayerOrder.checked),
       layerUpdateInterval: runLayerSettings.layerUpdateInterval,
       layerAwareAccumulation: runDiscreteLayerSettings.accumulationEnabled,
-      pruneLowContributionDeepSplats: runDiscreteLayerSettings.deepPruneEnabled,
-      deepPruneInterval: runDiscreteLayerSettings.deepPruneInterval,
       currentContributionCompaction: runCurrentContributionCompaction.enabled,
       currentContributionCompactionStartPercent:
         runCurrentContributionCompaction.startFraction * 100,
@@ -23865,13 +23579,6 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
     layer_telemetry_enabled: layerTelemetryEnabled(),
     layer_telemetry: [],
     layer_efficiency: null,
-    deep_layer_prune: null,
-    deep_layer_prune_events: [],
-    deep_layer_prune_removed_total: 0,
-    deep_layer_prune_deferred: null,
-    deep_layer_prune_deferred_count: 0,
-    deep_layer_prune_deferred_steps: [],
-    deep_layer_prune_interval: runDiscreteLayerSettings.deepPruneInterval,
     current_visibility_compaction: null,
     current_visibility_compaction_events: [],
     current_visibility_compaction_removed_total: 0,
@@ -23896,12 +23603,10 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       suppressed: {
         growth: 0,
         relocation: 0,
-        deep_prune: 0,
         layer_update: 0,
         discrete_layer: 0,
       },
       suppressed_steps: [],
-      final_prune_suppressed: false,
       continuous_optimizer_active: true,
       final_metrics_active: true,
     },
@@ -24253,7 +23958,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         opaquePaintDetailRecoveryDue(
           step,
           steps,
-          state.params?.deepPruneInterval || LAYERED_OPAQUE_BRUSH_PRUNE_INTERVAL,
+          OPAQUE_PAINT_DETAIL_RECOVERY_INTERVAL,
         );
       const brushSurfaceRecoveryScheduledAtStep =
         normalizedKernelShape(state.params?.kernelShape) === "opaque-brush" &&
@@ -24272,20 +23977,6 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
           brushSurfaceRecoveryScheduledAtStep
         );
       const relocationDueAtStep = paintMutationAllowedAtStep && relocationScheduledAtStep;
-      const deepPruneScheduledAtStep = deepPruneScheduled(step, steps, runDiscreteLayerSettings);
-      let deepPruneDueAtStep = deepPruneDue(step, steps, runDiscreteLayerSettings);
-      let deepPruneDeferredBy = null;
-      if (deepPruneDueAtStep && growthResult?.grown) deepPruneDeferredBy = "growth";
-      else if (deepPruneDueAtStep && relocationDueAtStep) deepPruneDeferredBy = "relocation";
-      if (deepPruneDeferredBy) {
-        deepPruneDueAtStep = false;
-        const deferred = { step, reason: deepPruneDeferredBy };
-        state.metrics.deep_layer_prune_deferred = deferred;
-        state.metrics.deep_layer_prune_deferred_count += 1;
-        if (state.metrics.deep_layer_prune_deferred_steps.length < 32) {
-          state.metrics.deep_layer_prune_deferred_steps.push(deferred);
-        }
-      }
       const currentVisibilityCompactionDueAtStep = opaquePaintVisibilityCompactionDue(
         step,
         steps,
@@ -24349,8 +24040,6 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         currentContributionCompactionDeferredBy = "growth";
       } else if (currentContributionCompactionDueAtStep && relocationDueAtStep) {
         currentContributionCompactionDeferredBy = "relocation";
-      } else if (currentContributionCompactionDueAtStep && deepPruneDueAtStep) {
-        currentContributionCompactionDeferredBy = "deep-prune";
       }
       if (currentContributionCompactionDeferredBy) {
         currentContributionCompactionDueAtStep = false;
@@ -24372,7 +24061,6 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         const suppressedAtStep = {
           growth: densifyScheduledAtStep,
           relocation: relocationScheduledAtStep,
-          deep_prune: deepPruneScheduledAtStep,
           layer_update: layerScheduleAtStep.scheduled,
           discrete_layer: discreteLayerScheduledAtStep,
         };
@@ -24386,12 +24074,10 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         if (suppressedKinds.length > 0 && settleReport.suppressed_steps.length < 32) {
           settleReport.suppressed_steps.push({ step, kinds: suppressedKinds });
         }
-        if (step === steps && deepPruneScheduledAtStep) settleReport.final_prune_suppressed = true;
       }
       const structuralStep =
         densifyDue ||
         relocationDueAtStep ||
-        deepPruneDueAtStep ||
         currentVisibilityCompactionDueAtStep ||
         currentContributionCompactionResetDueAtStep ||
         currentContributionCompactionDueAtStep ||
@@ -24417,7 +24103,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         growthSteps,
         growthSettings,
         runLayerSettings,
-        deepPruneSettings: runDiscreteLayerSettings,
+        paintSettings: runDiscreteLayerSettings,
         currentContributionSettings: runCurrentContributionCompaction,
       });
       // A balanced high-share virtual step encodes two views with distinct
@@ -24560,15 +24246,6 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
           state.metrics.webgpu_refine = true;
           if (state.webgpu.renderer.trainState) state.webgpu.renderer.trainState.tileReady = false;
         }
-      }
-      if (deepPruneDueAtStep) {
-        if (step === steps) {
-          setStatus("finalizing");
-          setTrainingMessage(`Finalizing ${state.params.count.toLocaleString()} splats on WebGPU...`);
-          publishState();
-          await awaitTrainingRun(run, nextFrame());
-        }
-        await applyDeepPrune(step, steps, run);
       }
       if (currentVisibilityCompactionDueAtStep) {
         await applyCurrentVisibilityCompaction(step, steps, run);
@@ -24884,6 +24561,7 @@ function clearImage() {
   cancelCompletedResultGpuRecovery();
   destroyTiltViewer({ restoreCanvas: true });
   state.imageLoadGeneration += 1;
+  state.imageLoading = false;
   state.webgpu.renderer?.disposeTrainState();
   state.webgpu.renderer?.disposeResultRenderState();
   releaseImageSource(state.image);
@@ -25545,6 +25223,10 @@ function makePly(params = state.params, image = state.image) {
   bytes.set(headerBytes, 0);
   const view = new DataView(buffer, headerBytes.byteLength);
   let o = 0;
+  const writeFloat = (value) => {
+    view.setFloat32(o, value, true);
+    o += 4;
+  };
   for (let i = 0; i < params.count; i += 1) {
     const geometry = transformPlanarSplatForPly(
       params.xy[i * 2],
@@ -25555,29 +25237,23 @@ function makePly(params = state.params, image = state.image) {
       image,
     );
     const halfTheta = geometry.theta * 0.5;
-    const values = [
-      geometry.x,
-      geometry.y,
-      plyLayerDepth(i, params, layerOrderEnabled),
-      0,
-      0,
-      0,
-      (params.rgb[i * 3] - 0.5) / SH_C0,
-      (params.rgb[i * 3 + 1] - 0.5) / SH_C0,
-      (params.rgb[i * 3 + 2] - 0.5) / SH_C0,
-      logit(params.opacity[i]),
-      Math.log(Math.max(geometry.sx, 1e-6)),
-      Math.log(Math.max(geometry.sy, 1e-6)),
-      Math.log(1e-4),
-      Math.cos(halfTheta),
-      0,
-      0,
-      Math.sin(halfTheta),
-    ];
-    for (const value of values) {
-      view.setFloat32(o, value, true);
-      o += 4;
-    }
+    writeFloat(geometry.x);
+    writeFloat(geometry.y);
+    writeFloat(plyLayerDepth(i, params, layerOrderEnabled));
+    writeFloat(0);
+    writeFloat(0);
+    writeFloat(0);
+    writeFloat((params.rgb[i * 3] - 0.5) / SH_C0);
+    writeFloat((params.rgb[i * 3 + 1] - 0.5) / SH_C0);
+    writeFloat((params.rgb[i * 3 + 2] - 0.5) / SH_C0);
+    writeFloat(logit(params.opacity[i]));
+    writeFloat(Math.log(Math.max(geometry.sx, 1e-6)));
+    writeFloat(Math.log(Math.max(geometry.sy, 1e-6)));
+    writeFloat(Math.log(1e-4));
+    writeFloat(Math.cos(halfTheta));
+    writeFloat(0);
+    writeFloat(0);
+    writeFloat(Math.sin(halfTheta));
   }
   return buffer;
 }
@@ -25962,6 +25638,10 @@ async function showTiltTrainingViews() {
 }
 
 function destroyTiltViewer({ restoreCanvas = false } = {}) {
+  if (tiltInputFrame) {
+    cancelAnimationFrame(tiltInputFrame);
+    tiltInputFrame = 0;
+  }
   state.tilt.teacherFrameRequest += 1;
   state.tilt.generation += 1;
   state.tilt.abortController?.abort();
@@ -26006,6 +25686,16 @@ function applyTiltInputs() {
   els.tiltYawValue.textContent = `${displayedYaw}\u00b0`;
   document.documentElement.dataset.tiltPitch = displayedPitch;
   document.documentElement.dataset.tiltYaw = displayedYaw;
+}
+
+let tiltInputFrame = 0;
+
+function scheduleTiltInputs() {
+  if (tiltInputFrame) return;
+  tiltInputFrame = requestAnimationFrame(() => {
+    tiltInputFrame = 0;
+    applyTiltInputs();
+  });
 }
 
 function tiltCameraCounts(sampling) {
@@ -26637,20 +26327,41 @@ async function refreshOutsidePreview({ recovery = false } = {}) {
   return state.previewRefreshPromise;
 }
 
-els.dropZone.addEventListener("dragover", (event) => {
+function setImageDragover(active) {
+  els.dropZone.classList.toggle("dragover", active && !state.image);
+  els.viewer.classList.toggle("image-dragover", active && Boolean(state.image));
+}
+
+els.viewer.addEventListener("dragover", (event) => {
   event.preventDefault();
-  els.dropZone.classList.add("dragover");
+  if (trainingLifecycleInputLocked()) {
+    setImageDragover(false);
+    return;
+  }
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+  setImageDragover(true);
 });
 
-els.dropZone.addEventListener("dragleave", () => els.dropZone.classList.remove("dragover"));
+els.viewer.addEventListener("dragleave", (event) => {
+  if (event.relatedTarget instanceof Node && els.viewer.contains(event.relatedTarget)) return;
+  setImageDragover(false);
+});
 
-els.dropZone.addEventListener("drop", async (event) => {
+els.viewer.addEventListener("drop", async (event) => {
   event.preventDefault();
-  els.dropZone.classList.remove("dragover");
+  setImageDragover(false);
   if (trainingLifecycleInputLocked()) return;
+  const file = event.dataTransfer?.files?.[0];
+  if (state.image && file?.type?.startsWith("image/") && !window.confirm(
+    `Replace ${state.image.fileName} with ${file.name}? The current training result will be discarded.`,
+  )) {
+    eventLog(`image replacement canceled: ${file.name || "unknown"}`);
+    return;
+  }
   try {
     state.lastInputMode = "drop";
-    await loadFile(event.dataTransfer.files[0]);
+    await loadFile(file);
+    eventLog(`loaded image from drop: ${file?.name || "unknown"}`);
   } catch (error) {
     setStatus("error");
     setTrainingMessage(`Image load failed: ${error.message}`, "error");
@@ -26769,14 +26480,6 @@ els.trainLayerOrder.addEventListener("change", () => {
 });
 els.layerAwareAccumulation.addEventListener("change", () => {
   syncLayerOrderDependency();
-  publishState();
-});
-els.pruneLowContributionDeepSplats.addEventListener("change", () => {
-  syncLayerOrderDependency();
-  publishState();
-});
-els.deepPruneInterval.addEventListener("change", () => {
-  els.deepPruneInterval.value = String(discreteLayerSettings().deepPruneInterval);
   publishState();
 });
 for (const control of [
@@ -27101,7 +26804,7 @@ els.logTabs.addEventListener("keydown", (event) => {
   tabs[next].focus();
 });
 for (const control of [els.tiltPitch, els.tiltYaw]) {
-  control.addEventListener("input", applyTiltInputs);
+  control.addEventListener("input", scheduleTiltInputs);
 }
 els.tiltCameraMarkers.addEventListener("change", () => {
   state.tilt.cameraMarkersVisible = els.tiltCameraMarkers.checked;
@@ -27382,8 +27085,6 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
   opaquePaintLateSettleFraction,
   opaquePaintLateSettleStartStep,
   opaquePaintStructuralMutationAllowed,
-  deepPruneScheduled,
-  deepPruneDue,
   sharedTiltOrbitRadius,
   optimizerFootprintHistogram,
   brushColorNeutrality,
@@ -27514,8 +27215,6 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
       discreteLayers: {
         enabled: Boolean(state.params?.discreteLayersEnabled),
         layerAwareAccumulation: Boolean(state.params?.layerAwareAccumulationEnabled),
-        pruneLowContributionDeepSplats: Boolean(state.params?.pruneLowContributionDeepSplatsEnabled),
-        deepPruneInterval: Number(state.params?.deepPruneInterval || DEFAULT_DEEP_PRUNE_INTERVAL),
         requested: Number(state.params?.discreteLayerCount || 0),
         moveRadius: Number(state.params?.discreteLayerMoveRadius || 0),
         occupied: discreteDepthValues.length,
@@ -27860,16 +27559,6 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
       result_render_cache: m.result_render_cache
         ? structuredClone(m.result_render_cache)
         : null,
-      deep_layer_prune: m.deep_layer_prune ? structuredClone(m.deep_layer_prune) : null,
-      deep_layer_prune_events: m.deep_layer_prune_events ? structuredClone(m.deep_layer_prune_events) : [],
-      deep_layer_prune_removed_total: m.deep_layer_prune_removed_total || 0,
-      deep_layer_prune_deferred: m.deep_layer_prune_deferred
-        ? structuredClone(m.deep_layer_prune_deferred)
-        : null,
-      deep_layer_prune_deferred_count: m.deep_layer_prune_deferred_count || 0,
-      deep_layer_prune_deferred_steps: m.deep_layer_prune_deferred_steps
-        ? structuredClone(m.deep_layer_prune_deferred_steps)
-        : [],
       current_visibility_compaction: m.current_visibility_compaction
         ? structuredClone(m.current_visibility_compaction)
         : null,

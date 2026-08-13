@@ -185,49 +185,50 @@
                   </section>
                   <section class="lr-section" aria-labelledby="layerVisibilityHeading">
                     <strong id="layerVisibilityHeading" class="lr-section-heading">Layer and visibility</strong>
-                    <div class="layer-toggle-grid">
-                      <label class="inline-option">
-                        <input id="tileCullingToggle" data-testid="tile-culling-toggle" type="checkbox" checked />
-                        Tile/subtile culling
-                      </label>
-                      <label class="inline-option" title="Learn a bounded micro-depth for front-to-back ordering and PLY export. Requires tile/subtile culling.">
-                        <input id="trainLayerOrder" data-testid="train-layer-order" type="checkbox" checked />
-                        Train layer order
-                      </label>
-                      <label class="inline-option" title="Group ordered splats by layer using exact standard-alpha accumulation. This remains compatible with ordinary PLY viewers.">
-                        <input id="layerAwareAccumulation" data-testid="layer-aware-accumulation" type="checkbox" checked />
-                        Layer-aware accumulation
-                      </label>
-                      <label class="inline-option" title="Every configured interval during P2 and P3, compact low-contribution splats from the rear half of the learned layer order. P2 removes up to 2.5% per event and P3 uses a 1% detail-safe cap. The final iteration is excluded so coverage can recover.">
-                        <input id="pruneLowContributionDeepSplats" data-testid="prune-low-contribution-deep-splats" type="checkbox" checked />
-                        Prune low-contribution deep splats
-                      </label>
-                      <label class="inline-option" title="Quantize learned layer order and reduce overlapping splats assigned to the same layer. Applied at the next Train start.">
-                        <input id="discreteLayers" data-testid="discrete-layers" type="checkbox" checked />
-                        Discrete layers
-                      </label>
-                    </div>
-                    <div class="lr-grid">
-                      <label title="Optimize layer-order micro-depth every N iterations. 1 updates every iteration.">Layer update interval<input id="layerUpdateInterval" data-testid="layer-update-interval" type="number" min="1" max="3000" step="1" value="500" /></label>
-                      <label title="Iteration interval for periodic low-contribution rear-splat pruning during P2 and P3. This is independent from Current-Visibility Compaction v2 and the layer-only Scale prior.">Deep prune interval<input id="deepPruneInterval" data-testid="deep-prune-interval" type="number" min="100" max="5000" step="100" value="500" /></label>
-                      <label title="Shared number of discrete layers used by the overlap-aware assignment for every non-virtual algorithm.">Layer count<input id="discreteLayerCount" data-testid="discrete-layer-count" type="number" min="2" max="32" step="1" value="16" /></label>
-                      <label title="Maximum number of adjacent layers a splat may move during the final overlap-aware assignment. Set 0 to disable overlap reassignment.">Layer move radius<input id="discreteLayerMoveRadius" data-testid="discrete-layer-move-radius" type="number" min="0" max="32" step="1" value="0" /></label>
+                    <div class="layer-setting-group">
+                      <strong class="layer-setting-heading">Core layer processing</strong>
+                      <small>Rectangle and Brush keep these layer operations enabled as part of their paint training.</small>
+                      <div class="layer-toggle-grid">
+                        <label class="inline-option">
+                          <input id="tileCullingToggle" data-testid="tile-culling-toggle" type="checkbox" checked />
+                          Tile/subtile culling
+                        </label>
+                        <label class="inline-option" title="Learn a bounded micro-depth for front-to-back ordering and PLY export. This can change which splat is in front independently of Scale-biased Surface Layer Prior. Requires tile/subtile culling.">
+                          <input id="trainLayerOrder" data-testid="train-layer-order" type="checkbox" checked />
+                          Train layer order
+                        </label>
+                        <label class="inline-option" title="Group ordered splats by layer using exact standard-alpha accumulation. This remains compatible with ordinary PLY viewers.">
+                          <input id="layerAwareAccumulation" data-testid="layer-aware-accumulation" type="checkbox" checked />
+                          Layer-aware accumulation
+                        </label>
+                        <label class="inline-option" title="Quantize learned layer order and reduce overlapping splats assigned to the same layer. Applied at the next Train start.">
+                          <input id="discreteLayers" data-testid="discrete-layers" type="checkbox" checked />
+                          Discrete layers
+                        </label>
+                      </div>
+                      <div class="lr-grid">
+                        <label title="Optimize layer-order micro-depth every N iterations. 1 updates every iteration.">Layer update interval<input id="layerUpdateInterval" data-testid="layer-update-interval" type="number" min="1" max="3000" step="1" value="500" /></label>
+                        <label title="Shared number of discrete layers used by the overlap-aware assignment for every non-virtual algorithm.">Layer count<input id="discreteLayerCount" data-testid="discrete-layer-count" type="number" min="2" max="32" step="1" value="16" /></label>
+                        <label title="Maximum number of adjacent layers a splat may move during the final overlap-aware assignment. Set 0 to disable overlap reassignment.">Layer move radius<input id="discreteLayerMoveRadius" data-testid="discrete-layer-move-radius" type="number" min="0" max="32" step="1" value="0" /></label>
+                      </div>
                     </div>
                     <div class="compaction-v2-settings">
-                      <label class="inline-option" title="Periodically reassigns currently verified contributors by footprint area: smaller splats go to front layers and larger splats go to rear layers. Hidden, unverified splats keep their layer for contribution compaction. The setting is shared by every algorithm and applied at the next Train start.">
+                      <strong class="layer-setting-heading">Optional size-based reorder</strong>
+                      <label class="inline-option" title="Periodically reassigns currently verified contributors by footprint area: smaller splats go to front layers and larger splats go to rear layers. Hidden, unverified splats keep their layer. This is separate from normal Train layer order and applied at the next Train start.">
                         <input id="scaleBiasedSurfaceLayerPrior" data-testid="scale-biased-surface-layer-prior" type="checkbox" checked />
                         Scale-biased Surface Layer Prior
                       </label>
                       <div class="lr-grid">
                         <label title="Number of size-ordered layers used by the complete GPU sort of currently verified contributors. Existing order is retained inside each layer.">Size-sort layer count<input id="scaleBiasedSurfaceLayerPriorLayers" data-testid="scale-biased-surface-layer-prior-layers" type="number" min="2" max="32" step="1" value="32" /></label>
+                        <label title="Stop only the optional size-based reorder after this percentage of the complete training run. Normal Train layer order, growth, and pruning are independent. Set 0% to disable all scheduled size sorts.">Apply until (%)<input id="scaleBiasedSurfaceLayerPriorUntil" data-testid="scale-biased-surface-layer-prior-until" type="number" min="0" max="100" step="1" value="90" /></label>
                         <label title="Run the complete size sort every N iterations during P1. Set 0 to disable it in P1.">P1 sort interval<input id="scaleBiasedSurfaceLayerPriorP1Interval" data-testid="scale-biased-surface-layer-prior-p1-interval" type="number" min="0" max="100000" step="1" value="100" /></label>
                         <label title="Run the complete size sort every N iterations during P2. Set 0 to disable it in P2.">P2 sort interval<input id="scaleBiasedSurfaceLayerPriorP2Interval" data-testid="scale-biased-surface-layer-prior-p2-interval" type="number" min="0" max="100000" step="1" value="100" /></label>
                         <label title="Run the complete size sort every N iterations during P3. Set 0 to disable it in P3.">P3 sort interval<input id="scaleBiasedSurfaceLayerPriorP3Interval" data-testid="scale-biased-surface-layer-prior-p3-interval" type="number" min="0" max="100000" step="1" value="100" /></label>
-                        <label title="Stop running the size sort after this percentage of the complete training run. Set 0% to disable all scheduled sorts. This reorders layers only; it does not control Deep prune or remove splats.">Apply until (%)<input id="scaleBiasedSurfaceLayerPriorUntil" data-testid="scale-biased-surface-layer-prior-until" type="number" min="0" max="100" step="1" value="95" /></label>
                       </div>
                     </div>
                     <div class="compaction-v2-settings">
-                      <label class="inline-option" title="Periodically removes only splats with no current rendered contribution plus a user-capped near-zero cohort. This is separate from periodic Deep prune. Applies to every algorithm; Virtual Camera Sampling measures at least one complete camera-pool window per event. Applied at the next Train start.">
+                      <strong class="layer-setting-heading">Optional contribution cleanup</strong>
+                      <label class="inline-option" title="Periodically removes splats with no current rendered contribution plus a user-capped near-zero cohort. This is the single contribution-based cleanup path for every algorithm; Virtual Camera Sampling measures at least one complete camera-pool window per event. Applied at the next Train start.">
                         <input id="currentContributionCompaction" data-testid="current-contribution-compaction" type="checkbox" checked />
                         Current-Visibility Compaction v2
                       </label>

@@ -275,6 +275,23 @@ canvas[hidden] {
   background: rgba(222, 235, 255, 0.9);
 }
 
+.viewer.image-dragover::after {
+  content: "Drop to replace the loaded image";
+  position: absolute;
+  inset: 22px;
+  z-index: 4;
+  display: grid;
+  place-content: center;
+  border: 2px dashed var(--accent);
+  border-radius: 8px;
+  background: rgba(222, 235, 255, 0.9);
+  color: var(--ink);
+  font-size: 18px;
+  font-weight: 800;
+  text-align: center;
+  pointer-events: none;
+}
+
 .progress {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -733,6 +750,29 @@ select {
   margin-top: 4px;
   padding-top: 10px;
   border-top: 1px solid var(--line);
+}
+
+.layer-setting-group {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+}
+
+.layer-setting-group small {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.layer-setting-heading {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .layer-toggle-grid .inline-option {
