@@ -173,11 +173,15 @@ const TILE_OFFSET_VALUE_MASK = 0x7fffffff;
 const DEFAULT_GROWTH_FRACTION = 0.35;
 const DEFAULT_GROWTH_SIGNAL_THRESHOLD = 0.0003;
 const DEFAULT_STAGE_GROWTH_SHARES = Object.freeze({ p1: 18.15, p2: 51.85, p3: 30 });
-const METRIC_TILE_STRIDE = 34;
+const METRIC_TILE_STRIDE = 36;
 const PSNR_MSE_FLOOR = 1e-12;
 // Final-only virtual-camera readback. Keep this separate from the training
 // metric layout so front-only training retains its established fast path.
-const VIRTUAL_CAMERA_METRIC_TILE_STRIDE = 18;
+const VIRTUAL_CAMERA_METRIC_TILE_STRIDE = 20;
+// Four output vec4s (backward coefficients / SSIM map) plus five reusable
+// separable-filter scratch vec4s. This keeps the exact 11x11 derivative
+// separable instead of issuing 121 neighborhood reads per training pixel.
+const SSIM_WORKING_BYTES_PER_PIXEL = 144;
 const PHASE45_REGION_GRID = 8;
 const PHASE45_REGION_COUNT = PHASE45_REGION_GRID * PHASE45_REGION_GRID;
 const PHASE45_REGION_STRIDE = 24;
@@ -4236,7 +4240,6 @@ function trainingBufferDescriptors(
 ) {
   const tilePlan = prepared.tilePlan || plannedTileIndexCapacity(image, params, capacity, device);
   const tileCount = Math.ceil(image.width / TILE_SIZE) * Math.ceil(image.height / TILE_SIZE);
-  const ssimTileCount = Math.ceil(image.width / 8) * Math.ceil(image.height / 8);
   const variants = phase33Variants();
   const preparedStages = Object.hasOwn(prepared, "coarseImage");
   const stageDimensions = preparedStages
@@ -4285,7 +4288,7 @@ function trainingBufferDescriptors(
   add("alpha-state", image.width * image.height * ALPHA_STATE_BYTES_PER_PIXEL, true);
   add("loss-gradient", image.width * image.height * 48, true);
   add("exact-gradient", capacity * EXACT_GRADIENT_STRIDE * 4, true);
-  add("ssim-tiles", ssimTileCount * 64, true);
+  add("ssim-tiles", ssimWorkingBufferBytes(image), true);
   add("optimizer-state", capacity * optimizerStride, true);
   add("xy-depth", capacity * 4 * 4, true);
   add("transform", capacity * 4 * 4, true);
@@ -8582,6 +8585,10 @@ function psnrFromRgbMse(mse) {
   return 10 * Math.log10(1 / Math.max(PSNR_MSE_FLOOR, mse));
 }
 
+function ssimWorkingBufferBytes(image) {
+  return image.width * image.height * SSIM_WORKING_BYTES_PER_PIXEL;
+}
+
 function profileDistributionSummary(histogramValues, pixelCount, total) {
   const labels = ["0", "1", "2-3", "4-7", "8-15", "16-31", "32-63", "64+"];
   const counts = Array.from(histogramValues, (value) => Number(value) || 0);
@@ -8781,6 +8788,7 @@ function regionalSsimFromTileMetrics(values, width, height, tileSize = 8, column
     gradientError: 0,
     targetGradientEnergy: 0,
     gradientCount: 0,
+    ssimSum: 0,
   }));
   const tileColumns = Math.ceil(width / tileSize);
   const tileCount = Math.ceil(height / tileSize) * tileColumns;
@@ -8805,18 +8813,11 @@ function regionalSsimFromTileMetrics(values, width, height, tileSize = 8, column
     region.gradientError += values[source + 12];
     region.targetGradientEnergy += values[source + 13];
     region.gradientCount += values[source + 14];
+    region.ssimSum += values[source + 34];
   }
 
   const measured = regions.filter((region) => region.count > 0).map((region) => {
-    const meanA = region.renderedY / region.count;
-    const meanB = region.targetY / region.count;
-    const ssim = ssimFromMoments(
-      meanA,
-      meanB,
-      Math.max(0, region.renderedY2 / region.count - meanA ** 2),
-      Math.max(0, region.targetY2 / region.count - meanB ** 2),
-      region.renderedTargetY / region.count - meanA * meanB,
-    );
+    const ssim = region.ssimSum / region.count;
     return {
       index: region.index,
       column: region.column,
@@ -9102,7 +9103,11 @@ class WebGpuPreview {
     this.compactionStatePipeline = null;
     this.renderStatePipeline = null;
     this.tileCooperativeRenderPipeline = null;
+    this.ssimHorizontalPipeline = null;
     this.ssimTilePipeline = null;
+    this.ssimBackwardHorizontalPipeline = null;
+    this.ssimBackwardVerticalPipeline = null;
+    this.alphaSsimTilePipeline = null;
     this.renderGradientPipeline = null;
     this.parallelRenderGradientPipeline = null;
     this.lossGradientPipeline = null;
@@ -11451,7 +11456,11 @@ fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     if (
       this.renderStatePipeline &&
       this.tileCooperativeRenderPipeline &&
+      this.ssimHorizontalPipeline &&
       this.ssimTilePipeline &&
+      this.ssimBackwardHorizontalPipeline &&
+      this.ssimBackwardVerticalPipeline &&
+      this.alphaSsimTilePipeline &&
       (!legacyGradientSupported || (this.renderGradientPipeline && this.parallelRenderGradientPipeline)) &&
       this.lossGradientPipeline &&
       this.exactAlphaBackwardPipeline &&
@@ -11923,24 +11932,26 @@ struct AlphaState { compositeAlpha: f32, acceptedEnd: u32, pad0: f32, pad1: u32,
 @group(0) @binding(0) var<uniform> config: Config;
 @group(0) @binding(1) var<storage, read> targetRgb: array<f32>;
 @group(0) @binding(2) var<storage, read> pixelState: array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read_write> ssimTiles: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> ssimData: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> targetAlpha: array<f32>;
 @group(0) @binding(5) var<storage, read> alphaState: array<AlphaState>;
-var<workgroup> sx: array<f32, 64>;
-var<workgroup> sy: array<f32, 64>;
-var<workgroup> sx2: array<f32, 64>;
-var<workgroup> sy2: array<f32, 64>;
-var<workgroup> sxy: array<f32, 64>;
-var<workgroup> sc: array<f32, 64>;
-var<workgroup> sax: array<f32, 64>;
-var<workgroup> say: array<f32, 64>;
-var<workgroup> sax2: array<f32, 64>;
-var<workgroup> say2: array<f32, 64>;
-var<workgroup> saxy: array<f32, 64>;
 fn cfg(i: u32) -> f32 { return config.values[i / 4u][i % 4u]; }
-
+fn gaussian_weight(offset: i32) -> f32 {
+  let weights = array<f32, 11>(
+    0.00102838008448, 0.00759875813524, 0.0360007721284,
+    0.109360689510, 0.213005537711, 0.266011724862,
+    0.213005537711, 0.109360689510, 0.0360007721284,
+    0.00759875813524, 0.00102838008448
+  );
+  return weights[u32(offset + 5)];
+}
+fn tile_prefix(width: u32, height: u32) -> u32 {
+  return width * height * 4u;
+}
+fn alpha_tile_prefix(width: u32, height: u32) -> u32 {
+  return tile_prefix(width, height) + width * height * 5u;
+}
 ${VIRTUAL_TILT_WGSL}
-
 fn target_rgb_at(point: vec2<f32>, width: u32, height: u32) -> vec3<f32> {
   let source = clamp((point * 0.5 + 0.5) * vec2<f32>(f32(width - 1u), f32(height - 1u)), vec2<f32>(0.0), vec2<f32>(f32(width - 1u), f32(height - 1u)));
   let p0 = vec2<u32>(floor(source));
@@ -11956,21 +11967,166 @@ fn target_rgb_at(point: vec2<f32>, width: u32, height: u32) -> vec3<f32> {
   let c11 = vec3<f32>(targetRgb[i11], targetRgb[i11 + 1u], targetRgb[i11 + 2u]);
   return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
 }
-
 fn target_alpha_at(point: vec2<f32>, width: u32, height: u32) -> f32 {
   let source = clamp((point * 0.5 + 0.5) * vec2<f32>(f32(width - 1u), f32(height - 1u)), vec2<f32>(0.0), vec2<f32>(f32(width - 1u), f32(height - 1u)));
   let p0 = vec2<u32>(floor(source));
   let p1 = min(p0 + vec2<u32>(1u), vec2<u32>(width - 1u, height - 1u));
   let f = fract(source);
-  let a00 = targetAlpha[p0.y * width + p0.x];
-  let a10 = targetAlpha[p0.y * width + p1.x];
-  let a01 = targetAlpha[p1.y * width + p0.x];
-  let a11 = targetAlpha[p1.y * width + p1.x];
-  return mix(mix(a00, a10, f.x), mix(a01, a11, f.x), f.y);
+  return mix(mix(targetAlpha[p0.y * width + p0.x], targetAlpha[p0.y * width + p1.x], f.x), mix(targetAlpha[p1.y * width + p0.x], targetAlpha[p1.y * width + p1.x], f.x), f.y);
 }
-
+fn training_pair(px: u32, py: u32, width: u32, height: u32) -> array<vec4<f32>, 2> {
+  let pixel = py * width + px;
+  let gridPoint = vec2<f32>(select(0.0, f32(px) / f32(width - 1u) * 2.0 - 1.0, width > 1u), select(0.0, f32(py) / f32(height - 1u) * 2.0 - 1.0, height > 1u));
+  let projectedPoint = training_output_point(gridPoint);
+  let inversePoint = training_source_point(gridPoint, projectedPoint);
+  let directIndex = pixel * 3u;
+  let directTarget = vec3<f32>(targetRgb[directIndex], targetRgb[directIndex + 1u], targetRgb[directIndex + 2u]);
+  let sampledTarget = select(target_rgb_at(inversePoint.xy, width, height), directTarget, source_domain_reprojection_enabled());
+  let targetColor = select(vec3<f32>(0.0), sampledTarget, inversePoint.z > 0.5);
+  let sampledAlpha = select(target_alpha_at(inversePoint.xy, width, height), targetAlpha[pixel], source_domain_reprojection_enabled());
+  let targetOpacity = select(0.0, sampledAlpha, inversePoint.z > 0.5);
+  let valid = training_sample_valid(inversePoint);
+  let rendered = select(vec4<f32>(0.0), vec4<f32>(pixelState[pixel].rgb, alphaState[pixel].compositeAlpha), valid);
+  let referenceSample = select(vec4<f32>(0.0), vec4<f32>(targetColor, targetOpacity), valid);
+  return array<vec4<f32>, 2>(rendered, referenceSample);
+}
 @compute @workgroup_size(64)
-fn ssim_tiles(
+fn ssim_horizontal(@builtin(global_invocation_id) id: vec3<u32>) {
+  let width = u32(cfg(0u));
+  let height = u32(cfg(1u));
+  let pixel = id.x;
+  if (pixel >= width * height) { return; }
+  let px = pixel % width;
+  let py = pixel / width;
+  var sx = vec4<f32>(0.0);
+  var sy = vec4<f32>(0.0);
+  var sx2 = vec4<f32>(0.0);
+  var sy2 = vec4<f32>(0.0);
+  var sxy = vec4<f32>(0.0);
+  for (var offset = -5; offset <= 5; offset += 1) {
+    let sampleX = i32(px) + offset;
+    if (sampleX >= 0 && sampleX < i32(width)) {
+      let pair = training_pair(u32(sampleX), py, width, height);
+      let weight = gaussian_weight(offset);
+      sx += weight * pair[0];
+      sy += weight * pair[1];
+      sx2 += weight * pair[0] * pair[0];
+      sy2 += weight * pair[1] * pair[1];
+      sxy += weight * pair[0] * pair[1];
+    }
+  }
+  let base = tile_prefix(width, height) + pixel * 5u;
+  ssimData[base] = sx;
+  ssimData[base + 1u] = sy;
+  ssimData[base + 2u] = sx2;
+  ssimData[base + 3u] = sy2;
+  ssimData[base + 4u] = sxy;
+}
+@compute @workgroup_size(64)
+fn ssim_vertical(@builtin(global_invocation_id) id: vec3<u32>) {
+  let width = u32(cfg(0u));
+  let height = u32(cfg(1u));
+  let pixel = id.x;
+  if (pixel >= width * height) { return; }
+  let px = pixel % width;
+  let py = pixel / width;
+  var sx = vec4<f32>(0.0);
+  var sy = vec4<f32>(0.0);
+  var sx2 = vec4<f32>(0.0);
+  var sy2 = vec4<f32>(0.0);
+  var sxy = vec4<f32>(0.0);
+  let prefix = tile_prefix(width, height);
+  for (var offset = -5; offset <= 5; offset += 1) {
+    let sampleY = i32(py) + offset;
+    if (sampleY >= 0 && sampleY < i32(height)) {
+      let base = prefix + (u32(sampleY) * width + px) * 5u;
+      let weight = gaussian_weight(offset);
+      sx += weight * ssimData[base];
+      sy += weight * ssimData[base + 1u];
+      sx2 += weight * ssimData[base + 2u];
+      sy2 += weight * ssimData[base + 3u];
+      sxy += weight * ssimData[base + 4u];
+    }
+  }
+  let vx = max(vec4<f32>(0.0), sx2 - sx * sx);
+  let vy = max(vec4<f32>(0.0), sy2 - sy * sy);
+  let cov = sxy - sx * sy;
+  let a = 2.0 * sx * sy + vec4<f32>(0.0001);
+  let b = 2.0 * cov + vec4<f32>(0.0009);
+  let c = sx * sx + sy * sy + vec4<f32>(0.0001);
+  let d = vx + vy + vec4<f32>(0.0009);
+  let ssim = a * b / max(vec4<f32>(0.00000001), c * d);
+  // Express dSSIM/dx(sample) as a Gaussian convolution of three terms:
+  // K0(center) + target(sample) * Ky(center) + render(sample) * Kx(center).
+  // Two additional separable passes below apply the convolution transpose.
+  let k0 = ssim * (2.0 * sy / a - 2.0 * sy / b - 2.0 * sx / c + 2.0 * sx / d);
+  let ky = ssim * (2.0 / b);
+  let kx = ssim * (-2.0 / d);
+  let out = pixel * 4u;
+  ssimData[out] = k0;
+  ssimData[out + 1u] = ky;
+  ssimData[out + 2u] = kx;
+  ssimData[out + 3u] = ssim;
+}
+@compute @workgroup_size(64)
+fn ssim_backward_horizontal(@builtin(global_invocation_id) id: vec3<u32>) {
+  let width = u32(cfg(0u));
+  let height = u32(cfg(1u));
+  let pixel = id.x;
+  if (pixel >= width * height) { return; }
+  let px = pixel % width;
+  let py = pixel / width;
+  var k0 = vec4<f32>(0.0);
+  var ky = vec4<f32>(0.0);
+  var kx = vec4<f32>(0.0);
+  for (var offset = -5; offset <= 5; offset += 1) {
+    let centerX = i32(px) + offset;
+    if (centerX >= 0 && centerX < i32(width)) {
+      let center = (py * width + u32(centerX)) * 4u;
+      let weight = gaussian_weight(offset);
+      k0 += weight * ssimData[center];
+      ky += weight * ssimData[center + 1u];
+      kx += weight * ssimData[center + 2u];
+    }
+  }
+  let base = tile_prefix(width, height) + pixel * 5u;
+  ssimData[base] = k0;
+  ssimData[base + 1u] = ky;
+  ssimData[base + 2u] = kx;
+}
+@compute @workgroup_size(64)
+fn ssim_backward_vertical(@builtin(global_invocation_id) id: vec3<u32>) {
+  let width = u32(cfg(0u));
+  let height = u32(cfg(1u));
+  let pixel = id.x;
+  if (pixel >= width * height) { return; }
+  let px = pixel % width;
+  let py = pixel / width;
+  var k0 = vec4<f32>(0.0);
+  var ky = vec4<f32>(0.0);
+  var kx = vec4<f32>(0.0);
+  let prefix = tile_prefix(width, height);
+  for (var offset = -5; offset <= 5; offset += 1) {
+    let centerY = i32(py) + offset;
+    if (centerY >= 0 && centerY < i32(height)) {
+      let base = prefix + (u32(centerY) * width + px) * 5u;
+      let weight = gaussian_weight(offset);
+      k0 += weight * ssimData[base];
+      ky += weight * ssimData[base + 1u];
+      kx += weight * ssimData[base + 2u];
+    }
+  }
+  let pair = training_pair(px, py, width, height);
+  ssimData[pixel * 4u] = k0 + pair[1] * ky + pair[0] * kx;
+}
+var<workgroup> alphaX: array<f32, 64>;
+var<workgroup> alphaY: array<f32, 64>;
+var<workgroup> alphaX2: array<f32, 64>;
+var<workgroup> alphaY2: array<f32, 64>;
+var<workgroup> alphaXY: array<f32, 64>;
+var<workgroup> alphaCount: array<f32, 64>;
+@compute @workgroup_size(64)
+fn alpha_ssim_tiles(
   @builtin(local_invocation_id) lid: vec3<u32>,
   @builtin(workgroup_id) wid: vec3<u32>,
   @builtin(num_workgroups) workgroups: vec3<u32>
@@ -11979,83 +12135,51 @@ fn ssim_tiles(
   let height = u32(cfg(1u));
   let tileCols = (width + 7u) / 8u;
   let tileIndex = wid.y * workgroups.x + wid.x;
-  let tileCount = tileCols * ((height + 7u) / 8u);
-  if (tileIndex >= tileCount) { return; }
-  let tileX = tileIndex % tileCols;
-  let tileY = tileIndex / tileCols;
-  let px = tileX * 8u + lid.x % 8u;
-  let py = tileY * 8u + lid.x / 8u;
+  if (tileIndex >= tileCols * ((height + 7u) / 8u)) { return; }
+  let px = (tileIndex % tileCols) * 8u + lid.x % 8u;
+  let py = (tileIndex / tileCols) * 8u + lid.x / 8u;
   var x = 0.0;
   var y = 0.0;
-  var ax = 0.0;
-  var ay = 0.0;
   var valid = 0.0;
   if (px < width && py < height) {
-    let pixel = py * width + px;
-    let gridPoint = vec2<f32>(select(0.0, f32(px) / f32(width - 1u) * 2.0 - 1.0, width > 1u), select(0.0, f32(py) / f32(height - 1u) * 2.0 - 1.0, height > 1u));
-    let projectedPoint = training_output_point(gridPoint);
-    let inversePoint = training_source_point(gridPoint, projectedPoint);
-    if (training_sample_valid(inversePoint)) {
-      let directIndex = pixel * 3u;
-      let directTarget = vec3<f32>(targetRgb[directIndex], targetRgb[directIndex + 1u], targetRgb[directIndex + 2u]);
-      let targetColor = select(target_rgb_at(inversePoint.xy, width, height), directTarget, source_domain_reprojection_enabled());
-      let targetOpacity = select(target_alpha_at(inversePoint.xy, width, height), targetAlpha[pixel], source_domain_reprojection_enabled());
-      x = dot(pixelState[pixel].rgb, vec3<f32>(1.0 / 3.0));
-      y = select(0.0, dot(targetColor, vec3<f32>(1.0 / 3.0)), inversePoint.z > 0.5);
-      ax = alphaState[pixel].compositeAlpha;
-      ay = select(0.0, targetOpacity, inversePoint.z > 0.5);
-      valid = 1.0;
-    }
+    let pair = training_pair(px, py, width, height);
+    x = pair[0].a;
+    y = pair[1].a;
+    valid = 1.0;
   }
-  sx[lid.x] = x;
-  sy[lid.x] = y;
-  sx2[lid.x] = x * x;
-  sy2[lid.x] = y * y;
-  sxy[lid.x] = x * y;
-  sc[lid.x] = valid;
-  sax[lid.x] = ax;
-  say[lid.x] = ay;
-  sax2[lid.x] = ax * ax;
-  say2[lid.x] = ay * ay;
-  saxy[lid.x] = ax * ay;
+  alphaX[lid.x] = x;
+  alphaY[lid.x] = y;
+  alphaX2[lid.x] = x * x;
+  alphaY2[lid.x] = y * y;
+  alphaXY[lid.x] = x * y;
+  alphaCount[lid.x] = valid;
   workgroupBarrier();
   for (var stride = 32u; stride > 0u; stride /= 2u) {
     if (lid.x < stride) {
-      sx[lid.x] += sx[lid.x + stride];
-      sy[lid.x] += sy[lid.x + stride];
-      sx2[lid.x] += sx2[lid.x + stride];
-      sy2[lid.x] += sy2[lid.x + stride];
-      sxy[lid.x] += sxy[lid.x + stride];
-      sc[lid.x] += sc[lid.x + stride];
-      sax[lid.x] += sax[lid.x + stride];
-      say[lid.x] += say[lid.x + stride];
-      sax2[lid.x] += sax2[lid.x + stride];
-      say2[lid.x] += say2[lid.x + stride];
-      saxy[lid.x] += saxy[lid.x + stride];
+      alphaX[lid.x] += alphaX[lid.x + stride];
+      alphaY[lid.x] += alphaY[lid.x + stride];
+      alphaX2[lid.x] += alphaX2[lid.x + stride];
+      alphaY2[lid.x] += alphaY2[lid.x + stride];
+      alphaXY[lid.x] += alphaXY[lid.x + stride];
+      alphaCount[lid.x] += alphaCount[lid.x + stride];
     }
     workgroupBarrier();
   }
   if (lid.x == 0u) {
-    let count = max(sc[0], 1.0);
-    let mux = sx[0] / count;
-    let muy = sy[0] / count;
-    let vx = max(0.0, sx2[0] / count - mux * mux);
-    let vy = max(0.0, sy2[0] / count - muy * muy);
-    let cov = sxy[0] / count - mux * muy;
-    let c1 = 0.0001;
-    let c2 = 0.0009;
-    let ssim = ((2.0 * mux * muy + c1) * (2.0 * cov + c2)) / max(0.00000001, (mux * mux + muy * muy + c1) * (vx + vy + c2));
-    let amux = sax[0] / count;
-    let amuy = say[0] / count;
-    let avx = max(0.0, sax2[0] / count - amux * amux);
-    let avy = max(0.0, say2[0] / count - amuy * amuy);
-    let acov = saxy[0] / count - amux * amuy;
-    let alphaSsim = ((2.0 * amux * amuy + c1) * (2.0 * acov + c2)) / max(0.00000001, (amux * amux + amuy * amuy + c1) * (avx + avy + c2));
-    let base = tileIndex * 4u;
-    ssimTiles[base] = vec4<f32>(mux, muy, vx, vy);
-    ssimTiles[base + 1u] = vec4<f32>(cov, ssim, count, 0.0);
-    ssimTiles[base + 2u] = vec4<f32>(amux, amuy, avx, avy);
-    ssimTiles[base + 3u] = vec4<f32>(acov, alphaSsim, count, 0.0);
+    let n = max(alphaCount[0], 1.0);
+    let mux = alphaX[0] / n;
+    let muy = alphaY[0] / n;
+    let vx = max(0.0, alphaX2[0] / n - mux * mux);
+    let vy = max(0.0, alphaY2[0] / n - muy * muy);
+    let cov = alphaXY[0] / n - mux * muy;
+    let a = 2.0 * mux * muy + 0.0001;
+    let b = 2.0 * cov + 0.0009;
+    let c = mux * mux + muy * muy + 0.0001;
+    let d = vx + vy + 0.0009;
+    let ssim = a * b / max(0.00000001, c * d);
+    let out = alpha_tile_prefix(width, height) + tileIndex * 2u;
+    ssimData[out] = vec4<f32>(mux, muy, vx, vy);
+    ssimData[out + 1u] = vec4<f32>(cov, ssim, n, 0.0);
   }
 }`;
 
@@ -12070,6 +12194,10 @@ fn ssim_tiles(
       "fn cfg(i: u32) -> f32 { return config.values[i / 4u][i % 4u]; }",
       VIRTUAL_TILT_WGSL,
       MONOCHROME_LAB_L_WGSL,
+      "fn safe_signed(v: f32) -> f32 {",
+      "  if (abs(v) >= 0.0000001) { return v; }",
+      "  return select(-0.0000001, 0.0000001, v >= 0.0);",
+      "}",
       "fn target_color_at(point: vec2<f32>, width: u32, height: u32) -> vec3<f32> {",
       "  let source = clamp((point * 0.5 + 0.5) * vec2<f32>(f32(width - 1u), f32(height - 1u)), vec2<f32>(0.0), vec2<f32>(f32(width - 1u), f32(height - 1u)));",
       "  let p0 = vec2<u32>(floor(source));",
@@ -12091,10 +12219,6 @@ fn ssim_tiles(
       "  let p1 = min(p0 + vec2<u32>(1u), vec2<u32>(width - 1u, height - 1u));",
       "  let f = fract(source);",
       "  return mix(mix(targetAlpha[p0.y * width + p0.x], targetAlpha[p0.y * width + p1.x], f.x), mix(targetAlpha[p1.y * width + p0.x], targetAlpha[p1.y * width + p1.x], f.x), f.y);",
-      "}",
-      "fn safe_signed(v: f32) -> f32 {",
-      "  if (abs(v) >= 0.0000001) { return v; }",
-      "  return select(-0.0000001, 0.0000001, v >= 0.0);",
       "}",
       "fn rendered_luma(px: u32, py: u32, width: u32) -> f32 {",
       "  return dot(pixelState[py * width + px].rgb, vec3<f32>(1.0 / 3.0));",
@@ -12139,25 +12263,10 @@ fn ssim_tiles(
       "  if (underpaintingActive) {",
       "    dColor = normalized_lab_l_only_gray_gradient_srgb(renderedState.rgb, targetColor);",
       "  }",
-      "  let ssimTileCols = (width + 7u) / 8u;",
-      "  let tile = (py / 8u) * ssimTileCols + (px / 8u);",
-      "  let moments = ssimTiles[tile * 4u];",
-      "  let extra = ssimTiles[tile * 4u + 1u];",
-      "  let mux = moments.x;",
-      "  let muy = moments.y;",
-      "  let vx = moments.z;",
-      "  let vy = moments.w;",
-      "  let cov = extra.x;",
-      "  let ssim = extra.y;",
-      "  let n = max(extra.z, 1.0);",
+      "  let dSsim = ssimTiles[pixel * 4u];",
       "  let x = dot(renderedState.rgb, vec3<f32>(1.0 / 3.0));",
       "  let y = dot(targetColor, vec3<f32>(1.0 / 3.0));",
-      "  let a = safe_signed(2.0 * mux * muy + 0.0001);",
-      "  let b = safe_signed(2.0 * cov + 0.0009);",
-      "  let cc = safe_signed(mux * mux + muy * muy + 0.0001);",
-      "  let dd = safe_signed(vx + vy + 0.0009);",
-      "  let dSsim = ssim * ((2.0 * muy / n) / a + (2.0 * (y - muy) / n) / b - (2.0 * mux / n) / cc - (2.0 * (x - mux) / n) / dd);",
-      "  if (!underpaintingActive) { dColor += vec3<f32>(-0.5 * 0.2 * dSsim / 3.0); }",
+      "  if (!underpaintingActive) { dColor += -0.2 * dSsim.rgb / 3.0; }",
       "  if (!underpaintingActive && cfg(15u) > 0.5) {",
       "    var gradientDerivative = 0.0;",
       "    var gradientTerms = 0.0;",
@@ -12180,8 +12289,14 @@ fn ssim_tiles(
       "    let frequencyRamp = clamp((cfg(8u) / max(cfg(9u), 1.0) - 0.2) / 0.3, 0.0, 1.0);",
       "    dColor += vec3<f32>(cfg(16u) * frequencyRamp * gradientDerivative / max(1.0, gradientTerms) / 3.0);",
       "  }",
-      "  let alphaMoments = ssimTiles[tile * 4u + 2u];",
-      "  let alphaExtra = ssimTiles[tile * 4u + 3u];",
+      "  let alphaX = renderedState.a;",
+      "  let sampledAlpha = select(target_alpha_at(inversePoint.xy, width, height), targetAlpha[pixel], source_domain_reprojection_enabled());",
+      "  let alphaY = select(0.0, sampledAlpha, inversePoint.z > 0.5);",
+      "  let alphaTileCols = (width + 7u) / 8u;",
+      "  let alphaTile = (py / 8u) * alphaTileCols + (px / 8u);",
+      "  let alphaBase = width * height * 9u + alphaTile * 2u;",
+      "  let alphaMoments = ssimTiles[alphaBase];",
+      "  let alphaExtra = ssimTiles[alphaBase + 1u];",
       "  let alphaMux = alphaMoments.x;",
       "  let alphaMuy = alphaMoments.y;",
       "  let alphaVx = alphaMoments.z;",
@@ -12189,9 +12304,6 @@ fn ssim_tiles(
       "  let alphaCov = alphaExtra.x;",
       "  let alphaSsim = alphaExtra.y;",
       "  let alphaN = max(alphaExtra.z, 1.0);",
-      "  let alphaX = renderedState.a;",
-      "  let sampledAlpha = select(target_alpha_at(inversePoint.xy, width, height), targetAlpha[pixel], source_domain_reprojection_enabled());",
-      "  let alphaY = select(0.0, sampledAlpha, inversePoint.z > 0.5);",
       "  let alphaA = safe_signed(2.0 * alphaMux * alphaMuy + 0.0001);",
       "  let alphaB = safe_signed(2.0 * alphaCov + 0.0009);",
       "  let alphaC = safe_signed(alphaMux * alphaMux + alphaMuy * alphaMuy + 0.0001);",
@@ -13464,25 +13576,10 @@ fn pixel_gradient(
   let residual = renderedState.rgb - targetColor;
   let residualMagnitude = (abs(residual.r) + abs(residual.g) + abs(residual.b)) / 3.0;
   var dLoss = sign(residual) * ((1.0 - ${DEFAULT_DSSIM_WEIGHT}) / 3.0);
-  let ssimTileCols = (width + 7u) / 8u;
-  let tile = (py / 8u) * ssimTileCols + (px / 8u);
-  let moments = ssimTiles[tile * 4u];
-  let extra = ssimTiles[tile * 4u + 1u];
-  let mux = moments.x;
-  let muy = moments.y;
-  let vx = moments.z;
-  let vy = moments.w;
-  let cov = extra.x;
-  let ssim = extra.y;
-  let n = max(extra.z, 1.0);
+  let dSsim = ssimTiles[pixel * 4u];
   let x = dot(renderedState.rgb, vec3<f32>(1.0 / 3.0));
   let y = dot(targetColor, vec3<f32>(1.0 / 3.0));
-  let a = safe_signed(2.0 * mux * muy + 0.0001);
-  let b = safe_signed(2.0 * cov + 0.0009);
-  let cc = safe_signed(mux * mux + muy * muy + 0.0001);
-  let dd = safe_signed(vx + vy + 0.0009);
-  let dSsim = ssim * ((2.0 * muy / n) / a + (2.0 * (y - muy) / n) / b - (2.0 * mux / n) / cc - (2.0 * (x - mux) / n) / dd);
-  dLoss += vec3<f32>(-0.5 * ${DEFAULT_DSSIM_WEIGHT} * dSsim / 3.0);
+  dLoss += -${DEFAULT_DSSIM_WEIGHT} * dSsim.rgb / 3.0;
   if (cfg(15u) > 0.5) {
     var gradientDerivative = 0.0;
     var gradientTerms = 0.0;
@@ -14308,7 +14405,11 @@ fn optimize_exact(
     [
       this.renderStatePipeline,
       this.tileCooperativeRenderPipeline,
+      this.ssimHorizontalPipeline,
       this.ssimTilePipeline,
+      this.ssimBackwardHorizontalPipeline,
+      this.ssimBackwardVerticalPipeline,
+      this.alphaSsimTilePipeline,
       this.renderGradientPipeline,
       this.parallelRenderGradientPipeline,
       this.lossGradientPipeline,
@@ -14325,7 +14426,11 @@ fn optimize_exact(
     ] = await Promise.all([
       this.device.createComputePipelineAsync({ layout: "auto", compute: { module: renderModule, entryPoint: "render_state" } }),
       this.device.createComputePipelineAsync({ layout: "auto", compute: { module: renderModule, entryPoint: "render_state_tile" } }),
-      this.device.createComputePipelineAsync({ layout: "auto", compute: { module: ssimModule, entryPoint: "ssim_tiles" } }),
+      this.device.createComputePipelineAsync({ layout: "auto", compute: { module: ssimModule, entryPoint: "ssim_horizontal" } }),
+      this.device.createComputePipelineAsync({ layout: "auto", compute: { module: ssimModule, entryPoint: "ssim_vertical" } }),
+      this.device.createComputePipelineAsync({ layout: "auto", compute: { module: ssimModule, entryPoint: "ssim_backward_horizontal" } }),
+      this.device.createComputePipelineAsync({ layout: "auto", compute: { module: ssimModule, entryPoint: "ssim_backward_vertical" } }),
+      this.device.createComputePipelineAsync({ layout: "auto", compute: { module: ssimModule, entryPoint: "alpha_ssim_tiles" } }),
       legacyGradientSupported
         ? this.device.createComputePipelineAsync({ layout: "auto", compute: { module: optimizerModule, entryPoint: "optimize" } })
         : Promise.resolve(null),
@@ -14479,6 +14584,7 @@ struct AlphaState { compositeAlpha: f32, acceptedEnd: u32, pad0: f32, pad1: u32,
 @group(0) @binding(1) var<storage, read> targetRgb: array<f32>;
 @group(0) @binding(2) var<storage, read> pixelState: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> metricsOut: array<f32>;
+@group(0) @binding(4) var<storage, read> ssimData: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> targetAlpha: array<f32>;
 @group(0) @binding(6) var<storage, read> alphaState: array<AlphaState>;
 var<workgroup> wgLoss: array<f32, 64>;
@@ -14503,6 +14609,7 @@ var<workgroup> wgAlphaMid: array<vec4<f32>, 64>;
 var<workgroup> wgAlphaLight: array<vec4<f32>, 64>;
 var<workgroup> wgAlphaMoments: array<vec4<f32>, 64>;
 var<workgroup> wgAlphaCross: array<f32, 64>;
+var<workgroup> wgSsim: array<vec2<f32>, 64>;
 fn cfg(i: u32) -> f32 { return config.values[i / 4u][i % 4u]; }
 
 @compute @workgroup_size(64)
@@ -14538,6 +14645,7 @@ fn metrics(
   var alphaLight = vec4<f32>(0.0);
   var alphaMoments = vec4<f32>(0.0);
   var alphaCross = 0.0;
+  var ssim = vec2<f32>(0.0);
   if (px < width && py < height) {
     let pixel = py * width + px;
     let rendered = pixelState[pixel].rgb;
@@ -14545,6 +14653,8 @@ fn metrics(
     coverage = pixelState[pixel].a;
     alphaMoments = vec4<f32>(coverage, targetAlpha[pixel], coverage * coverage, targetAlpha[pixel] * targetAlpha[pixel]);
     alphaCross = coverage * targetAlpha[pixel];
+    let ssimChannels = ssimData[pixel * 4u + 3u];
+    ssim = vec2<f32>((ssimChannels.r + ssimChannels.g + ssimChannels.b) / 3.0, ssimChannels.a);
     coverageUnder = select(0.0, 1.0, coverage < cfg(22u));
     backgroundExposure = select(0.0, 1.0, coverage < ${DEFAULT_ALPHA_TARGET});
     let targetIndex = pixel * 3u;
@@ -14604,6 +14714,7 @@ fn metrics(
   wgAlphaLight[lid.x] = alphaLight;
   wgAlphaMoments[lid.x] = alphaMoments;
   wgAlphaCross[lid.x] = alphaCross;
+  wgSsim[lid.x] = ssim;
   workgroupBarrier();
   for (var stride = 32u; stride > 0u; stride /= 2u) {
     if (lid.x < stride) {
@@ -14629,6 +14740,7 @@ fn metrics(
       wgAlphaLight[lid.x] += wgAlphaLight[lid.x + stride];
       wgAlphaMoments[lid.x] += wgAlphaMoments[lid.x + stride];
       wgAlphaCross[lid.x] += wgAlphaCross[lid.x + stride];
+      wgSsim[lid.x] += wgSsim[lid.x + stride];
     }
     workgroupBarrier();
   }
@@ -14668,6 +14780,8 @@ fn metrics(
     metricsOut[out + 31u] = wgAlphaMoments[0].w;
     metricsOut[out + 32u] = wgAlphaCross[0];
     metricsOut[out + 33u] = wgSquaredError[0];
+    metricsOut[out + 34u] = wgSsim[0].x;
+    metricsOut[out + 35u] = wgSsim[0].y;
   }
 }`;
     const module = this.device.createShaderModule({ code: shader });
@@ -14688,6 +14802,7 @@ struct AlphaState { compositeAlpha: f32, acceptedEnd: u32, pad0: f32, pad1: u32,
 @group(0) @binding(3) var<storage, read_write> metricsOut: array<f32>;
 @group(0) @binding(4) var<storage, read> targetAlpha: array<f32>;
 @group(0) @binding(5) var<storage, read> alphaState: array<AlphaState>;
+@group(0) @binding(6) var<storage, read> ssimData: array<vec4<f32>>;
 var<workgroup> wgLoss: array<f32, 64>;
 var<workgroup> wgSquaredError: array<f32, 64>;
 var<workgroup> wgX: array<f32, 64>;
@@ -14706,6 +14821,7 @@ var<workgroup> wgCoverage: array<f32, 64>;
 var<workgroup> wgBackground: array<f32, 64>;
 var<workgroup> wgRenderedChroma: array<f32, 64>;
 var<workgroup> wgTargetChroma: array<f32, 64>;
+var<workgroup> wgSsim: array<vec2<f32>, 64>;
 fn cfg(i: u32) -> f32 { return config.values[i / 4u][i % 4u]; }
 ${VIRTUAL_TILT_WGSL}
 
@@ -14761,6 +14877,7 @@ fn metrics(
   var background = 0.0;
   var renderedChroma = 0.0;
   var targetChroma = 0.0;
+  var ssim = vec2<f32>(0.0);
   if (px < width && py < height) {
     let gridPoint = vec2<f32>(
       select(0.0, f32(px) / f32(width - 1u) * 2.0 - 1.0, width > 1u),
@@ -14783,6 +14900,8 @@ fn metrics(
       y = dot(targetColor, vec3<f32>(1.0 / 3.0));
       renderedChroma = max(rendered.r, max(rendered.g, rendered.b)) - min(rendered.r, min(rendered.g, rendered.b));
       targetChroma = max(targetColor.r, max(targetColor.g, targetColor.b)) - min(targetColor.r, min(targetColor.g, targetColor.b));
+      let ssimChannels = ssimData[pixel * 4u + 3u];
+      ssim = vec2<f32>((ssimChannels.r + ssimChannels.g + ssimChannels.b) / 3.0, ssimChannels.a);
       valid = 1.0;
     }
   }
@@ -14804,6 +14923,7 @@ fn metrics(
   wgBackground[lid.x] = background;
   wgRenderedChroma[lid.x] = renderedChroma;
   wgTargetChroma[lid.x] = targetChroma;
+  wgSsim[lid.x] = ssim;
   workgroupBarrier();
   for (var stride = 32u; stride > 0u; stride /= 2u) {
     if (lid.x < stride) {
@@ -14825,6 +14945,7 @@ fn metrics(
       wgBackground[lid.x] += wgBackground[lid.x + stride];
       wgRenderedChroma[lid.x] += wgRenderedChroma[lid.x + stride];
       wgTargetChroma[lid.x] += wgTargetChroma[lid.x + stride];
+      wgSsim[lid.x] += wgSsim[lid.x + stride];
     }
     workgroupBarrier();
   }
@@ -14848,6 +14969,8 @@ fn metrics(
     metricsOut[out + 15u] = wgSquaredError[0];
     metricsOut[out + 16u] = wgRenderedChroma[0];
     metricsOut[out + 17u] = wgTargetChroma[0];
+    metricsOut[out + 18u] = wgSsim[0].x;
+    metricsOut[out + 19u] = wgSsim[0].y;
   }
 }`;
     const module = this.device.createShaderModule({ code: shader });
@@ -15673,18 +15796,29 @@ fn alpha_loss(
       : stageKind === "mid"
         ? this.trainState.midTargetAlphaBuffer
         : this.trainState.targetAlphaBuffer;
-    const ssimBindGroup = computeSsim
-      ? this.device.createBindGroup({
-          layout: this.ssimTilePipeline.getBindGroupLayout(0),
-          entries: [
+    const ssimFullEntries = () => [
             { binding: 0, resource: { buffer: this.trainState.configBuffer } },
             { binding: 1, resource: { buffer: targetBuffer } },
             { binding: 2, resource: { buffer: this.trainState.pixelStateBuffer } },
             { binding: 3, resource: { buffer: this.trainState.ssimTileBuffer } },
             { binding: 4, resource: { buffer: targetAlphaBuffer } },
             { binding: 5, resource: { buffer: this.trainState.alphaStateBuffer } },
-          ],
-        })
+          ];
+    const ssimFilterEntries = () => [
+      { binding: 0, resource: { buffer: this.trainState.configBuffer } },
+      { binding: 3, resource: { buffer: this.trainState.ssimTileBuffer } },
+    ];
+    const ssimBindGroups = computeSsim
+      ? [
+          [this.ssimHorizontalPipeline, ssimFullEntries],
+          [this.ssimTilePipeline, ssimFilterEntries],
+          [this.ssimBackwardHorizontalPipeline, ssimFilterEntries],
+          [this.ssimBackwardVerticalPipeline, ssimFullEntries],
+          [this.alphaSsimTilePipeline, ssimFullEntries],
+        ].map(([pipeline, entries]) => this.device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: entries(),
+        }))
       : null;
     const encoder = this.device.createCommandEncoder();
     const renderPass = encoder.beginComputePass();
@@ -15696,12 +15830,32 @@ fn alpha_loss(
       this.dispatchLinear(renderPass, Math.ceil((image.width * image.height) / 64));
     }
     renderPass.end();
-    if (ssimBindGroup) {
-      const ssimPass = encoder.beginComputePass();
-      ssimPass.setPipeline(this.ssimTilePipeline);
-      ssimPass.setBindGroup(0, ssimBindGroup);
-      this.dispatchLinear(ssimPass, Math.ceil(image.width / 8) * Math.ceil(image.height / 8));
-      ssimPass.end();
+    if (ssimBindGroups) {
+      const horizontalPass = encoder.beginComputePass();
+      horizontalPass.setPipeline(this.ssimHorizontalPipeline);
+      horizontalPass.setBindGroup(0, ssimBindGroups[0]);
+      this.dispatchLinear(horizontalPass, Math.ceil((image.width * image.height) / 64));
+      horizontalPass.end();
+      const verticalPass = encoder.beginComputePass();
+      verticalPass.setPipeline(this.ssimTilePipeline);
+      verticalPass.setBindGroup(0, ssimBindGroups[1]);
+      this.dispatchLinear(verticalPass, Math.ceil((image.width * image.height) / 64));
+      verticalPass.end();
+      const backwardHorizontalPass = encoder.beginComputePass();
+      backwardHorizontalPass.setPipeline(this.ssimBackwardHorizontalPipeline);
+      backwardHorizontalPass.setBindGroup(0, ssimBindGroups[2]);
+      this.dispatchLinear(backwardHorizontalPass, Math.ceil((image.width * image.height) / 64));
+      backwardHorizontalPass.end();
+      const backwardVerticalPass = encoder.beginComputePass();
+      backwardVerticalPass.setPipeline(this.ssimBackwardVerticalPipeline);
+      backwardVerticalPass.setBindGroup(0, ssimBindGroups[3]);
+      this.dispatchLinear(backwardVerticalPass, Math.ceil((image.width * image.height) / 64));
+      backwardVerticalPass.end();
+      const alphaSsimPass = encoder.beginComputePass();
+      alphaSsimPass.setPipeline(this.alphaSsimTilePipeline);
+      alphaSsimPass.setBindGroup(0, ssimBindGroups[4]);
+      alphaSsimPass.dispatchWorkgroups(Math.ceil(image.width / 8), Math.ceil(image.height / 8));
+      alphaSsimPass.end();
     }
     this.device.queue.submit([encoder.finish()]);
     await this.device.queue.onSubmittedWorkDone();
@@ -15871,6 +16025,7 @@ fn alpha_loss(
           { binding: 1, resource: { buffer: this.trainState.targetBuffer } },
           { binding: 2, resource: { buffer: this.trainState.pixelStateBuffer } },
           { binding: 3, resource: { buffer: lossBuffer } },
+          { binding: 4, resource: { buffer: this.trainState.ssimTileBuffer } },
           { binding: 5, resource: { buffer: this.trainState.targetAlphaBuffer } },
           { binding: 6, resource: { buffer: this.trainState.alphaStateBuffer } },
         ],
@@ -15895,7 +16050,7 @@ fn alpha_loss(
       let renderedTargetY = 0;
       let maxLoss = 0;
       let windowedTotal = 0;
-      let windowedCount = 0;
+      let alphaWindowedTotal = 0;
       let coverageTotal = 0;
       let coverageMinimum = Number.POSITIVE_INFINITY;
       let coverageUnder = 0;
@@ -15940,10 +16095,8 @@ fn alpha_loss(
         alphaMoments.target2 += values[i + 31];
         alphaMoments.cross += values[i + 32];
         squaredErrorTotal += values[i + 33];
-        const meanX = values[i + 1] / count;
-        const meanY = values[i + 2] / count;
-        windowedTotal += ssimFromMoments(meanX, meanY, Math.max(0, values[i + 3] / count - meanX ** 2), Math.max(0, values[i + 4] / count - meanY ** 2), values[i + 5] / count - meanX * meanY);
-        windowedCount += 1;
+        windowedTotal += values[i + 34];
+        alphaWindowedTotal += values[i + 35];
       }
       const pixelCount = image.width * image.height;
       const loss = lossTotal / pixelCount;
@@ -15952,20 +16105,15 @@ fn alpha_loss(
       const alphaL1 = alphaError / pixelCount;
       const alphaMean = alphaMoments.rendered / pixelCount;
       const alphaTargetMean = alphaMoments.target / pixelCount;
-      const alphaSsim = ssimFromMoments(
-        alphaMean,
-        alphaTargetMean,
-        Math.max(0, alphaMoments.rendered2 / pixelCount - alphaMean ** 2),
-        Math.max(0, alphaMoments.target2 / pixelCount - alphaTargetMean ** 2),
-        alphaMoments.cross / pixelCount - alphaMean * alphaTargetMean,
-      );
+      const alphaSsim = alphaWindowedTotal / Math.max(1, pixelCount);
       const alphaWeight = phase40Variants().alphaLossWeight;
       const alphaObjective = (1 - DEFAULT_DSSIM_WEIGHT) * alphaL1 + DEFAULT_DSSIM_WEIGHT * (1 - alphaSsim) * 0.5;
       const objectiveLoss = loss + alphaWeight * alphaObjective;
       const meanX = renderedY / pixelCount;
       const meanY = targetY / pixelCount;
-      const ssim = ssimFromMoments(meanX, meanY, Math.max(0, renderedY2 / pixelCount - meanX ** 2), Math.max(0, targetY2 / pixelCount - meanY ** 2), renderedTargetY / pixelCount - meanX * meanY);
-      const windowedSsim = windowedTotal / Math.max(1, windowedCount);
+      const momentSsim = ssimFromMoments(meanX, meanY, Math.max(0, renderedY2 / pixelCount - meanX ** 2), Math.max(0, targetY2 / pixelCount - meanY ** 2), renderedTargetY / pixelCount - meanX * meanY);
+      const ssim = windowedTotal / Math.max(1, pixelCount);
+      const windowedSsim = ssim;
       const regionalSsim = regionalSsimFromTileMetrics(values, image.width, image.height);
       const highFrequency = {
         gradient_l1: gradientError / Math.max(1, gradientCount),
@@ -16011,6 +16159,7 @@ fn alpha_loss(
         objectiveLoss,
         ssim,
         windowedSsim,
+        momentSsim,
         regionalSsim,
         highFrequency,
         coverage,
@@ -16041,6 +16190,7 @@ fn alpha_loss(
         { binding: 3, resource: { buffer: outputBuffer } },
         { binding: 4, resource: { buffer: this.trainState.targetAlphaBuffer } },
         { binding: 5, resource: { buffer: this.trainState.alphaStateBuffer } },
+        { binding: 6, resource: { buffer: this.trainState.ssimTileBuffer } },
       ],
     });
     const encoder = this.device.createCommandEncoder();
@@ -16072,6 +16222,8 @@ fn alpha_loss(
     let background = 0;
     let renderedChroma = 0;
     let targetChroma = 0;
+    let ssimTotal = 0;
+    let alphaSsimTotal = 0;
     const tileSsim = [];
     for (let index = 0; index < values.length; index += VIRTUAL_CAMERA_METRIC_TILE_STRIDE) {
       const count = values[index + 6];
@@ -16094,15 +16246,9 @@ fn alpha_loss(
       squaredError += values[index + 15];
       renderedChroma += values[index + 16];
       targetChroma += values[index + 17];
-      const meanA = values[index + 1] / count;
-      const meanB = values[index + 2] / count;
-      tileSsim.push(ssimFromMoments(
-        meanA,
-        meanB,
-        Math.max(0, values[index + 3] / count - meanA ** 2),
-        Math.max(0, values[index + 4] / count - meanB ** 2),
-        values[index + 5] / count - meanA * meanB,
-      ));
+      ssimTotal += values[index + 18];
+      alphaSsimTotal += values[index + 19];
+      tileSsim.push(values[index + 18] / count);
     }
     if (pixels <= 0) {
       throw new Error(`Virtual camera ${view.id || "unknown"} has no valid teacher pixels.`);
@@ -16123,23 +16269,11 @@ fn alpha_loss(
       loss: mean(loss),
       mse: squaredError / Math.max(1, pixels * 3),
       psnr: psnrFromRgbMse(squaredError / Math.max(1, pixels * 3)),
-      ssim: ssimFromMoments(
-        rgbMean,
-        targetMean,
-        Math.max(0, mean(rendered2) - rgbMean ** 2),
-        Math.max(0, mean(target2) - targetMean ** 2),
-        mean(cross) - rgbMean * targetMean,
-      ),
-      windowedSsim: tileSsim.reduce((sum, value) => sum + value, 0) / Math.max(1, tileSsim.length),
+      ssim: mean(ssimTotal),
+      windowedSsim: mean(ssimTotal),
       local_p10: percentileSorted(tileSsim, 0.1),
       alphaL1: mean(alphaL1),
-      alphaSsim: ssimFromMoments(
-        alphaMean,
-        targetAlphaMean,
-        Math.max(0, mean(alpha2) - alphaMean ** 2),
-        Math.max(0, mean(targetAlpha2) - targetAlphaMean ** 2),
-        mean(alphaCross) - alphaMean * targetAlphaMean,
-      ),
+      alphaSsim: mean(alphaSsimTotal),
       coverage_mean: mean(coverage),
       background_exposure_ratio: mean(background),
       rendered_mean_srgb_signal: rgbMean,
@@ -18268,7 +18402,6 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
     const tileRows = Math.ceil(image.height / TILE_SIZE);
     const tileCount = tileCols * tileRows;
     const tileIndexCapacity = tilePlan.capacity;
-    const ssimTileCount = Math.ceil(image.width / 8) * Math.ceil(image.height / 8);
     const color = packColors(params);
     const transform = packTransforms(params);
     const positions = packPositions(params);
@@ -18428,7 +18561,7 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
           })
         : null,
       ssimTileBuffer: allocationDevice.createBuffer({
-        size: Math.max(64, ssimTileCount * 64),
+        size: Math.max(64, ssimWorkingBufferBytes(image)),
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
       }),
       optimizerStateBuffer: allocationDevice.createBuffer({
@@ -19876,14 +20009,31 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
           { binding: 7, resource: { buffer: this.trainState.pixelStateBuffer } },
           { binding: 8, resource: { buffer: this.trainState.alphaStateBuffer } },
         ], renderChoice.cooperative ? "cooperative" : "linear");
-      const ssimBindGroup = cachedBindGroup("ssim", this.ssimTilePipeline, () => [
+      const ssimFullEntries = () => [
           { binding: 0, resource: { buffer: this.trainState.configBuffer } },
           { binding: 1, resource: { buffer: targetBuffer } },
           { binding: 2, resource: { buffer: this.trainState.pixelStateBuffer } },
           { binding: 3, resource: { buffer: this.trainState.ssimTileBuffer } },
           { binding: 4, resource: { buffer: targetAlphaBuffer } },
           { binding: 5, resource: { buffer: this.trainState.alphaStateBuffer } },
-        ]);
+        ];
+      const ssimFilterEntries = () => [
+        { binding: 0, resource: { buffer: this.trainState.configBuffer } },
+        { binding: 3, resource: { buffer: this.trainState.ssimTileBuffer } },
+      ];
+      const ssimHorizontalBindGroup = cachedBindGroup("ssim-horizontal", this.ssimHorizontalPipeline, ssimFullEntries);
+      const ssimBindGroup = cachedBindGroup("ssim-vertical", this.ssimTilePipeline, ssimFilterEntries);
+      const ssimBackwardHorizontalBindGroup = cachedBindGroup(
+        "ssim-backward-horizontal",
+        this.ssimBackwardHorizontalPipeline,
+        ssimFilterEntries,
+      );
+      const ssimBackwardVerticalBindGroup = cachedBindGroup(
+        "ssim-backward-vertical",
+        this.ssimBackwardVerticalPipeline,
+        ssimFullEntries,
+      );
+      const alphaSsimTileBindGroup = cachedBindGroup("alpha-ssim-tiles", this.alphaSsimTilePipeline, ssimFullEntries);
       const optimizerPipeline = useExactBackward
         ? null
         : (phase37.parallelOptimizer ? this.parallelRenderGradientPipeline : this.renderGradientPipeline);
@@ -20052,11 +20202,31 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
         this.dispatchLinear(renderPass, Math.ceil((workImage.width * workImage.height) / 64));
       }
       renderPass.end();
+      const ssimHorizontalPass = encoder.beginComputePass(this.profilePassDescriptor(profileSample, "ssim-horizontal"));
+      ssimHorizontalPass.setPipeline(this.ssimHorizontalPipeline);
+      ssimHorizontalPass.setBindGroup(0, ssimHorizontalBindGroup);
+      this.dispatchLinear(ssimHorizontalPass, Math.ceil((workImage.width * workImage.height) / 64));
+      ssimHorizontalPass.end();
       const ssimPass = encoder.beginComputePass(this.profilePassDescriptor(profileSample, "ssim"));
       ssimPass.setPipeline(this.ssimTilePipeline);
       ssimPass.setBindGroup(0, ssimBindGroup);
-      this.dispatchLinear(ssimPass, Math.ceil(workImage.width / 8) * Math.ceil(workImage.height / 8));
+      this.dispatchLinear(ssimPass, Math.ceil((workImage.width * workImage.height) / 64));
       ssimPass.end();
+      const ssimBackwardHorizontalPass = encoder.beginComputePass(this.profilePassDescriptor(profileSample, "ssim-backward-horizontal"));
+      ssimBackwardHorizontalPass.setPipeline(this.ssimBackwardHorizontalPipeline);
+      ssimBackwardHorizontalPass.setBindGroup(0, ssimBackwardHorizontalBindGroup);
+      this.dispatchLinear(ssimBackwardHorizontalPass, Math.ceil((workImage.width * workImage.height) / 64));
+      ssimBackwardHorizontalPass.end();
+      const ssimBackwardVerticalPass = encoder.beginComputePass(this.profilePassDescriptor(profileSample, "ssim-backward-vertical"));
+      ssimBackwardVerticalPass.setPipeline(this.ssimBackwardVerticalPipeline);
+      ssimBackwardVerticalPass.setBindGroup(0, ssimBackwardVerticalBindGroup);
+      this.dispatchLinear(ssimBackwardVerticalPass, Math.ceil((workImage.width * workImage.height) / 64));
+      ssimBackwardVerticalPass.end();
+      const alphaSsimPass = encoder.beginComputePass(this.profilePassDescriptor(profileSample, "alpha-ssim"));
+      alphaSsimPass.setPipeline(this.alphaSsimTilePipeline);
+      alphaSsimPass.setBindGroup(0, alphaSsimTileBindGroup);
+      alphaSsimPass.dispatchWorkgroups(Math.ceil(workImage.width / 8), Math.ceil(workImage.height / 8));
+      alphaSsimPass.end();
       if (useExactBackward) {
         if (clearExactGradient) encoder.clearBuffer(this.trainState.exactGradientBuffer);
         const lossPass = encoder.beginComputePass(this.profilePassDescriptor(profileSample, "loss-gradient"));
@@ -23370,7 +23540,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       psnr: "10*log10(1/MSE_RGB), with MSE averaged over RGB channels",
       psnr_unit: "dB",
       psnr_mse_floor: PSNR_MSE_FLOOR,
-      ssim: "mean-RGB signal for global, windowed, and local p10 structure metrics",
+      ssim: "mean RGB-channel SSIM map; 11x11 Gaussian window, sigma 1.5, data range 1",
       objective_loss: "RGB L1 plus the configured alpha-objective weight; reported for evaluation and not fed back into training control",
     },
     latest_evaluation_step: null,
