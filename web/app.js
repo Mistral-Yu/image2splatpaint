@@ -10274,20 +10274,6 @@ fn assign_layers(@builtin(global_invocation_id) id: vec3<u32>) {
   let targetColorError = dot(abs(color[g].rgb - targetColorForGate), vec3<f32>(0.33333334));
   let observation = contributionStats[g];
   let importance = contributionStats[u32(cfg(28u)) + g];
-  let radiusPx = max(t.x, t.y) * max(f32(width), f32(height)) * 1.25;
-  let expectedInfluence = f32(width * height) / max(1.0, f32(count));
-  let residual = importance.z / max(importance.x, 1.0);
-  let rectangleDetailRescue = cfg(40u) > 0.5 && cfg(40u) < 1.5;
-  let verifiedHiddenDetail =
-    rectangleDetailRescue &&
-    floor(t.w) == 2.0 &&
-    radiusPx >= 0.6 && radiusPx <= 6.0 &&
-    observation.w > 32.0 &&
-    importance.x >= 2.0 && importance.y > 0.0 &&
-    importance.y < expectedInfluence * 0.75 &&
-    residual > 0.02 &&
-    targetColorError <= 0.075 &&
-    baseLayer + 1u < layerCount;
   let brushLayerAssignment = cfg(40u) > 3.5;
   if (brushLayerAssignment && bestCost > 0.25) {
     if (targetColorError > 0.075) {
@@ -10308,16 +10294,12 @@ fn assign_layers(@builtin(global_invocation_id) id: vec3<u32>) {
       }
     }
   }
-  // A detail tag alone is not enough: require measured positive contribution,
-  // residual, a small footprint, and target-consistent color. Mark a rescued
-  // detail as tag 3 so recurring recovery passes cannot lift it repeatedly.
-  if (verifiedHiddenDetail) { selected = baseLayer + 1u; }
   let quantized = (f32(selected) + in_layer_order(t.w, layerCount) * 0.999999) / f32(layerCount);
   let out = g * 4u;
   scratch[out] = t.x;
   scratch[out + 1u] = t.y;
   scratch[out + 2u] = t.z;
-  scratch[out + 3u] = select(floor(t.w), 3.0, verifiedHiddenDetail) + quantized * ${LAYER_CODE_RANGE};
+  scratch[out + 3u] = floor(t.w) + quantized * ${LAYER_CODE_RANGE};
 }
 
 @compute @workgroup_size(64)
@@ -20023,6 +20005,7 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
       const discreteLayerPassDue = Boolean(
         params.discreteLayersEnabled &&
         params.discreteLayerMoveRadius > 0 &&
+        normalizedKernelShape(params.kernelShape) === "opaque-brush" &&
         applyOptimizer &&
         opaquePaintStructuralMutationAllowed(
           currentStep,
@@ -20030,20 +20013,12 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
           Boolean(params.opaqueLayered),
           state.metrics?.opaque_paint_late_settle?.fraction,
         ) &&
-        (
-          (
-            currentStep === requestedSteps &&
-            normalizedKernelShape(params.kernelShape) !== "opaque-brush"
-          ) ||
-          (
-            Boolean(params.opaqueLayered) &&
-            currentStep >= experimentalDensifySteps(requestedSteps) &&
-            opaquePaintDetailRecoveryDue(
-              currentStep,
-              requestedSteps,
-              OPAQUE_PAINT_DETAIL_RECOVERY_INTERVAL,
-            )
-          )
+        Boolean(params.opaqueLayered) &&
+        currentStep >= experimentalDensifySteps(requestedSteps) &&
+        opaquePaintDetailRecoveryDue(
+          currentStep,
+          requestedSteps,
+          OPAQUE_PAINT_DETAIL_RECOVERY_INTERVAL,
         )
       );
       const discreteLayerEntries = () => [
