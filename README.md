@@ -148,49 +148,28 @@ the selected point; final quality metrics always evaluate the RGB result.
 
 ## Exports
 
-- PNG: current Splats preview, including shape, effects, alpha background, and optional outside-image padding.
-- PLY: available for the Gaussian algorithms. It uses standard SH0 Gaussian
-  Splatting fields in aspect-preserving coordinates and stores the learned
-  layer-order depth plus any enabled bounded virtual depth in `z`.
+- PNG exports the current rendered result for every algorithm.
+- Standard SH0 3DGS PLY is available for the two Gaussian algorithms.
+  Rectangle and Brush use non-Gaussian kernels and therefore export PNG only.
 
-These PLY files are learned from one image and prioritize its front view.
-Rotated views—especially from `Planar Gaussian`—will generally be less complete
-than conventional 3DGS trained from calibrated multi-view photos. Virtual
-Camera Sampling improves bounded tilt, but does not replace true multi-view
+PLY results are learned from one image and prioritize its front view. Virtual
+Camera Sampling supports bounded tilt, but does not replace true multi-view
 geometry or view-dependent color.
-
-`Rectangle Splats` and `Brush Splats` use analytic non-Gaussian
-kernels, so their exact export is PNG and PLY is intentionally disabled.
-
-PLY opacity, color, scale, and rotation use standard pre-activation fields. The
-training renderer and exported result use standard front-to-back alpha blending.
 
 ## Development
 
-Open the root `index.html` directly, or serve the repository root with a static server.
-Training and the self-hosted PlayCanvas `Tilt` tab both work from `file://`.
-GitHub Pages is deployed by `.github/workflows/pages.yml`; the workflow publishes
-only the app, the generated geometric Sample image, and the author-owned ramen
-sample in `assets/source-images/`. Their provenance is recorded in
-`assets/source-images/README.md`.
-
-Run the dependency-free public release contract before publishing:
+Open `index.html` directly or serve the repository as static files. Before
+publishing, run:
 
 ```sh
 node verify-release.mjs
 ```
 
-The Pages workflow rebuilds `_site` from scratch and then runs
-`node verify-release.mjs _site` to require byte parity with the reviewed source.
-
-The `Tilt` tab uses a pinned, self-hosted build of
-[PlayCanvas Engine](https://github.com/playcanvas/engine) 2.20.6 (MIT) to load
-the generated PLY without uploading it. Training and the primary preview remain
-the custom WebGPU implementation; Tilt uses the backend negotiated by PlayCanvas.
-See [Third-Party Notices](THIRD_PARTY_NOTICES.md).
-
-This repository is an experiment in AI-assisted implementation and validation
-built with GPT-5.6.
+GitHub Pages publishes the reviewed static app. Training uses the custom WebGPU
+implementation; `Tilt` uses a pinned self-hosted
+[PlayCanvas Engine](https://github.com/playcanvas/engine) build. See
+[Third-Party Notices](THIRD_PARTY_NOTICES.md). This project is developed and
+validated with AI assistance.
 
 ## Research inspiration
 
