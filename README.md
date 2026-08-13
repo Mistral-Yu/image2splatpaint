@@ -23,21 +23,12 @@
 
 ## Project direction
 
-Image2SplatPaint explores both faithful image representation and a new form of
-**differentiable image stylization inspired by Gaussian Splatting**.
-
-Instead of treating splats only as compression primitives, the project treats
-their position, scale, anisotropy, orientation, opacity, layer order, and
-paint-like shape as an image-making vocabulary. `Planar Gaussian` and
-`GS Virtual Camera Sampling` aim for faithful reproduction: the former targets
-a stable front view, while the latter extends that goal to bounded tilted
-views. `Rectangle Splats` and `Brush Splats` instead explore geometric and
-illustrative stylization that may deliberately depart from the source.
-Its discrete paint layers, layer-aware optimization and ordering, Brush and
-Rectangle shape semantics, and paint-oriented controls are original parts of
-Image2SplatPaint rather than features inherited from the referenced methods.
-For the stylization algorithms, visible style, stroke structure, and the
-character of the rendered image matter alongside numerical quality metrics.
+Image2SplatPaint explores faithful image representation and differentiable
+stylization with trainable splats. `Planar Gaussian` and
+`GS Virtual Camera Sampling` focus on reproduction, while `Rectangle Splats`
+and `Brush Splats` use geometric shapes, strokes, and independent paint layers
+to create deliberately stylized results. For these stylization paths, visible
+character matters alongside numerical fidelity.
 
 ## Quick start
 
@@ -149,22 +140,11 @@ same aspect ratio when Train starts.
 
 ## Training feedback
 
-`Update quality metrics during training`, under `Shared training settings`, optionally
-refreshes RGB L1, global/local SSIM, and PSNR at a bounded interval. It is off by
-default because the read-only full-image evaluations can slow training and may
-trigger a memory safety stop when their temporary allocation would exceed the
-budget. Live values are the latest completed evaluation; final values are fixed
-only by the final evaluation.
-
-The following `Color workflow` is also shared by every algorithm. `Monochrome
-underpainting` initializes and optimizes CIELAB L* lightness only until `Color
-finish starts at (%)`, then returns to the standard RGB objective. It is off by
-default and does not change RGB rendering or final RGB quality metrics.
-
-The two-row status area reports iteration and splat counts, RGB L1, global and
-local SSIM, RGB PSNR, image size, low-alpha (alpha below 0.99) and outside
-coverage, speed and elapsed time, tracked GPU allocation, and the current state.
-Starting a new run clears the previous run's quality values.
+The status area reports progress, splat count, image quality, coverage, speed,
+elapsed time, and tracked GPU use. Optional live quality updates are off by
+default because full-image evaluation can slow training. The shared
+`Monochrome underpainting` option begins with lightness and switches to RGB at
+the selected point; final quality metrics always evaluate the RGB result.
 
 ## Exports
 
@@ -214,24 +194,10 @@ built with GPT-5.6.
 
 ## Research inspiration
 
-The project is independently implemented, but its direction has been informed
-by research that treats images as learnable sets of spatial primitives:
-
-- [Image-GS: Content-Adaptive Image Representation via 2D Gaussians](https://arxiv.org/abs/2407.01866)
-  demonstrates adaptive image representation with progressively optimized
-  anisotropic 2D Gaussians.
-- [Soft Anisotropic Diagrams for Differentiable Image Representation](https://luckyiyi.github.io/SAD/index.html)
-  explores learnable anisotropic sites, differentiable spatial ownership, and
-  content-aligned boundaries.
-
-Image2SplatPaint takes inspiration from those broader ideas, but it is not a
-reimplementation of either method. In particular, its discrete paint-layer
-model, layer-aware ordering and optimization, Brush and Rectangle primitives,
-opacity semantics, and paint-oriented training controls are independently
-designed for this project. The implementation combines those original elements
-with standard front-to-back alpha compositing in its own WebGPU optimizer,
-extending the design space toward editable, paint-like, and deliberately
-stylized splat representations.
+Image2SplatPaint was inspired by
+[Image-GS](https://arxiv.org/abs/2407.01866) and
+[Soft Anisotropic Diagrams](https://luckyiyi.github.io/SAD/index.html), while
+its implementation and paint-oriented design are developed independently.
 
 ## Roadmap
 
