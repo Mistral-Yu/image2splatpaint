@@ -112,13 +112,18 @@ setting, so the defaults retain the accepted Brush path.
 | `Opacity gradient multiplier` | A fixed `0...1` directional multiplier; it is not trained. Final opacity is learned opacity multiplied by this gradient in training, preview, standard-alpha overlap, and PNG export. The default `1 / 1` is uniform. |
 | `Aspect ratio (long side / short side)` | Sets Brush-specific Min and Max anisotropy in one row. Defaults are `1 / 8`; both values override the Shared `Max anisotropy` behavior during Brush training. |
 | `Train directional width taper` | Learns a separate taper amount per splat between the configured directional Min and Max widths. Equal endpoints disable the directional change; the default `1 / 1` preserves the prior untapered path. |
-| `Contribution-confirmed detail promotion` | Keeps a newly split detail stroke in its inherited paint layer until contribution and footprint checks confirm that moving it forward is useful. This is experimental. |
 | `Local color-flow orientation` | Softly aligns nearby directional splats when their colors and paint layers are similar. Broad patches and strong direction crossings are excluded. This is experimental. |
 | `Directional stroke aspect floor` | Softly maintains a minimum long/short ratio while preserving footprint area. `Ribbon minimum` defaults to `2.2`; `Accent minimum` defaults to `2.8`; Base Patches are unchanged. These are lower bounds, while `Maximum long / short ratio` is the upper bound. This is experimental. |
 
 The general Brush Min/Max applies to every Brush splat. When Directional stroke
 aspect floor is enabled, Ribbon and Accent additionally use their stronger
 family-specific minimums, capped by the Brush Max.
+
+New Brush detail children always inherit their parent's paint layer. They can
+move later through the shared contribution-aware layer training; the former
+birth-time one-layer promotion has been removed. When layer training moves a
+Paint splat forward, stale RGB is repaired from its source-image footprint
+before the new order becomes visible.
 
 The former training-teacher preprocessing, saturation gradient, Brush Line
 layer, Brush-profile choices, and rejected Sector-aware, optical-smoothing, and

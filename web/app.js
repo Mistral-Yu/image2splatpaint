@@ -127,8 +127,8 @@ const DEFAULT_VIRTUAL_CAMERA_FULL_ANGLE_DEGREES = 5;
 const VIRTUAL_CAMERA_GOLDEN_ANGLE_RADIANS = Math.PI * (3 - Math.sqrt(5));
 // Keep the shared config buffer 16-byte aligned. Slot 88 carries the paint
 // minimum opacity and slot 90 enables learning above that floor for opaque
-// Paint. Slot 87 carries the Brush taper learning rate, slot 89 enables Brush
-// detail-child layer promotion, and slot 92 carries Rectangle orientation.
+// Paint. Slot 87 carries the Brush taper learning rate; retired slot 89 stays
+// zero, and slot 92 carries Rectangle orientation.
 // Slot 93 enables the shared monochrome-underpainting workflow; slots 94-95 enable
 // Brush opacity and trainable-width effects. Slots 96 and
 // 98 carry Rectangle's minimum and maximum parallel-edge width ratios. Slot 97
@@ -137,7 +137,8 @@ const VIRTUAL_CAMERA_GOLDEN_ANGLE_RADIANS = Math.PI * (3 - Math.sqrt(5));
 // Slots 105-106 are the shared scale-biased surface-layer sort: scheduled
 // full-sort trigger and requested layer count. Slot 107 packs the bounded
 // front-footprint parent replacement mode in 0..2, the QA-only front-split
-// child experiment in bit 4, and scheduled color-aware promotion in bit 8.
+// child experiment in bit 4, scheduled color-aware promotion in bit 8, and
+// the train-layer RGB guard in bit 16.
 // Virtual soft-depth uses slots 108-110 for camera confidence, robust-prior
 // delta, and its enable flag. Slot 111 carries the default-OFF Brush local
 // color-flow orientation strength. Slot 112 enables Brush-only directional
@@ -460,7 +461,6 @@ function configurePaintKernel(config, params = state.params) {
   // choice.  v2 must not change the growth rule it is measuring.
   config[86] = params?.currentVisibilityChildPolicyEnabled === false ? 0 : 1;
   config[87] = params?.brushWidthTaperEnabled ? DEFAULT_LAYERED_BRUSH_TAPER_LR : 0;
-  config[89] = params?.brushDetailRefinementEnabled ? 1 : 0;
   // Opaque Paint algorithms learn opacity from RGB error above this floor.
   config[90] = params?.minimumOpacityEnabled ? 1 : 0;
   config[91] = clampNumber(
@@ -508,13 +508,15 @@ function configurePaintKernel(config, params = state.params) {
     DEFAULT_SCALE_BIASED_SURFACE_LAYER_SORT_LAYERS,
   );
   // Low values: 1 = QA full-run parent replacement, 2 = monochrome-to-color
-  // transition only. Bit 4 forces newly split children to the front. Bit 8
-  // folds color repair into the scheduled size-layer promotion.
+  // transition only. Bit 4 is a QA-only front-child probe. Bit 8 folds color
+  // repair into the scheduled size-layer promotion. Bit 16 guards ordinary
+  // trained forward layer motion until stale Paint RGB has been repaired.
   config[107] = (params?.harmfulRectangleParentSplitEnabled
     ? params?.harmfulRectangleParentSplitTransitionOnly ? 2 : 1
     : 0) +
     (params?.frontSplitChildrenEnabled ? 4 : 0) +
-    (params?.surfaceLayerPriorColorAwarePromotion === false ? 0 : 8);
+    (params?.surfaceLayerPriorColorAwarePromotion === false ? 0 : 8) +
+    (params?.trainLayerColorGuardEnabled ? 16 : 0);
   config[111] = params?.brushLocalColorFlowEnabled
     ? BRUSH_LOCAL_COLOR_FLOW_STRENGTH
     : 0;
@@ -1597,10 +1599,10 @@ function qaOverrides(name) {
     : {};
 }
 
-function opaqueBrushDetailRefinementEnabled() {
-  const override = qaOverrides("__image2SplatBrushDetailRefinement");
-  if (Object.hasOwn(override, "enabled")) return override.enabled !== false;
-  return !document.querySelector("#layeredBrushContributionConfirmedPromotion")?.checked;
+function trainLayerColorGuardEnabled() {
+  const override = qaOverrides("__image2SplatTrainLayerColorGuard");
+  if (typeof override.enabled === "boolean") return override.enabled;
+  return true;
 }
 
 function opaqueBrushLocalColorFlowEnabled() {
@@ -2967,7 +2969,6 @@ const els = {
   layeredBrushLearnedOpacityMax: document.querySelector("#layeredBrushLearnedOpacityMax"),
   layeredBrushWidthTaperStart: document.querySelector("#layeredBrushWidthTaperStart"),
   layeredBrushWidthTaperEnd: document.querySelector("#layeredBrushWidthTaperEnd"),
-  layeredBrushContributionConfirmedPromotion: document.querySelector("#layeredBrushContributionConfirmedPromotion"),
   layeredBrushLocalColorFlow: document.querySelector("#layeredBrushLocalColorFlow"),
   layeredBrushStrokePersistence: document.querySelector("#layeredBrushStrokePersistence"),
   layeredBrushMinAspectRatio: document.querySelector("#layeredBrushMinAspectRatio"),
@@ -3597,9 +3598,6 @@ function publishState() {
   data.layeredBrushOpacityGradientRange = `${brushDirectionalEffects.opacityStart},${brushDirectionalEffects.opacityEnd}`;
   data.layeredBrushWidthTaperInput = String(brushDirectionalEffects.widthTaper);
   data.layeredBrushWidthTaperRange = `${brushDirectionalEffects.widthStart},${brushDirectionalEffects.widthEnd}`;
-  data.layeredBrushContributionConfirmedPromotionInput = String(
-    Boolean(els.layeredBrushContributionConfirmedPromotion?.checked),
-  );
   data.layeredBrushLocalColorFlowInput = String(
     Boolean(els.layeredBrushLocalColorFlow?.checked),
   );
@@ -6282,7 +6280,6 @@ function snapshotParams(params) {
       DEFAULT_MAX_ANISOTROPY,
     ),
     illustrativeOilVersion: Math.max(0, Math.round(Number(params.illustrativeOilVersion) || 0)),
-    brushDetailRefinementEnabled: Boolean(params.brushDetailRefinementEnabled),
     brushLocalColorFlowEnabled: Boolean(params.brushLocalColorFlowEnabled),
     brushStrokePersistenceEnabled: Boolean(params.brushStrokePersistenceEnabled),
     brushRibbonAspectFloor: clampNumber(
@@ -6300,6 +6297,7 @@ function snapshotParams(params) {
     surfaceLayerPriorEnabled: Boolean(params.surfaceLayerPriorEnabled),
     surfaceLayerPriorColorAwarePromotion:
       params.surfaceLayerPriorColorAwarePromotion !== false,
+    trainLayerColorGuardEnabled: Boolean(params.trainLayerColorGuardEnabled),
     surfaceLayerPriorLayers: Math.round(clampNumber(
       params.surfaceLayerPriorLayers,
       MIN_DISCRETE_LAYER_COUNT,
@@ -7311,6 +7309,7 @@ function initOpaqueLayeredPaint(image, count, kernelShape) {
   const surfaceLayerPrior = scaleBiasedSurfaceLayerPriorSettings();
   params.surfaceLayerPriorEnabled = surfaceLayerPrior.enabled;
   params.surfaceLayerPriorColorAwarePromotion = surfaceLayerPrior.colorAwarePromotion;
+  params.trainLayerColorGuardEnabled = trainLayerColorGuardEnabled();
   params.surfaceLayerPriorLayers = surfaceLayerPrior.layers;
   params.surfaceLayerPriorP1Interval = surfaceLayerPrior.p1Interval;
   params.surfaceLayerPriorP2Interval = surfaceLayerPrior.p2Interval;
@@ -7343,7 +7342,6 @@ function initOpaqueLayeredPaint(image, count, kernelShape) {
   params.brushWidthTaperEnd = directionalEffects.widthEnd;
   params.brushTaper = new Float32Array(baseCount).fill(DEFAULT_LAYERED_BRUSH_TAPER);
   params.illustrativeOilVersion = illustrativeOil ? 1 : 0;
-  params.brushDetailRefinementEnabled = illustrativeOil && opaqueBrushDetailRefinementEnabled();
   params.brushLocalColorFlowEnabled = illustrativeOil && opaqueBrushLocalColorFlowEnabled();
   params.brushStrokePersistenceEnabled = illustrativeOil && opaqueBrushStrokePersistenceEnabled();
   params.brushMinAspectRatio = illustrativeOil
@@ -8144,7 +8142,6 @@ function growParamPlaceholders(params, targetCount) {
     rectangleAsymmetricSoftness:
       params.rectangleAsymmetricSoftness ?? DEFAULT_RECTANGLE_ASYMMETRIC_SOFTNESS,
     illustrativeOilVersion: Math.max(0, Math.round(Number(params.illustrativeOilVersion) || 0)),
-    brushDetailRefinementEnabled: Boolean(params.brushDetailRefinementEnabled),
     brushLocalColorFlowEnabled: Boolean(params.brushLocalColorFlowEnabled),
     brushStrokePersistenceEnabled: Boolean(params.brushStrokePersistenceEnabled),
     brushRibbonAspectFloor: clampNumber(
@@ -8162,6 +8159,7 @@ function growParamPlaceholders(params, targetCount) {
     surfaceLayerPriorEnabled: Boolean(params.surfaceLayerPriorEnabled),
     surfaceLayerPriorColorAwarePromotion:
       params.surfaceLayerPriorColorAwarePromotion !== false,
+    trainLayerColorGuardEnabled: Boolean(params.trainLayerColorGuardEnabled),
     surfaceLayerPriorLayers: Math.round(clampNumber(
       params.surfaceLayerPriorLayers,
       MIN_DISCRETE_LAYER_COUNT,
@@ -13398,6 +13396,33 @@ fn target_rgb_at_point(point: vec2<f32>, width: u32, height: u32) -> vec3<f32> {
   return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
 }
 
+fn paint_footprint_rgb(
+  center: vec2<f32>,
+  scale: vec2<f32>,
+  theta: f32,
+  width: u32,
+  height: u32,
+) -> vec4<f32> {
+  let c = cos(theta);
+  let s = sin(theta);
+  let longOffset = vec2<f32>(c, s) * scale.x * 0.75;
+  let shortOffset = vec2<f32>(-s, c) * scale.y * 0.75;
+  let centerColor = target_rgb_at_point(center, width, height);
+  let longA = target_rgb_at_point(center + longOffset, width, height);
+  let longB = target_rgb_at_point(center - longOffset, width, height);
+  let shortA = target_rgb_at_point(center + shortOffset, width, height);
+  let shortB = target_rgb_at_point(center - shortOffset, width, height);
+  let footprintColor = (2.0 * centerColor + longA + longB + shortA + shortB) / 6.0;
+  let footprintVariation = (
+    dot(abs(centerColor - footprintColor), vec3<f32>(1.0 / 3.0)) * 2.0 +
+    dot(abs(longA - footprintColor), vec3<f32>(1.0 / 3.0)) +
+    dot(abs(longB - footprintColor), vec3<f32>(1.0 / 3.0)) +
+    dot(abs(shortA - footprintColor), vec3<f32>(1.0 / 3.0)) +
+    dot(abs(shortB - footprintColor), vec3<f32>(1.0 / 3.0))
+  ) / 6.0;
+  return vec4<f32>(footprintColor, footprintVariation);
+}
+
 struct SurfaceLayerUpdate {
   order: f32,
   color: vec3<f32>,
@@ -13439,36 +13464,52 @@ fn size_sorted_surface_layer(
   if (targetLayer > currentLayer && (surfaceFlags & 8u) != 0u && !(cfg(93u) > 0.5 && cfg(8u) < cfg(100u))) {
     let width = u32(cfg(0u));
     let height = u32(cfg(1u));
-    let c = cos(theta);
-    let s = sin(theta);
-    let longOffset = vec2<f32>(c, s) * scale.x * 0.75;
-    let shortOffset = vec2<f32>(-s, c) * scale.y * 0.75;
-    let centerColor = target_rgb_at_point(center, width, height);
-    let longA = target_rgb_at_point(center + longOffset, width, height);
-    let longB = target_rgb_at_point(center - longOffset, width, height);
-    let shortA = target_rgb_at_point(center + shortOffset, width, height);
-    let shortB = target_rgb_at_point(center - shortOffset, width, height);
-    let footprintColor = (2.0 * centerColor + longA + longB + shortA + shortB) / 6.0;
-    let footprintVariation = (
-      dot(abs(centerColor - footprintColor), vec3<f32>(1.0 / 3.0)) * 2.0 +
-      dot(abs(longA - footprintColor), vec3<f32>(1.0 / 3.0)) +
-      dot(abs(longB - footprintColor), vec3<f32>(1.0 / 3.0)) +
-      dot(abs(shortA - footprintColor), vec3<f32>(1.0 / 3.0)) +
-      dot(abs(shortB - footprintColor), vec3<f32>(1.0 / 3.0))
-    ) / 6.0;
-    let mismatch = dot(abs(currentColor - footprintColor), vec3<f32>(1.0 / 3.0));
+    let footprint = paint_footprint_rgb(center, scale, theta, width, height);
+    let mismatch = dot(abs(currentColor - footprint.rgb), vec3<f32>(1.0 / 3.0));
     let paint = cfg(40u) > 0.5;
     let mismatchThreshold = select(0.08, 0.05, paint);
     let variationLimit = select(0.05, 0.08, paint);
-    if (mismatch > mismatchThreshold && footprintVariation > variationLimit) {
+    if (mismatch > mismatchThreshold && footprint.a > variationLimit) {
       return result;
     }
     if (mismatch > mismatchThreshold) {
-      result.color = mix(currentColor, footprintColor, select(0.20, 0.75, paint));
+      result.color = mix(currentColor, footprint.rgb, select(0.20, 0.75, paint));
       result.resetColorAdam = 1.0;
     }
   }
   result.order = (targetLayer + stableInLayer * 0.999999) / sortLayers;
+  return result;
+}
+
+fn color_guarded_trained_layer(
+  center: vec2<f32>,
+  scale: vec2<f32>,
+  theta: f32,
+  currentOrder: f32,
+  proposedOrder: f32,
+  currentColor: vec3<f32>,
+) -> SurfaceLayerUpdate {
+  var result = SurfaceLayerUpdate(proposedOrder, currentColor, 0.0);
+  let flags = u32(round(cfg(107u)));
+  let paint = cfg(40u) > 0.5;
+  let underpainting = cfg(93u) > 0.5 && cfg(8u) < cfg(100u);
+  if ((flags & 16u) == 0u || !paint || underpainting || proposedOrder <= currentOrder) {
+    return result;
+  }
+  let footprint = paint_footprint_rgb(
+    center, scale, theta, u32(cfg(0u)), u32(cfg(1u))
+  );
+  let mismatch = dot(abs(currentColor - footprint.rgb), vec3<f32>(1.0 / 3.0));
+  if (mismatch <= 0.05) { return result; }
+
+  // Repair before publishing a forward order change. High-variation edge
+  // footprints are only deferred so that the normal color optimizer can fit
+  // them without replacing a deliberate Brush boundary with an average.
+  result.order = currentOrder;
+  if (footprint.a <= 0.08) {
+    result.color = mix(currentColor, footprint.rgb, 0.75);
+    result.resetColorAdam = 1.0;
+  }
   return result;
 }
 
@@ -13929,12 +13970,22 @@ fn apply_optimizer(
   xy[g].depthGradient = accumulatedDepthGradient;
   let layerTag = floor(t.w);
   var layerOrder = clamp(min(fract(t.w), ${LAYER_CODE_RANGE}) / ${LAYER_CODE_RANGE}, 0.0, 1.0);
+  let previousLayerOrder = layerOrder;
   if (cfg(45u) > 0.5 && cfg(54u) > 0.5) {
     let meanError = errorSum / max(observed, 1.0);
     let meanInfluence = influenceSum / max(observed, 1.0);
     let stableBias = (hash_unit(f32(g) * 0.754877666) - 0.5) * 0.02;
     let targetLayer = clamp(0.5 + meanInfluence * 0.35 - meanError * 0.8 + stableBias, 0.0, 1.0);
     layerOrder = mix(layerOrder, targetLayer, clamp(cfg(53u), 0.0, 1.0));
+  }
+  let trainedLayerUpdate = color_guarded_trained_layer(
+    nextCenter, nextScale, nextTheta, previousLayerOrder, layerOrder, nextColor
+  );
+  layerOrder = trainedLayerUpdate.order;
+  nextColor = trainedLayerUpdate.color;
+  if (trainedLayerUpdate.resetColorAdam > 0.5) {
+    opt.mColor = vec4<f32>(0.0);
+    opt.vColor = vec4<f32>(0.0);
   }
   // Never expose an unverified hidden row merely because it is small. The
   // post-growth contribution compactor must see those rows before any size-
@@ -14232,12 +14283,22 @@ fn optimize(@builtin(global_invocation_id) id: vec3<u32>) {
   xy[g].center = nextCenter;
   let layerTag = floor(t.w);
   var layerOrder = clamp(min(fract(t.w), ${LAYER_CODE_RANGE}) / ${LAYER_CODE_RANGE}, 0.0, 1.0);
+  let previousLayerOrder = layerOrder;
   if (cfg(45u) > 0.5 && cfg(54u) > 0.5) {
     let meanError = errorSum / max(observed, 1.0);
     let meanInfluence = influenceSum / max(observed, 1.0);
     let stableBias = (hash_unit(f32(g) * 0.754877666) - 0.5) * 0.02;
     let targetLayer = clamp(0.5 + meanInfluence * 0.35 - meanError * 0.8 + stableBias, 0.0, 1.0);
     layerOrder = mix(layerOrder, targetLayer, clamp(cfg(53u), 0.0, 1.0));
+  }
+  let trainedLayerUpdate = color_guarded_trained_layer(
+    nextCenter, nextScale, nextTheta, previousLayerOrder, layerOrder, nextColor
+  );
+  layerOrder = trainedLayerUpdate.order;
+  nextColor = trainedLayerUpdate.color;
+  if (trainedLayerUpdate.resetColorAdam > 0.5) {
+    opt.mColor = vec4<f32>(0.0);
+    opt.vColor = vec4<f32>(0.0);
   }
   // Match the exact optimizer: size ordering is complete inside the currently
   // verified contributor cohort, while hidden rows retain their old layer.
@@ -17794,18 +17855,7 @@ fn apply_grow(@builtin(global_invocation_id) id: vec3u) {
   xy[index].rawDepth = xy[source].rawDepth;
   xy[index].depthGradient = 0.0;
   let inheritedLayer = min(fract(sourceT.w), ${LAYER_CODE_RANGE} * 0.999999);
-  let brushDetailChild =
-    mode == 1u &&
-    config[40] > 3.5 &&
-    config[89] > 0.5 &&
-    detailTagged;
-  let layerStep = ${LAYER_CODE_RANGE} / max(1.0, config[82] - 1.0);
-  var childLayer = select(
-    inheritedLayer,
-    min(${LAYER_CODE_RANGE} * 0.999999, inheritedLayer + layerStep),
-    brushDetailChild
-  );
-  childLayer = select(childLayer, inheritedLayer, paintParentTrueSplit);
+  var childLayer = inheritedLayer;
   let parentLayerScaled =
     clamp(inheritedLayer / ${LAYER_CODE_RANGE}, 0.0, 0.999999) * max(2.0, config[82]);
   let parentLayerId = floor(parentLayerScaled);
@@ -17817,7 +17867,6 @@ fn apply_grow(@builtin(global_invocation_id) id: vec3u) {
   let guardedSameLayerAdvance =
     config[86] > 0.5 &&
     config[65] > 0.5 &&
-    !brushDetailChild &&
     (mode == 1u || mode == 2u) &&
     localError > 0.02 &&
     childTargetColorError <= 0.075;
@@ -17833,8 +17882,8 @@ fn apply_grow(@builtin(global_invocation_id) id: vec3u) {
   transform[index] = vec4<f32>(nextScale, nextTheta, childTag + childLayer);
   color[index] = vec4<f32>(childColor, childOpacity);
   stats[index] = select(sourceStats, sourceStats * 0.5, trueSplit);
-  // The front-only opaque child has not contributed yet. Inheriting the
-  // parent's visibility made fully hidden children look important to prune.
+  // A new opaque child has not contributed yet. Inheriting the parent's
+  // visibility made fully hidden children look important to prune.
   // Virtual symmetric true splits still divide the measured source history.
   var childImportance = select(
     sourceImportance * 0.5,
@@ -21745,7 +21794,6 @@ function setInputControlsDisabled(disabled) {
     els.layeredBrushOpacityGradientEnd,
     els.layeredBrushWidthTaperStart,
     els.layeredBrushWidthTaperEnd,
-    els.layeredBrushContributionConfirmedPromotion,
     els.layeredBrushLocalColorFlow,
     els.layeredBrushStrokePersistence,
     els.layeredBrushMinAspectRatio,
@@ -21846,7 +21894,6 @@ function syncAlgorithmRequirements() {
   els.layeredBrushOpacityGradientEnd.disabled = state.running || !brushSelected;
   els.layeredBrushWidthTaperStart.disabled = state.running || !brushSelected;
   els.layeredBrushWidthTaperEnd.disabled = state.running || !brushSelected;
-  els.layeredBrushContributionConfirmedPromotion.disabled = state.running || !brushSelected;
   els.layeredBrushLocalColorFlow.disabled = state.running || !brushSelected;
   els.layeredBrushStrokePersistence.disabled = state.running || !brushSelected;
   els.layeredBrushMinAspectRatio.disabled = state.running || !brushSelected;
@@ -23297,12 +23344,19 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       backend: "webgpu-compute",
     },
     initialization_bsp: state.params.initializationStats || null,
-    brush_detail_refinement: algorithmUsesLayeredOpaqueBrush(algorithm)
+    brush_detail_layer_policy: algorithmUsesLayeredOpaqueBrush(algorithm)
       ? {
-          enabled: Boolean(state.params.brushDetailRefinementEnabled),
-          split: "detail-child-one-layer-promotion",
-          contribution_confirmed_promotion: !state.params.brushDetailRefinementEnabled,
-          surface_recovery_start_step: experimentalDensifySteps(steps),
+          split_birth: "inherit-parent-layer",
+          immediate_one_layer_promotion: false,
+          subsequent_motion: "shared-contribution-aware-layer-training",
+        }
+      : null,
+    train_layer_color_guard: algorithmUsesPaintKernel(algorithm)
+      ? {
+          enabled: Boolean(state.params.trainLayerColorGuardEnabled),
+          default_enabled: true,
+          mode: "repair-footprint-rgb-before-forward-order-change",
+          high_variation_action: "defer-only",
         }
       : null,
     brush_local_color_flow: algorithmUsesLayeredOpaqueBrush(algorithm)
@@ -26628,7 +26682,6 @@ els.layerAwareAccumulation.addEventListener("change", () => {
   publishState();
 });
 for (const control of [
-  els.layeredBrushContributionConfirmedPromotion,
   els.layeredBrushLocalColorFlow,
   els.layeredBrushStrokePersistence,
 ]) {
@@ -27692,8 +27745,11 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
       brush_detail_v1: m.brush_detail_v1
         ? structuredClone(m.brush_detail_v1)
         : null,
-      brush_detail_refinement: m.brush_detail_refinement
-        ? structuredClone(m.brush_detail_refinement)
+      brush_detail_layer_policy: m.brush_detail_layer_policy
+        ? structuredClone(m.brush_detail_layer_policy)
+        : null,
+      train_layer_color_guard: m.train_layer_color_guard
+        ? structuredClone(m.train_layer_color_guard)
         : null,
       brush_local_color_flow: m.brush_local_color_flow
         ? structuredClone(m.brush_local_color_flow)
