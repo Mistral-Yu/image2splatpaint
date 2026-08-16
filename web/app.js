@@ -5055,6 +5055,7 @@ async function loadFile(file, { loadGeneration: inheritedLoadGeneration = null }
       inputCacheMaxSide: INPUT_CACHE_MAX_SIDE,
       inputCacheResized: width !== originalWidth || height !== originalHeight,
       inputDecodeMode: decoded.mode,
+      inputOrientation: decoded.orientation || 1,
       resizeMode: "input-cache",
       resizeScale: loadScale,
       rgb,
@@ -5094,7 +5095,7 @@ async function loadFile(file, { loadGeneration: inheritedLoadGeneration = null }
       ? ` Cached at ${width} x ${height}; Max image side is applied separately when Train starts.`
       : "";
     setTrainingMessage(`Loaded ${file.name} (${originalWidth} x ${originalHeight}).${cacheNote}`, "success");
-    log(`loaded ${file.name}; input cache=${width}x${height} source=${originalWidth}x${originalHeight} scale=${loadScale.toFixed(3)} decode=${decoded.mode} sRGB; training resize deferred`);
+    log(`loaded ${file.name}; input cache=${width}x${height} source=${originalWidth}x${originalHeight} orientation=${decoded.orientation || 1} scale=${loadScale.toFixed(3)} decode=${decoded.mode} sRGB; training resize deferred`);
     return true;
   } finally {
     releaseDecoded();
@@ -5111,10 +5112,47 @@ function asciiAt(bytes, offset, text) {
   return true;
 }
 
-function parsedImageSize(width, height, format) {
+function parsedImageSize(width, height, format, orientation = 1) {
   const w = Math.round(Number(width) || 0);
   const h = Math.round(Number(height) || 0);
-  return w > 0 && h > 0 ? { width: w, height: h, format } : null;
+  if (w <= 0 || h <= 0) return null;
+  const result = { width: w, height: h, format };
+  const normalizedOrientation = Math.round(Number(orientation) || 1);
+  if (normalizedOrientation >= 2 && normalizedOrientation <= 8) {
+    result.orientation = normalizedOrientation;
+  }
+  return result;
+}
+
+function parseTiffOrientation(bytes) {
+  if (bytes.length < 16) return 1;
+  const little = asciiAt(bytes, 0, "II");
+  const big = asciiAt(bytes, 0, "MM");
+  if (!little && !big) return 1;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const uint16 = (offset) => offset + 2 <= bytes.length ? view.getUint16(offset, little) : 0;
+  const uint32 = (offset) => offset + 4 <= bytes.length ? view.getUint32(offset, little) : 0;
+  if (uint16(2) !== 42) return 1;
+  const ifd = uint32(4);
+  if (ifd <= 0 || ifd + 2 > bytes.length) return 1;
+  const entries = Math.min(uint16(ifd), Math.floor((bytes.length - ifd - 2) / 12));
+  for (let entry = 0; entry < entries; entry += 1) {
+    const offset = ifd + 2 + entry * 12;
+    if (uint16(offset) !== 0x0112 || uint16(offset + 2) !== 3 || uint32(offset + 4) !== 1) continue;
+    const orientation = uint16(offset + 8);
+    return orientation >= 1 && orientation <= 8 ? orientation : 1;
+  }
+  return 1;
+}
+
+function orientationSwapsImageAxes(orientation) {
+  return [5, 6, 7, 8].includes(Math.round(Number(orientation) || 1));
+}
+
+function displayOrientedImageSize(width, height, orientation = 1) {
+  return orientationSwapsImageAxes(orientation)
+    ? [Math.max(1, height), Math.max(1, width)]
+    : [Math.max(1, width), Math.max(1, height)];
 }
 
 function parseTiffDimensions(bytes) {
@@ -5191,6 +5229,7 @@ function parseImageDimensions(bytes, mimeType = "") {
       segmentsWithoutPayload.add(marker);
     }
     let offset = 2;
+    let orientation = 1;
     const maxOffset = bytes.length - 1;
     while (offset < maxOffset) {
       if (bytes[offset] !== 0xff) {
@@ -5210,7 +5249,7 @@ function parseImageDimensions(bytes, mimeType = "") {
         if (frameLength < 8 || offset + 1 + frameLength > bytes.length) return null;
         const height = (bytes[offset + 4] << 8) | bytes[offset + 5];
         const width = (bytes[offset + 6] << 8) | bytes[offset + 7];
-        return parsedImageSize(width, height, "jpeg");
+        return parsedImageSize(width, height, "jpeg", orientation);
       }
 
       if (segmentsWithoutPayload.has(markerCode)) {
@@ -5223,6 +5262,10 @@ function parseImageDimensions(bytes, mimeType = "") {
       if (segmentLength < 2) return null;
       const nextOffset = offset + 1 + segmentLength;
       if (nextOffset > bytes.length) return null;
+      const payloadOffset = offset + 3;
+      if (markerCode === 0xe1 && asciiAt(bytes, payloadOffset, "Exif\0\0")) {
+        orientation = parseTiffOrientation(bytes.subarray(payloadOffset + 6, nextOffset));
+      }
       offset = nextOffset;
     }
   }
@@ -5248,6 +5291,24 @@ async function probeImageDimensions(file) {
   return parseImageDimensions(bytes, file.type);
 }
 
+function normalizeExifOrientedBitmap(bitmap, orientation, encodedWidth, encodedHeight, width, height) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) {
+    releaseCanvasBackingStore(canvas);
+    throw new Error("2D canvas is unavailable for EXIF orientation normalization.");
+  }
+  if (orientation === 5) context.setTransform(0, 1, 1, 0, 0, 0);
+  else if (orientation === 6) context.setTransform(0, 1, -1, 0, width, 0);
+  else if (orientation === 7) context.setTransform(0, -1, -1, 0, width, height);
+  else if (orientation === 8) context.setTransform(0, -1, 1, 0, 0, height);
+  else throw new Error(`Unsupported axis-swapping EXIF orientation: ${orientation}`);
+  context.drawImage(bitmap, 0, 0, encodedWidth, encodedHeight);
+  return canvas;
+}
+
 async function decodeImageFile(file) {
   const probed = await probeImageDimensions(file).catch(() => null);
   if (!probed) {
@@ -5258,8 +5319,14 @@ async function decodeImageFile(file) {
   if (probed.width * probed.height > MAX_INPUT_DECODED_PIXELS) {
     throw new Error(`Decoded image is too large (maximum ${MAX_INPUT_DECODED_PIXELS.toLocaleString()} pixels).`);
   }
-  const originalWidth = probed.width;
-  const originalHeight = probed.height;
+  const encodedWidth = probed.width;
+  const encodedHeight = probed.height;
+  const orientation = probed.orientation || 1;
+  const [originalWidth, originalHeight] = displayOrientedImageSize(
+    encodedWidth,
+    encodedHeight,
+    orientation,
+  );
   const [desiredWidth, desiredHeight] = resizedSize(
     originalWidth,
     originalHeight,
@@ -5267,8 +5334,15 @@ async function decodeImageFile(file) {
     INPUT_CACHE_MAX_SIDE,
   );
   const needsBoundedDecode = desiredWidth !== originalWidth || desiredHeight !== originalHeight;
+  const [encodedDesiredWidth, encodedDesiredHeight] = resizedSize(
+    encodedWidth,
+    encodedHeight,
+    INPUT_CACHE_MAX_SIDE,
+    INPUT_CACHE_MAX_SIDE,
+  );
+  const swapsAxes = orientationSwapsImageAxes(orientation);
 
-  if (needsBoundedDecode && typeof ImageDecoder === "function") {
+  if (needsBoundedDecode && !swapsAxes && typeof ImageDecoder === "function") {
     let decoder = null;
     let frame = null;
     try {
@@ -5294,6 +5368,7 @@ async function decodeImageFile(file) {
             height,
             originalWidth,
             originalHeight,
+            orientation,
             mode: width <= desiredWidth && height <= desiredHeight
               ? "webcodecs-bounded"
               : "webcodecs-best-effort",
@@ -5315,19 +5390,56 @@ async function decodeImageFile(file) {
 
   if (typeof createImageBitmap === "function") {
     try {
-      const bitmap = needsBoundedDecode
-        ? await createImageBitmap(file, {
-          resizeWidth: desiredWidth,
-          resizeHeight: desiredHeight,
-          resizeQuality: "high",
-        })
+      const bitmapOptions = {};
+      if (swapsAxes) bitmapOptions.imageOrientation = "none";
+      if (needsBoundedDecode) {
+        bitmapOptions.resizeWidth = swapsAxes ? encodedDesiredWidth : desiredWidth;
+        bitmapOptions.resizeHeight = swapsAxes ? encodedDesiredHeight : desiredHeight;
+        bitmapOptions.resizeQuality = "high";
+      }
+      const bitmap = Object.keys(bitmapOptions).length > 0
+        ? await createImageBitmap(file, bitmapOptions)
         : await createImageBitmap(file);
+      if (swapsAxes && bitmap.width === encodedDesiredWidth && bitmap.height === encodedDesiredHeight) {
+        let canvas;
+        try {
+          canvas = normalizeExifOrientedBitmap(
+            bitmap,
+            orientation,
+            encodedDesiredWidth,
+            encodedDesiredHeight,
+            desiredWidth,
+            desiredHeight,
+          );
+        } finally {
+          bitmap.close?.();
+        }
+        return {
+          source: canvas,
+          width: desiredWidth,
+          height: desiredHeight,
+          originalWidth,
+          originalHeight,
+          orientation,
+          mode: needsBoundedDecode
+            ? "imagebitmap-bounded-exif-normalized"
+            : "imagebitmap-exif-normalized",
+          close: () => releaseCanvasBackingStore(canvas),
+        };
+      }
+      const decodedAspect = bitmap.width / Math.max(1, bitmap.height);
+      const expectedAspect = desiredWidth / Math.max(1, desiredHeight);
+      if (Math.abs(decodedAspect - expectedAspect) > Math.max(1e-6, expectedAspect * 0.001)) {
+        bitmap.close?.();
+        throw new Error(`decoded aspect ${decodedAspect.toFixed(6)} differs from expected ${expectedAspect.toFixed(6)}`);
+      }
       return {
         source: bitmap,
         width: bitmap.width,
         height: bitmap.height,
         originalWidth: originalWidth || bitmap.width,
         originalHeight: originalHeight || bitmap.height,
+        orientation,
         mode: needsBoundedDecode ? "imagebitmap-bounded" : "imagebitmap",
         close: () => bitmap.close?.(),
       };
@@ -5341,6 +5453,13 @@ async function decodeImageFile(file) {
     image = await loadImageElement(url);
     if (image.naturalWidth * image.naturalHeight > MAX_INPUT_DECODED_PIXELS) {
       throw new Error(`Decoded image is too large (maximum ${MAX_INPUT_DECODED_PIXELS.toLocaleString()} pixels).`);
+    }
+    const fallbackAspect = image.naturalWidth / Math.max(1, image.naturalHeight);
+    const expectedAspect = originalWidth / Math.max(1, originalHeight);
+    if (Math.abs(fallbackAspect - expectedAspect) > Math.max(1e-6, expectedAspect * 0.001)) {
+      throw new Error(
+        `Image orientation could not be decoded safely (expected aspect ${expectedAspect.toFixed(6)}, got ${fallbackAspect.toFixed(6)}).`,
+      );
     }
     const [width, height] = resizedSize(
       image.naturalWidth,
@@ -5361,6 +5480,7 @@ async function decodeImageFile(file) {
         height,
         originalWidth: image.naturalWidth,
         originalHeight: image.naturalHeight,
+        orientation,
         mode: "html-image-canvas",
         close() {
           releaseCanvasBackingStore(canvas);
@@ -28407,6 +28527,8 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
         cacheHeight: state.image.cacheHeight,
         inputCacheMaxSide: state.image.inputCacheMaxSide,
         inputCacheResized: state.image.inputCacheResized,
+        inputDecodeMode: state.image.inputDecodeMode,
+        inputOrientation: state.image.inputOrientation,
         fileName: state.image.fileName,
       } : null,
       running: state.running,
