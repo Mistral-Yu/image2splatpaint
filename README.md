@@ -28,7 +28,8 @@ stylization with trainable splats. `Planar Gaussian` and
 `GS Virtual Camera Sampling` focus on reproduction, while `Rectangle Splats`
 and `Brush Splats` use geometric shapes, strokes, and independent paint layers
 to create deliberately stylized results. For these stylization paths, visible
-character matters alongside numerical fidelity.
+character matters alongside numerical fidelity. They can also act as trainable,
+shape-aware blur filters that simplify fine detail into larger paint forms.
 
 ## Quick start
 
@@ -154,6 +155,8 @@ the selected point; final quality metrics always evaluate the RGB result.
 ## Exports
 
 - PNG exports the current rendered result for every algorithm.
+- Splat PNG resolution can use the training size, 2K, 4K, or a custom long side
+  while preserving the trained image aspect ratio.
 - Standard SH0 3DGS PLY is available for the two Gaussian algorithms.
   Rectangle and Brush use non-Gaussian kernels and therefore export PNG only.
 

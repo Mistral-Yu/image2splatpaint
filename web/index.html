@@ -37,48 +37,51 @@
             <small class="drop-zone-privacy">Loaded images stay in this browser; the app does not upload them.</small>
           </div>
         </div>
-        <div class="progress">
-          <div>
-            <span>iteration</span>
-            <strong id="stepText" data-testid="step-text">0 / 0</strong>
+        <details id="trainingStatusDetails" class="training-status-details" data-testid="training-status-details" open>
+          <summary data-testid="training-status-summary">Training status</summary>
+          <div class="progress">
+            <div>
+              <span>iteration</span>
+              <strong id="stepText" data-testid="step-text">0 / 0</strong>
+            </div>
+            <div>
+              <span>splats</span>
+              <strong id="splatText" data-testid="splat-text">-</strong>
+            </div>
+            <div>
+              <span>RGB L1</span>
+              <strong id="lossText" data-testid="loss-text">-</strong>
+            </div>
+            <div title="Global SSIM / local-region SSIM 10th percentile">
+              <span>SSIM global / local p10</span>
+              <strong id="ssimSummaryText" data-testid="ssim-summary-text"><output id="ssimText" data-testid="ssim-text">-</output> / <output id="regionalSsimText" data-testid="regional-ssim-text">-</output></strong>
+            </div>
+            <div title="RGB PSNR in sRGB signal values (0-1), reported in decibels">
+              <span>PSNR RGB</span>
+              <strong id="psnrText" data-testid="psnr-text">-</strong>
+            </div>
+            <div title="Current cached image size">
+              <span>image size</span>
+              <strong id="imageSizeText" data-testid="image-size-text">-</strong>
+            </div>
+            <div title="Low-alpha coverage (alpha below 0.99) / splats whose Gaussian footprint extends outside the image">
+              <span>low-alpha / outside</span>
+              <strong id="coverageText" data-testid="coverage-text">- / -</strong>
+            </div>
+            <div title="Current training iterations per second / active training time excluding pauses">
+              <span>speed / elapsed</span>
+              <strong id="trainingTimingText" data-testid="training-timing-text">- / -</strong>
+            </div>
+            <div title="Tracked persistent app-created GPU buffers: live content / allocated capacity. Transient command-local buffers and textures, browser or driver allocations, and system VRAM are excluded.">
+              <span>GPU active / reserved</span>
+              <strong id="gpuMemoryText" data-testid="gpu-memory-text">0 / 0 MB</strong>
+            </div>
+            <div>
+              <span>state</span>
+              <strong id="statusText" data-testid="status-text">idle</strong>
+            </div>
           </div>
-          <div>
-            <span>splats</span>
-            <strong id="splatText" data-testid="splat-text">-</strong>
-          </div>
-          <div>
-            <span>RGB L1</span>
-            <strong id="lossText" data-testid="loss-text">-</strong>
-          </div>
-          <div title="Global SSIM / local-region SSIM 10th percentile">
-            <span>SSIM global / local p10</span>
-            <strong id="ssimSummaryText" data-testid="ssim-summary-text"><output id="ssimText" data-testid="ssim-text">-</output> / <output id="regionalSsimText" data-testid="regional-ssim-text">-</output></strong>
-          </div>
-          <div title="RGB PSNR in sRGB signal values (0-1), reported in decibels">
-            <span>PSNR RGB</span>
-            <strong id="psnrText" data-testid="psnr-text">-</strong>
-          </div>
-          <div title="Current cached image size">
-            <span>image size</span>
-            <strong id="imageSizeText" data-testid="image-size-text">-</strong>
-          </div>
-          <div title="Low-alpha coverage (alpha below 0.99) / splats whose Gaussian footprint extends outside the image">
-            <span>low-alpha / outside</span>
-            <strong id="coverageText" data-testid="coverage-text">- / -</strong>
-          </div>
-          <div title="Current training iterations per second / active training time excluding pauses">
-            <span>speed / elapsed</span>
-            <strong id="trainingTimingText" data-testid="training-timing-text">- / -</strong>
-          </div>
-          <div title="Tracked persistent app-created GPU buffers: live content / allocated capacity. Transient command-local buffers and textures, browser or driver allocations, and system VRAM are excluded.">
-            <span>GPU active / reserved</span>
-            <strong id="gpuMemoryText" data-testid="gpu-memory-text">0 / 0 MB</strong>
-          </div>
-          <div>
-            <span>state</span>
-            <strong id="statusText" data-testid="status-text">idle</strong>
-          </div>
-        </div>
+        </details>
         <strong id="backendText" data-testid="backend-text" hidden>checking</strong>
         <strong id="boundaryText" data-testid="boundary-text" hidden>-</strong>
       </section>
@@ -276,7 +279,24 @@
                     <label title="Share of growth capacity assigned during P3. P1, P2, and P3 shares are normalized to 100% at Train start.">P3 growth share %<input id="stageGrowthP3" data-testid="stage-growth-p3" type="number" min="0" max="100" step="0.01" value="30" /></label>
                     <label>Splat growth interval<input id="densifyInterval" data-testid="densify-interval" type="number" min="1" max="1000" step="1" value="100" /></label>
                     <label>Growth per event %<input id="growthPercentage" data-testid="growth-percentage" type="number" min="0.1" max="100" step="0.1" value="35" /></label>
+                    <label title="Stop splat growth after this percentage of the complete training run. Later iterations only optimize the existing splats. Applied to every algorithm at the next Train start.">Growth apply until (%)<input id="growthApplyUntil" data-testid="growth-apply-until" type="number" min="0" max="100" step="1" value="90" /></label>
                     <label>Growth signal threshold<input id="growthSignalThreshold" data-testid="growth-signal-threshold" type="number" min="0" max="1000" step="0.00001" value="0.0003" /></label>
+                    <div class="growth-option">
+                      <label class="inline-option" title="Adds a soft 8x8 regional splat budget derived from display-sRGB pseudo-luminance gradient variance. It guides both parent selection and fallback reseeding without changing the Baseline path when disabled. Applied at the next Train start.">
+                        <input id="structureGuidedAllocation" data-testid="structure-guided-allocation" type="checkbox" checked />
+                        Structure-guided splat allocation
+                      </label>
+                    </div>
+                    <label title="Number of structure-allocation regions per axis. Higher values use smaller local regions. Applied at the next Train start.">Structure allocation grid<input id="structureRegionGrid" data-testid="structure-region-grid" type="number" min="4" max="16" step="1" value="8" /></label>
+                    <div class="growth-option">
+                      <label class="inline-option" title="Using the selected schedule, safely reuses low-utility splats from over-budget regions in under-budget high-residual regions. Events stop at Growth apply until so relocated splats retain optimization time. The total splat count stays fixed. Applied at the next Train start.">
+                        <input id="midTrainingOverdensityCorrection" data-testid="mid-training-overdensity-correction" type="checkbox" checked />
+                        Mid-training over-density correction
+                      </label>
+                    </div>
+                    <label title="Fixed interval uses the iteration value below. P2/P3 starts runs once when stage-aware growth enters P2 and once when it enters P3.">Over-density correction schedule<select id="overdensityCorrectionSchedule" data-testid="overdensity-correction-schedule"><option value="interval" selected>Fixed interval</option><option value="p2-p3-start">P2 / P3 starts</option></select></label>
+                    <label title="Iterations between over-density correction events. The default 1500 reproduces the former 50% event in a 3000-iteration run. Applied at the next Train start.">Over-density correction interval (iterations)<input id="overdensityCorrectionInterval" data-testid="overdensity-correction-interval" type="number" min="100" max="100000" step="100" value="1500" /></label>
+                    <label title="Target low-utility quantile considered in each region before safety, surplus, and conflict checks. Histogram bins and per-region rounding make the final eligible share approximate. 3.125% is the previous 1/32 behavior; 12.5% is 1/8. Applied at the next Train start.">Low-utility donor candidates (%)<input id="overdensityDonorPercent" data-testid="overdensity-donor-percent" type="number" min="0" max="100" step="0.125" value="3.125" /></label>
                     </div>
                   </section>
 
@@ -560,7 +580,7 @@
                   <div class="splat-shape-options" role="group" aria-label="Splat preview shape">
                     <button id="splatShapeGaussian" class="active" data-testid="splat-shape-gaussian" type="button" aria-pressed="true">Gaussian</button>
                     <button id="splatShapeRectangle" data-testid="splat-shape-rectangle" type="button" aria-pressed="false">Rectangle</button>
-                    <button id="splatShapeOpaqueBrush" data-testid="splat-shape-opaque-brush" type="button" aria-pressed="false">Brush Splats</button>
+                    <button id="splatShapeOpaqueBrush" data-testid="splat-shape-opaque-brush" type="button" aria-pressed="false">Brush</button>
                   </div>
                 </div>
                 <label class="adjustment-row" title="Multiplies each splat opacity. At 10x every splat opacity saturates, so its center blocks lower layers under standard alpha compositing.">Opacity <output id="splatOpacityValue">1.00x</output><input id="splatOpacity" data-testid="splat-opacity" type="range" min="0" max="10" step="0.01" value="1" /></label>
@@ -583,6 +603,22 @@
                 <button id="savePlyButton" data-testid="export-splat-button" class="export-button" type="button" disabled>Export PLY</button>
                 <div class="export-divider" role="separator"></div>
                 <p class="panel-message">Current Splats preview, including shape, effects, alpha background, and optional outside-image padding.</p>
+                <div class="export-resolution-controls" role="group" aria-label="Splat PNG resolution">
+                  <label title="Select the long-side resolution used only when saving the Splat PNG. Training size preserves the current export behavior.">
+                    PNG resolution
+                    <select id="pngExportResolution" data-testid="png-export-resolution">
+                      <option value="training" selected>Training size</option>
+                      <option value="2048">2K</option>
+                      <option value="4096">4K</option>
+                      <option value="custom">Custom</option>
+                    </select>
+                  </label>
+                  <label title="Long-side pixel count for the Splat PNG. Editing this value selects Custom automatically; aspect ratio is preserved.">
+                    Long side (px)
+                    <input id="pngExportLongSide" data-testid="png-export-long-side" type="number" min="32" max="8192" step="1" value="512" />
+                  </label>
+                </div>
+                <p id="pngExportResolutionStatus" class="panel-message" data-testid="png-export-resolution-status">Training size</p>
                 <button id="savePngButton" data-testid="export-png-button" class="export-button export-button-secondary" type="button" disabled>Save Splat PNG</button>
               </div>
               <p id="exportStatus" class="panel-message" data-testid="export-status" aria-live="polite">Finish training before export.</p>

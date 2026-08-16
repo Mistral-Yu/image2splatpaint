@@ -14,6 +14,9 @@ const SAMPLE_IMAGE_URL = new URL("../assets/source-images/generated-geometric-sa
 const EMBEDDED_SAMPLE_IMAGE_URL = globalThis.__IMAGE2SPLATPAINT_SAMPLE_JPEG || "";
 const DEFAULT_ITERATIONS = 3000;
 const DEFAULT_MAX_SIDE = 512;
+const DEFAULT_PNG_EXPORT_RESOLUTION = "training";
+const MIN_PNG_EXPORT_LONG_SIDE = 32;
+const MAX_PNG_EXPORT_LONG_SIDE = 8192;
 const DEFAULT_INITIAL_SPLATS = 128;
 const DEFAULT_FINAL_SPLATS = 8192;
 const MANUAL_SPLATS_MAX = 1048576;
@@ -46,7 +49,7 @@ const MIP_PIXEL_SIGMA = 0.35;
 const INITIAL_SPLAT_COVERAGE_MULTIPLIER = 2.0;
 const PHASE_ONE_MAX_PLANAR_SCALE = 0.32;
 const PHASE_ONE_SHAPE_LR_MULTIPLIER = 2.5;
-const DENSITY_EVENT_SLOTS = 33;
+const DENSITY_EVENT_SLOTS = 35;
 const PHASE33_IMPORTANCE_EMA = 0.05;
 const PHASE33_COVERAGE_TARGET = 0.05;
 const PHASE33_COVERAGE_LOSS_WEIGHT = 0.02;
@@ -56,7 +59,8 @@ const CURRICULUM_COARSE_MIN_SIDE = 1;
 const CURRICULUM_COARSE_DIVISOR = 4;
 const CURRICULUM_COARSE_FRACTION = 1 / 7;
 const CURRICULUM_DENSITY_FRACTION = 3 / 7;
-const CURRICULUM_GROWTH_FRACTION = 6 / 7;
+const DEFAULT_GROWTH_APPLY_UNTIL_FRACTION = 0.90;
+const CURRICULUM_TILT_LATE_FRACTION = 6 / 7;
 const DEFAULT_ADC_RECYCLE_RATE = 0.25;
 const DEFAULT_ADC_LATE_RECYCLE_RATE = 0.10;
 const DEFAULT_ADC_SPLIT_SIGNAL_THRESHOLD = 0.0003;
@@ -183,7 +187,11 @@ const VIRTUAL_CAMERA_METRIC_TILE_STRIDE = 20;
 // separable-filter scratch vec4s. This keeps the exact 11x11 derivative
 // separable instead of issuing 121 neighborhood reads per training pixel.
 const SSIM_WORKING_BYTES_PER_PIXEL = 144;
-const PHASE45_REGION_GRID = 8;
+const DEFAULT_STRUCTURE_REGION_GRID = 8;
+const MAX_STRUCTURE_REGION_GRID = 16;
+const DEFAULT_OVERDENSITY_DONOR_FRACTION = 1 / 32;
+const DEFAULT_OVERDENSITY_CORRECTION_INTERVAL = 1500;
+const PHASE45_REGION_GRID = MAX_STRUCTURE_REGION_GRID;
 const PHASE45_REGION_COUNT = PHASE45_REGION_GRID * PHASE45_REGION_GRID;
 const PHASE45_REGION_STRIDE = 24;
 const HIGH_ITERATION_CONFIRM = 50000;
@@ -1897,6 +1905,22 @@ function opaquePaintStructuralMutationAllowed(
   return !opaqueLayered || Math.round(step) < opaquePaintLateSettleStartStep(steps, fraction);
 }
 
+function effectiveGrowthApplyUntilFraction(
+  steps,
+  requestedFraction,
+  opaqueLayered,
+  opaquePaintSettleFraction = OPAQUE_PAINT_LATE_SETTLE_FRACTION,
+) {
+  const total = Math.max(1, Math.round(steps));
+  const requested = Math.max(0, Math.min(1, Number(requestedFraction) || 0));
+  if (!opaqueLayered || requested <= 0) return requested;
+  const lastMutableStep = Math.max(
+    0,
+    opaquePaintLateSettleStartStep(total, opaquePaintSettleFraction) - 1,
+  );
+  return Math.min(requested, lastMutableStep / total);
+}
+
 const sharedTiltOrbitRadiusCache = new Map();
 
 function sharedTiltOrbitRadius(
@@ -2263,6 +2287,9 @@ function phase39Variants() {
     const value = Number(document.querySelector(selector)?.value);
     return Number.isFinite(value) ? value : fallback;
   };
+  const choice = (name, allowed, fallback) => (
+    allowed.includes(String(overrides[name])) ? String(overrides[name]) : fallback
+  );
   const requestedStageShares = {
     p1: Math.max(0, finite("stageGrowthP1", controlNumber("#stageGrowthP1", DEFAULT_STAGE_GROWTH_SHARES.p1))),
     p2: Math.max(0, finite("stageGrowthP2", controlNumber("#stageGrowthP2", DEFAULT_STAGE_GROWTH_SHARES.p2))),
@@ -2278,6 +2305,13 @@ function phase39Variants() {
     singleSourceClaim: true,
     densifyInterval: Math.max(1, Math.min(1000, Math.round(finite("densifyInterval", Number(document.querySelector("#densifyInterval")?.value) || 100)))),
     growthFraction: Math.max(0.001, Math.min(1, finite("growthFraction", controlNumber("#growthPercentage", DEFAULT_GROWTH_FRACTION * 100) / 100))),
+    growthApplyUntilFraction: Math.max(0, Math.min(1, finite(
+      "growthApplyUntilFraction",
+      queryNumber(
+        "growth-apply-until",
+        controlNumber("#growthApplyUntil", DEFAULT_GROWTH_APPLY_UNTIL_FRACTION * 100) / 100,
+      ),
+    ))),
     growthSignalThreshold: Math.max(0, Math.min(1000, finite("growthSignalThreshold", controlNumber("#growthSignalThreshold", DEFAULT_GROWTH_SIGNAL_THRESHOLD)))),
     stageAwareGrowth: typeof overrides.stageAwareGrowth === "boolean"
       ? overrides.stageAwareGrowth
@@ -2285,6 +2319,36 @@ function phase39Variants() {
     stageGrowthShares,
     requestedStageGrowthShares: requestedStageShares,
     qaGrowthComparisons: QA_RUNTIME_ENABLED && overrides.qaGrowthComparisons === true,
+    structureGuidedAllocation: typeof overrides.structureGuidedAllocation === "boolean"
+      ? overrides.structureGuidedAllocation
+      : Boolean(document.querySelector("#structureGuidedAllocation")?.checked),
+    structureLumaSpace: choice(
+      "structureLumaSpace",
+      ["linear-srgb", "srgb-baseline"],
+      "srgb-baseline",
+    ),
+    structureRegionGrid: Math.max(4, Math.min(MAX_STRUCTURE_REGION_GRID, Math.round(finite(
+      "structureRegionGrid",
+      controlNumber("#structureRegionGrid", DEFAULT_STRUCTURE_REGION_GRID),
+    )))),
+    midTrainingOverdensityCorrection: typeof overrides.midTrainingOverdensityCorrection === "boolean"
+      ? overrides.midTrainingOverdensityCorrection
+      : Boolean(document.querySelector("#midTrainingOverdensityCorrection")?.checked),
+    overdensityCorrectionInterval: Math.max(100, Math.min(100000, Math.round(finite(
+      "overdensityCorrectionInterval",
+      controlNumber("#overdensityCorrectionInterval", DEFAULT_OVERDENSITY_CORRECTION_INTERVAL),
+    )))),
+    overdensityCorrectionSchedule: choice(
+      "overdensityCorrectionSchedule",
+      ["interval", "p2-p3-start"],
+      ["interval", "p2-p3-start"].includes(
+        document.querySelector("#overdensityCorrectionSchedule")?.value,
+      ) ? document.querySelector("#overdensityCorrectionSchedule").value : "interval",
+    ),
+    overdensityDonorFraction: Math.max(0, Math.min(1, finite(
+      "overdensityDonorFraction",
+      controlNumber("#overdensityDonorPercent", DEFAULT_OVERDENSITY_DONOR_FRACTION * 100) / 100,
+    ))),
     // The ADC-specialized split window and recycle reset were retired after
     // paired 7000-step front/virtual tests showed no repeatable net benefit.
     adcSplitEnabled: false,
@@ -2357,7 +2421,7 @@ function virtualTiltStepSpec(step, stage, steps = 7000, variants = null) {
       angleDegrees: 0,
     };
   }
-  const angleDegrees = stage === "mid" ? 5 : progress < CURRICULUM_GROWTH_FRACTION ? 15 : 30;
+  const angleDegrees = stage === "mid" ? 5 : progress < CURRICULUM_TILT_LATE_FRACTION ? 15 : 30;
   const event = Math.max(0, Math.floor(step / variants.interval) - 1);
   const [pitchDirection, yawDirection] = VIRTUAL_TILT_DIRECTIONS[event % VIRTUAL_TILT_DIRECTIONS.length];
   const pitchDegrees = pitchDirection * angleDegrees;
@@ -3003,6 +3067,12 @@ const els = {
   stageGrowthP1: document.querySelector("#stageGrowthP1"),
   stageGrowthP2: document.querySelector("#stageGrowthP2"),
   stageGrowthP3: document.querySelector("#stageGrowthP3"),
+  structureGuidedAllocation: document.querySelector("#structureGuidedAllocation"),
+  structureRegionGrid: document.querySelector("#structureRegionGrid"),
+  midTrainingOverdensityCorrection: document.querySelector("#midTrainingOverdensityCorrection"),
+  overdensityCorrectionSchedule: document.querySelector("#overdensityCorrectionSchedule"),
+  overdensityCorrectionInterval: document.querySelector("#overdensityCorrectionInterval"),
+  overdensityDonorPercent: document.querySelector("#overdensityDonorPercent"),
   scaleLearningRate: document.querySelector("#scaleLearningRate"),
   rotationLearningRate: document.querySelector("#rotationLearningRate"),
   thetaAlignRate: document.querySelector("#thetaAlignRate"),
@@ -3012,6 +3082,7 @@ const els = {
   detailCoherence: document.querySelector("#detailCoherence"),
   densifyInterval: document.querySelector("#densifyInterval"),
   growthPercentage: document.querySelector("#growthPercentage"),
+  growthApplyUntil: document.querySelector("#growthApplyUntil"),
   growthSignalThreshold: document.querySelector("#growthSignalThreshold"),
   retryWebGpuButton: document.querySelector("#retryWebGpuButton"),
   gpuLimitText: document.querySelector("#gpuLimitText"),
@@ -3039,6 +3110,9 @@ const els = {
   resetButton: document.querySelector("#resetButton"),
   savePngButton: document.querySelector("#savePngButton"),
   savePlyButton: document.querySelector("#savePlyButton"),
+  pngExportResolution: document.querySelector("#pngExportResolution"),
+  pngExportLongSide: document.querySelector("#pngExportLongSide"),
+  pngExportResolutionStatus: document.querySelector("#pngExportResolutionStatus"),
   stepText: document.querySelector("#stepText"),
   splatText: document.querySelector("#splatText"),
   imageSizeText: document.querySelector("#imageSizeText"),
@@ -3054,6 +3128,7 @@ const els = {
   webGpuNotice: document.querySelector("#webGpuNotice"),
   webGpuNoticeText: document.querySelector("#webGpuNoticeText"),
   statusText: document.querySelector("#statusText"),
+  trainingStatusDetails: document.querySelector("#trainingStatusDetails"),
   log: document.querySelector("#log"),
   clearLogButton: document.querySelector("#clearLogButton"),
   logTabs: document.querySelector("#logTabs"),
@@ -3681,6 +3756,12 @@ function publishState() {
   data.stageAwareGrowthInput = String(Boolean(els.stageAwareGrowth.checked));
   const stageShares = phase39Variants().stageGrowthShares;
   data.stageGrowthShares = `${(stageShares.p1 * 100).toFixed(2)},${(stageShares.p2 * 100).toFixed(2)},${(stageShares.p3 * 100).toFixed(2)}`;
+  data.structureGuidedAllocationInput = String(Boolean(els.structureGuidedAllocation.checked));
+  data.structureRegionGridInput = els.structureRegionGrid.value;
+  data.midTrainingOverdensityCorrectionInput = String(Boolean(els.midTrainingOverdensityCorrection.checked));
+  data.overdensityCorrectionScheduleInput = els.overdensityCorrectionSchedule.value;
+  data.overdensityCorrectionIntervalInput = els.overdensityCorrectionInterval.value;
+  data.overdensityDonorPercentInput = els.overdensityDonorPercent.value;
   data.scaleLearningRateInput = els.scaleLearningRate.value;
   data.rotationLearningRateInput = els.rotationLearningRate.value;
   data.thetaAlignRateInput = els.thetaAlignRate.value;
@@ -3691,6 +3772,7 @@ function publishState() {
   data.detailCoherenceInput = els.detailCoherence.value;
   data.densifyIntervalInput = els.densifyInterval.value;
   data.growthPercentageInput = els.growthPercentage.value;
+  data.growthApplyUntilInput = els.growthApplyUntil.value;
   data.growthSignalThresholdInput = els.growthSignalThreshold.value;
   data.subgroupExactBackward = String(Boolean(state.webgpu.renderer?.subgroupExactBackwardEnabled));
   data.subgroupsAvailable = String(Boolean(state.webgpu.subgroups));
@@ -4887,21 +4969,39 @@ async function resizeLoadedImageToMaxSide(maxSide) {
   return true;
 }
 
-async function loadFile(file) {
-  if (trainingLifecycleInputLocked()) {
-    throw new Error("Stop training before loading another image.");
-  }
+function beginImageLoad(message = "Loading image...") {
   invalidateTrainingRun("image load");
   destroyTiltViewer({ restoreCanvas: true });
+  const loadGeneration = state.imageLoadGeneration + 1;
+  state.imageLoadGeneration = loadGeneration;
+  state.imageLoading = true;
+  setStatus("loading image");
+  setTrainingMessage(message);
+  publishState();
+  return loadGeneration;
+}
+
+function finishImageLoad(loadGeneration) {
+  if (loadGeneration !== state.imageLoadGeneration) return;
+  state.imageLoading = false;
+  publishState();
+}
+
+async function loadFile(file, { loadGeneration: inheritedLoadGeneration = null } = {}) {
+  const inheritedLoad = Number.isFinite(inheritedLoadGeneration);
+  if (!inheritedLoad && trainingLifecycleInputLocked()) {
+    throw new Error("Stop training before loading another image.");
+  }
+  if (inheritedLoad && inheritedLoadGeneration !== state.imageLoadGeneration) return false;
   if (!file?.type?.startsWith("image/")) {
     throw new Error("Choose an image file.");
   }
   if (file.size > MAX_INPUT_FILE_BYTES) {
     throw new Error(`Image file is too large (maximum ${Math.round(MAX_INPUT_FILE_BYTES / MB)} MB).`);
   }
-  const loadGeneration = state.imageLoadGeneration + 1;
-  state.imageLoadGeneration = loadGeneration;
-  state.imageLoading = true;
+  const loadGeneration = inheritedLoad
+    ? inheritedLoadGeneration
+    : beginImageLoad(`Loading ${file.name}...`);
   setStatus("loading image");
   setTrainingMessage(`Loading ${file.name}...`);
   publishState();
@@ -4999,10 +5099,7 @@ async function loadFile(file) {
   } finally {
     releaseDecoded();
     releaseCanvasBackingStore(cacheCanvas);
-    if (loadGeneration === state.imageLoadGeneration) {
-      state.imageLoading = false;
-      publishState();
-    }
+    finishImageLoad(loadGeneration);
   }
 }
 
@@ -5302,9 +5399,16 @@ function imagePathCandidates(value) {
 async function loadPathImage() {
   const path = els.pathInput.value;
   const name = path.split(/[\\/]/).filter(Boolean).pop() || "path-image";
-  const file = await loadFirstImagePath(imagePathCandidates(path), name);
-  state.lastInputMode = "path";
-  await loadFile(file);
+  const candidates = imagePathCandidates(path);
+  const loadGeneration = beginImageLoad(`Loading ${name}...`);
+  try {
+    const file = await loadFirstImagePath(candidates, name);
+    if (loadGeneration !== state.imageLoadGeneration) return false;
+    state.lastInputMode = "path";
+    return await loadFile(file, { loadGeneration });
+  } finally {
+    finishImageLoad(loadGeneration);
+  }
 }
 
 async function loadFirstImagePath(urls, name) {
@@ -5395,9 +5499,15 @@ async function loadGeneratedSample() {
     SAMPLE_IMAGE_URL,
     ...imagePathCandidates(path),
   ])];
-  const file = await loadFirstImagePath(urls, "generated-geometric-sample.jpg");
-  state.lastInputMode = "sample";
-  await loadFile(file);
+  const loadGeneration = beginImageLoad("Loading sample image...");
+  try {
+    const file = await loadFirstImagePath(urls, "generated-geometric-sample.jpg");
+    if (loadGeneration !== state.imageLoadGeneration) return false;
+    state.lastInputMode = "sample";
+    return await loadFile(file, { loadGeneration });
+  } finally {
+    finishImageLoad(loadGeneration);
+  }
 }
 
 function showCanvas(kind) {
@@ -5859,6 +5969,197 @@ function adaptiveBspImportanceGrid(image, count) {
   return { width, height, importance };
 }
 
+const structureGuidedRegionProfileCache = new WeakMap();
+
+// Project-native allocator: it keeps the existing standard-alpha renderer,
+// layer model, growth schedule, and optimizer, and only adds a soft regional
+// destination budget when the user enables the checkbox.
+function computeStructureGuidedRegionProfile(
+  image,
+  { lumaSpace = "srgb-baseline", regionGrid = DEFAULT_STRUCTURE_REGION_GRID } = {},
+) {
+  const started = performance.now();
+  const lumaAt = (x, y) => {
+    const px = Math.max(0, Math.min(image.width - 1, x));
+    const py = Math.max(0, Math.min(image.height - 1, y));
+    const offset = (py * image.width + px) * 3;
+    if (lumaSpace === "srgb-baseline") {
+      return 0.299 * image.rgb[offset] +
+        0.587 * image.rgb[offset + 1] +
+        0.114 * image.rgb[offset + 2];
+    }
+    return 0.2126729 * srgbSignalToLinear(image.rgb[offset]) +
+      0.7151522 * srgbSignalToLinear(image.rgb[offset + 1]) +
+      0.0721750 * srgbSignalToLinear(image.rgb[offset + 2]);
+  };
+  const smoothLumaAt = (x, y) => (
+    lumaAt(x - 1, y - 1) + 2 * lumaAt(x, y - 1) + lumaAt(x + 1, y - 1) +
+    2 * lumaAt(x - 1, y) + 4 * lumaAt(x, y) + 2 * lumaAt(x + 1, y) +
+    lumaAt(x - 1, y + 1) + 2 * lumaAt(x, y + 1) + lumaAt(x + 1, y + 1)
+  ) / 16;
+  const measureGrid = (gridSize) => {
+    const raw = new Float64Array(gridSize * gridSize);
+    const sampleGrid = 8;
+    for (let regionY = 0; regionY < gridSize; regionY += 1) {
+      const y0 = Math.floor(regionY * image.height / gridSize);
+      const y1 = Math.max(y0 + 1, Math.floor((regionY + 1) * image.height / gridSize));
+      for (let regionX = 0; regionX < gridSize; regionX += 1) {
+        const x0 = Math.floor(regionX * image.width / gridSize);
+        const x1 = Math.max(x0 + 1, Math.floor((regionX + 1) * image.width / gridSize));
+        let sum = 0;
+        let sumSquared = 0;
+        let samples = 0;
+        for (let sy = 0; sy < sampleGrid; sy += 1) {
+          const y = Math.min(image.height - 1, Math.floor(y0 + (sy + 0.5) * (y1 - y0) / sampleGrid));
+          for (let sx = 0; sx < sampleGrid; sx += 1) {
+            const x = Math.min(image.width - 1, Math.floor(x0 + (sx + 0.5) * (x1 - x0) / sampleGrid));
+            const gx = 0.5 * (smoothLumaAt(x + 1, y) - smoothLumaAt(x - 1, y));
+            const gy = 0.5 * (smoothLumaAt(x, y + 1) - smoothLumaAt(x, y - 1));
+            const magnitude = Math.hypot(gx, gy);
+            sum += magnitude;
+            sumSquared += magnitude * magnitude;
+            samples += 1;
+          }
+        }
+        const mean = sum / Math.max(1, samples);
+        raw[regionY * gridSize + regionX] = Math.sqrt(Math.max(
+          0,
+          sumSquared / Math.max(1, samples) - mean * mean,
+        ));
+      }
+    }
+    const sorted = Array.from(raw).sort((a, b) => a - b);
+    const low = percentileSorted(sorted, 0.1);
+    const high = percentileSorted(sorted, 0.9);
+    const demand = Float64Array.from(raw, (value) => Math.max(
+      0,
+      Math.min(1, (Math.log1p(value * 4096) - Math.log1p(low * 4096)) /
+        Math.max(1e-9, Math.log1p(high * 4096) - Math.log1p(low * 4096))),
+    ));
+    return { raw, demand, percentile10: low, percentile90: high };
+  };
+  const child = measureGrid(regionGrid);
+  const profile = {
+    ...child,
+    lumaSpace,
+    regionGrid,
+    regionMode: `${regionGrid}x${regionGrid}`,
+    processingMs: performance.now() - started,
+  };
+  return profile;
+}
+
+function structureGuidedRegionProfile(image, options = null) {
+  const variants = options || phase39Variants();
+  const lumaSpace = variants.structureLumaSpace || "srgb-baseline";
+  const regionGrid = variants.structureRegionGrid || DEFAULT_STRUCTURE_REGION_GRID;
+  let cachedByVariant = structureGuidedRegionProfileCache.get(image);
+  if (!cachedByVariant) {
+    cachedByVariant = new Map();
+    structureGuidedRegionProfileCache.set(image, cachedByVariant);
+  }
+  const key = `${lumaSpace}:${regionGrid}`;
+  if (!cachedByVariant.has(key)) {
+    cachedByVariant.set(key, computeStructureGuidedRegionProfile(image, { lumaSpace, regionGrid }));
+  }
+  return cachedByVariant.get(key);
+}
+
+function structureGuidedRegionQuotas(image, targetCount, finalCount, options = null) {
+  const profile = structureGuidedRegionProfile(image, options);
+  const regionCount = profile.regionGrid * profile.regionGrid;
+  const progress = Math.max(0, Math.min(1, targetCount / Math.max(1, finalCount)));
+  const structureStrength = 0.88 - 0.06 * progress;
+  const detailMass = Array.from(profile.demand, (value) => 0.02 + value ** 1.75);
+  const detailTotal = detailMass.reduce((sum, value) => sum + value, 0);
+  const exact = detailMass.map((value) => targetCount * (
+    (1 - structureStrength) / regionCount +
+    structureStrength * value / Math.max(1e-9, detailTotal)
+  ));
+  const quotas = Uint32Array.from(exact, Math.floor);
+  let remaining = targetCount - quotas.reduce((sum, value) => sum + value, 0);
+  const fractions = exact.map((value, region) => ({ region, fraction: value - Math.floor(value) }))
+    .sort((a, b) => b.fraction - a.fraction || a.region - b.region);
+  for (let i = 0; i < remaining; i += 1) quotas[fractions[i].region] += 1;
+  return { ...profile, quotas, structureStrength };
+}
+
+function structureGuidedRegionControl(image, targetCount, finalCount) {
+  const allocation = structureGuidedRegionQuotas(image, targetCount, finalCount);
+  const control = new Uint32Array(PHASE45_REGION_COUNT * PHASE45_REGION_STRIDE);
+  const regionCount = allocation.regionGrid * allocation.regionGrid;
+  for (let region = 0; region < regionCount; region += 1) {
+    const base = region * PHASE45_REGION_STRIDE;
+    control[base + 1] = Math.round(Math.min(1, allocation.demand[region]) * 65535);
+    control[base + 9] = allocation.quotas[region];
+  }
+  return { control, allocation };
+}
+
+function structureGuidedProfileBenchmark(image = state.image, repetitions = 25) {
+  if (!image) throw new Error("Load an image before benchmarking structure profiles.");
+  const variants = ["linear-srgb", "srgb-baseline"].map((lumaSpace) => ({ lumaSpace }));
+  return variants.map((variant) => {
+    const samples = [];
+    for (let i = 0; i < Math.max(1, Math.round(repetitions)); i += 1) {
+      samples.push(computeStructureGuidedRegionProfile(image, variant).processingMs);
+    }
+    samples.sort((a, b) => a - b);
+    return {
+      ...variant,
+      repetitions: samples.length,
+      median_ms: percentileSorted(samples, 0.5),
+      p10_ms: percentileSorted(samples, 0.1),
+      p90_ms: percentileSorted(samples, 0.9),
+    };
+  });
+}
+
+function sourceDetailSplatDistribution(image, params) {
+  const profile = structureGuidedRegionProfile(image);
+  const regionGrid = profile.regionGrid;
+  const regionCount = regionGrid * regionGrid;
+  const demand = Array.from(profile.demand);
+  const counts = new Uint32Array(regionCount);
+  for (let index = 0; index < params.count; index += 1) {
+    const x = Math.max(0, Math.min(0.999999, params.xy[index * 2] * 0.5 + 0.5));
+    const y = Math.max(0, Math.min(0.999999, params.xy[index * 2 + 1] * 0.5 + 0.5));
+    const regionX = Math.min(regionGrid - 1, Math.floor(x * regionGrid));
+    const regionY = Math.min(regionGrid - 1, Math.floor(y * regionGrid));
+    counts[regionY * regionGrid + regionX] += 1;
+  }
+  const regions = demand.map((value, region) => ({ region, demand: value, count: counts[region] }))
+    .sort((a, b) => a.demand - b.demand || a.region - b.region);
+  const quartileSize = Math.max(1, Math.floor(regions.length / 4));
+  const bottom = regions.slice(0, quartileSize);
+  const top = regions.slice(-quartileSize);
+  const meanCount = (items) => items.reduce((sum, item) => sum + item.count, 0) / items.length;
+  const flatMean = meanCount(bottom);
+  const detailMean = meanCount(top);
+  const countMean = params.count / regionCount;
+  const demandMean = demand.reduce((sum, value) => sum + value, 0) / demand.length;
+  let covariance = 0;
+  let countVariance = 0;
+  let demandVariance = 0;
+  for (let region = 0; region < regionCount; region += 1) {
+    const countDelta = counts[region] - countMean;
+    const demandDelta = demand[region] - demandMean;
+    covariance += countDelta * demandDelta;
+    countVariance += countDelta * countDelta;
+    demandVariance += demandDelta * demandDelta;
+  }
+  return {
+    grid: [regionGrid, regionGrid],
+    count: params.count,
+    flat_quartile_mean_count: flatMean,
+    detail_quartile_mean_count: detailMean,
+    detail_to_flat_count_ratio: detailMean / Math.max(1e-9, flatMean),
+    demand_count_correlation: covariance / Math.max(1e-9, Math.sqrt(countVariance * demandVariance)),
+    minimum_region_count: Math.min(...counts),
+    maximum_region_count: Math.max(...counts),
+  };
+}
+
 function adaptiveBspIntegral(grid, valueAt) {
   const stride = grid.width + 1;
   const values = new Float64Array(stride * (grid.height + 1));
@@ -6151,6 +6452,76 @@ function previewPaddingSpec(image, params, enabled = els.outsidePreviewToggle.ch
     scaleY: image.height / height,
     bytes: Math.max(0, (width * height - image.width * image.height) * 4),
   };
+}
+
+function buildPreviewTileIndexData(image, params, options = {}) {
+  const preview = previewPaddingSpec(image, params, Boolean(options.outside));
+  const tileCols = Math.ceil(preview.width / TILE_SIZE);
+  const tileRows = Math.ceil(preview.height / TILE_SIZE);
+  const tileCount = tileCols * tileRows;
+  const counts = new Uint32Array(tileCount);
+  const bounds = new Int32Array(params.count * 4);
+  const aspectStretch = Math.sqrt(Math.max(0.000001, Number(options.localAspectRatio) || 1));
+  const scaleMultiplier = Number.isFinite(Number(options.splatScaleMultiplier))
+    ? Math.max(0, Number(options.splatScaleMultiplier))
+    : 1;
+  const useEwa = phase33Variants().ewa2x2;
+  const pixelSigma = MIP_PIXEL_SIGMA * 2 / Math.max(image.width, image.height);
+  const pixelPadX = useEwa && image.width > 1 ? 0.5 / (image.width - 1) : 0;
+  const pixelPadY = useEwa && image.height > 1 ? 0.5 / (image.height - 1) : 0;
+  for (let index = 0; index < params.count; index += 1) {
+    const theta = params.theta?.[index] || 0;
+    const c = Math.abs(Math.cos(theta));
+    const s = Math.abs(Math.sin(theta));
+    const baseX = Math.max(0.0001, params.scale[index * 2] * scaleMultiplier * aspectStretch);
+    const baseY = Math.max(0.0001, params.scale[index * 2 + 1] * scaleMultiplier / aspectStretch);
+    const effectiveX = useEwa ? baseX : Math.hypot(baseX, pixelSigma);
+    const effectiveY = useEwa ? baseY : Math.hypot(baseY, pixelSigma);
+    const radiusX = (RENDER_SIGMA * (c * effectiveX + s * effectiveY) + pixelPadX) * preview.scaleX;
+    const radiusY = (RENDER_SIGMA * (s * effectiveX + c * effectiveY) + pixelPadY) * preview.scaleY;
+    const centerX = params.xy[index * 2] * preview.scaleX;
+    const centerY = params.xy[index * 2 + 1] * preview.scaleY;
+    const minX = Math.max(0, Math.min(preview.width - 1, Math.floor(((centerX - radiusX) * 0.5 + 0.5) * Math.max(0, preview.width - 1))));
+    const maxX = Math.max(0, Math.min(preview.width - 1, Math.ceil(((centerX + radiusX) * 0.5 + 0.5) * Math.max(0, preview.width - 1))));
+    const minY = Math.max(0, Math.min(preview.height - 1, Math.floor(((centerY - radiusY) * 0.5 + 0.5) * Math.max(0, preview.height - 1))));
+    const maxY = Math.max(0, Math.min(preview.height - 1, Math.ceil(((centerY + radiusY) * 0.5 + 0.5) * Math.max(0, preview.height - 1))));
+    const minTileX = Math.floor(minX / TILE_SIZE);
+    const maxTileX = Math.floor(maxX / TILE_SIZE);
+    const minTileY = Math.floor(minY / TILE_SIZE);
+    const maxTileY = Math.floor(maxY / TILE_SIZE);
+    bounds.set([minTileX, maxTileX, minTileY, maxTileY], index * 4);
+    for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
+      for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+        counts[tileY * tileCols + tileX] += 1;
+      }
+    }
+  }
+  const offsets = new Uint32Array(tileCount + 1);
+  for (let tile = 0; tile < tileCount; tile += 1) offsets[tile + 1] = offsets[tile] + counts[tile];
+  const indices = new Uint32Array(offsets[tileCount]);
+  const cursors = offsets.slice(0, tileCount);
+  for (let index = 0; index < params.count; index += 1) {
+    const offset = index * 4;
+    for (let tileY = bounds[offset + 2]; tileY <= bounds[offset + 3]; tileY += 1) {
+      for (let tileX = bounds[offset]; tileX <= bounds[offset + 1]; tileX += 1) {
+        const tile = tileY * tileCols + tileX;
+        indices[cursors[tile]++] = index;
+      }
+    }
+  }
+  const comparator = options.splatSmallFirstOrder
+    ? (a, b) => splatPreviewOrderComparator(a, b, params)
+    : params.layerOrderEnabled
+      ? (a, b) => layerOrderComparator(a, b, params)
+      : null;
+  if (comparator) {
+    for (let tile = 0; tile < tileCount; tile += 1) {
+      if (offsets[tile + 1] - offsets[tile] > 1) {
+        indices.subarray(offsets[tile], offsets[tile + 1]).sort(comparator);
+      }
+    }
+  }
+  return { preview, offsets, indices };
 }
 
 function constrainSplat(
@@ -7636,8 +8007,35 @@ function experimentalDensifySteps(steps) {
   return curriculumStageStep(steps, CURRICULUM_DENSITY_FRACTION);
 }
 
-function experimentalGrowthSteps(steps) {
-  return curriculumStageStep(steps, CURRICULUM_GROWTH_FRACTION);
+function experimentalGrowthSteps(steps, fraction = phase39Variants().growthApplyUntilFraction) {
+  const boundedFraction = Math.max(0, Math.min(1, Number(fraction) || 0));
+  return boundedFraction > 0 ? curriculumStageStep(steps, boundedFraction) : 0;
+}
+
+function overdensityCorrectionScheduleSteps(steps, growthSteps, settings) {
+  const horizon = Math.max(0, Math.round(growthSteps));
+  if (!settings?.midTrainingOverdensityCorrection || horizon <= 0) return [];
+  if (settings.overdensityCorrectionSchedule === "p2-p3-start") {
+    return [
+      experimentalCoarseSteps(steps) + 1,
+      experimentalDensifySteps(steps) + 1,
+    ].filter((step, index, values) => step <= horizon && values.indexOf(step) === index);
+  }
+  const interval = Math.max(100, Math.round(
+    settings.overdensityCorrectionInterval || DEFAULT_OVERDENSITY_CORRECTION_INTERVAL,
+  ));
+  const scheduled = [];
+  for (let step = interval; step <= horizon; step += interval) scheduled.push(step);
+  return scheduled;
+}
+
+function growthEventScheduled(step, densitySteps, growthSteps, settings) {
+  const current = Math.max(1, Math.round(step));
+  const horizon = Math.max(0, Math.round(growthSteps));
+  if (!settings?.densityEventsEnabled || horizon <= 0 || current > horizon) return false;
+  if (current === horizon) return true;
+  return current > densifyWarmupSteps(densitySteps) &&
+    current % Math.max(1, Math.round(settings?.densifyInterval || 1)) === 0;
 }
 
 function curriculumTrainingStage(step, steps, variants, coarseImage, midImage) {
@@ -7671,19 +8069,16 @@ function opaquePaintVisibilityCompactionDue(step, steps, settings) {
     steps,
     settings?.opaquePaintSettleFraction,
   );
-  const grace = compactionStep - experimentalGrowthSteps(steps);
+  const growthEnd = experimentalGrowthSteps(steps, settings?.growthApplyUntilFraction);
+  if (growthEnd > 0 && compactionStep >= growthEnd) return false;
+  const grace = compactionStep - growthEnd;
   return grace >= opaquePaintVisibilityGraceSteps(steps) && Math.round(step) === compactionStep;
 }
 
 function currentContributionCompactionStep(steps, settings) {
   const total = Math.max(1, Math.round(steps));
   const measurementWindowSteps = Math.max(1, Math.round(settings?.measurementWindowSteps || 1));
-  // Opaque Rectangle/Brush runs reserve their final settle tail for continuous
-  // optimization.  Other algorithms retain the existing last-step-minus-one
-  // deadline, including the full virtual-camera observation window.
-  const deadline = settings?.opaqueLayered
-    ? opaquePaintVisibilityCompactionStep(total, settings?.opaquePaintSettleFraction)
-    : total - 1;
+  const deadline = currentContributionCompactionDeadline(total, settings);
   const requestedReset = Math.max(1, Math.floor(total * clampNumber(
     settings?.startFraction,
     CURRENT_CONTRIBUTION_MIN_COMPACTION_FRACTION,
@@ -7701,6 +8096,19 @@ function currentContributionCompactionResetStep(steps, settings) {
   return Math.max(1, target - window + 1);
 }
 
+function currentContributionCompactionDeadline(steps, settings) {
+  const total = Math.max(1, Math.round(steps));
+  const structuralDeadline = settings?.opaqueLayered
+    ? opaquePaintVisibilityCompactionStep(total, settings?.opaquePaintSettleFraction)
+    : total - 1;
+  const growthEnd = experimentalGrowthSteps(total, settings?.growthApplyUntilFraction);
+  // The final growth event closes active cardinality. Do not physically remove
+  // splats at or after that milestone; the remaining tail optimizes a fixed set.
+  return growthEnd > 0
+    ? Math.max(0, Math.min(structuralDeadline, growthEnd - 1))
+    : structuralDeadline;
+}
+
 function currentContributionCompactionSchedule(step, steps, settings) {
   const current = Math.max(1, Math.round(Number(step) || 1));
   const firstEvent = currentContributionCompactionStep(steps, settings);
@@ -7710,10 +8118,7 @@ function currentContributionCompactionSchedule(step, steps, settings) {
     window,
     Math.round(settings?.intervalSteps || CURRENT_CONTRIBUTION_COMPACTION_INTERVAL),
   );
-  const total = Math.max(1, Math.round(steps));
-  const deadline = settings?.opaqueLayered
-    ? opaquePaintVisibilityCompactionStep(total, settings?.opaquePaintSettleFraction)
-    : total - 1;
+  const deadline = currentContributionCompactionDeadline(steps, settings);
   const resetOffset = current - firstReset;
   const eventOffset = current - firstEvent;
   return {
@@ -7867,7 +8272,10 @@ function densityGpuConfig({ image, count, targetCount, step, steps, layout, maxA
   const phase39 = phase39Variants();
   const phase45 = phase45Variants();
   const layerEfficiency = layerEfficiencyVariants();
-  const phase45DonorActive = phase45.donorEligibility && (!phase45.firstResetOnly || step <= schedule.resetInterval);
+  const productOverdensityCorrection = mode === 3 && phase39.midTrainingOverdensityCorrection;
+  const phase45DonorActive = productOverdensityCorrection || (
+    phase45.donorEligibility && (!phase45.firstResetOnly || step <= schedule.resetInterval)
+  );
   const detail = selectedLearningRates();
   const trainState = state.webgpu.renderer?.trainState;
   const trainingStage = curriculumTrainingStage(step, steps, variants, trainState?.coarseImage, trainState?.midImage);
@@ -7959,6 +8367,16 @@ function densityGpuConfig({ image, count, targetCount, step, steps, layout, maxA
   // separate shader contract and rewrites them before optimizer dispatch.
   config[66] = state.params?.virtualCameraSamplingEnabled ? 1 : 0;
   config[67] = state.params?.virtualDepthEnabled ? 1 : 0;
+  config[68] = phase39.structureGuidedAllocation ? 1 : 0;
+  config[69] = phase39.structureRegionGrid;
+  if (productOverdensityCorrection) {
+    // The region quantile is already the move cap. Do not apply a second
+    // random ADC sampling gate to the independently safe donor cohort.
+    config[46] = phase39.overdensityDonorFraction;
+    config[47] = 1;
+    config[50] = 1;
+    config[51] = 1;
+  }
   return { schedule, config };
 }
 
@@ -7975,6 +8393,15 @@ function splatTargetForGrowth(currentCount, finalCount, growthFraction = DEFAULT
   return normalizeActiveSplatCount(Math.min(finalCount, currentCount + added), currentCount);
 }
 
+function remainingGrowthEventCount(step, growthEnd, densifyInterval) {
+  const current = Math.max(1, Math.round(step));
+  const end = Math.max(current, Math.round(growthEnd));
+  const interval = Math.max(1, Math.round(densifyInterval));
+  if (current >= end) return 1;
+  const regularAfterCurrent = Math.max(0, Math.floor((end - 1) / interval) - Math.floor(current / interval));
+  return 1 + regularAfterCurrent + 1; // current event + regular events + terminal H event
+}
+
 function growthSchedulePlan({
   step,
   steps,
@@ -7982,6 +8409,7 @@ function growthSchedulePlan({
   currentCount,
   finalCount,
   growthFraction,
+  growthApplyUntilFraction = phase39Variants().growthApplyUntilFraction,
   densifyInterval,
   stageAware,
   stageGrowthShares = Object.fromEntries(Object.entries(DEFAULT_STAGE_GROWTH_SHARES).map(([key, value]) => [key, value / 100])),
@@ -7989,17 +8417,22 @@ function growthSchedulePlan({
   const normalTarget = splatTargetForGrowth(currentCount, finalCount, growthFraction);
   const normalIncrement = Math.max(0, normalTarget - currentCount);
   const densityEnd = experimentalDensifySteps(steps);
-  const growthEnd = experimentalGrowthSteps(steps);
+  const growthEnd = experimentalGrowthSteps(steps, growthApplyUntilFraction);
   if (!stageAware) {
+    const terminalClosure = growthEnd > 0 && Math.round(step) === growthEnd;
     return {
-      mode: "threshold-percentage-cap",
-      desiredCount: normalTarget,
+      mode: "threshold-percentage-target-closure",
+      desiredCount: terminalClosure ? finalCount : normalTarget,
       previousDesired: currentCount,
       normalIncrement,
       catchUpLimit: finalCount,
-      requestedCount: normalTarget,
+      requestedCount: terminalClosure ? finalCount : normalTarget,
       densityEnd,
       growthEnd,
+      remainingGrowthEvents: terminalClosure ? 1 : null,
+      scheduleDebt: 0,
+      repairIncrement: 0,
+      terminalClosure,
     };
   }
 
@@ -8017,10 +8450,14 @@ function growthSchedulePlan({
         : p2Cumulative + Math.max(0, Math.min(1, (targetStep - densityEnd) / Math.max(1, growthEnd - densityEnd))) * (1 - p2Cumulative);
     return Math.min(finalCount, initialCount + Math.round(range * segmentProgress));
   };
-  const desiredCount = desiredAt(step);
+  const terminalClosure = growthEnd > 0 && Math.round(step) === growthEnd;
+  const desiredCount = terminalClosure ? finalCount : desiredAt(step);
   const previousDesired = desiredAt(Math.max(warmup, step - Math.max(1, densifyInterval)));
   const stageIncrement = Math.max(0, desiredCount - previousDesired);
-  const catchUpLimit = Math.min(finalCount, currentCount + stageIncrement * 2);
+  const remainingGrowthEvents = remainingGrowthEventCount(step, growthEnd, densifyInterval);
+  const scheduleDebt = Math.max(0, previousDesired - currentCount);
+  const repairIncrement = Math.ceil(scheduleDebt / remainingGrowthEvents);
+  const catchUpLimit = Math.min(finalCount, currentCount + stageIncrement + repairIncrement);
   const requestedCount = normalizeActiveSplatCount(
     Math.max(currentCount, Math.min(desiredCount, catchUpLimit)),
     currentCount,
@@ -8034,6 +8471,10 @@ function growthSchedulePlan({
     requestedCount,
     densityEnd,
     growthEnd,
+    remainingGrowthEvents,
+    scheduleDebt,
+    repairIncrement,
+    terminalClosure,
     stageGrowthShares: { p1: p1Share, p2: p2Share, p3: Math.max(0, 1 - p2Cumulative) },
   };
 }
@@ -9088,6 +9529,7 @@ class WebGpuPreview {
     this.phase45RegionTelemetryPipeline = null;
     this.phase45RegionFinalizePipeline = null;
     this.phase45DonorSafetyPipeline = null;
+    this.structureAllocationCollectPipeline = null;
     this.optimizerResetPipeline = null;
     this.optimizerSourceResetPipeline = null;
     this.adaptiveGridInitializationPipeline = null;
@@ -11130,6 +11572,11 @@ fn commit_layers(@builtin(global_invocation_id) id: vec3<u32>) {
 
   async captureRenderedRgba(image, params, sourceBuffers = null, options = {}) {
     const preview = previewPaddingSpec(image, params, Boolean(options.outside));
+    const limits = this.device.limits || {};
+    const maxTextureDimension = Math.max(1, Number(limits.maxTextureDimension2D) || MAX_PNG_EXPORT_LONG_SIDE);
+    if (preview.width > maxTextureDimension || preview.height > maxTextureDimension) {
+      throw new Error(`PNG resolution ${preview.width}x${preview.height} exceeds this GPU's ${maxTextureDimension}px texture limit.`);
+    }
     const texture = this.device.createTexture({
       size: [preview.width, preview.height, 1],
       format: this.format,
@@ -11137,12 +11584,35 @@ fn commit_layers(@builtin(global_invocation_id) id: vec3<u32>) {
     });
     const bytesPerPixel = 4;
     const bytesPerRow = Math.ceil((preview.width * bytesPerPixel) / 256) * 256;
+    const readbackBytes = bytesPerRow * preview.height;
+    const maxBufferSize = Math.max(1, Number(limits.maxBufferSize) || Number.MAX_SAFE_INTEGER);
+    if (readbackBytes > maxBufferSize) {
+      throw new Error(`PNG readback needs ${(readbackBytes / MB).toFixed(1)} MB, above this GPU's ${(maxBufferSize / MB).toFixed(1)} MB buffer limit.`);
+    }
     const readBuffer = this.device.createBuffer({
-      size: bytesPerRow * preview.height,
+      size: readbackBytes,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
+    const temporaryTileBuffers = [];
     try {
-      await this.render(image, params, sourceBuffers, texture.createView(), options);
+      let renderBuffers = sourceBuffers;
+      if (options.rebuildTiles) {
+        const tileData = buildPreviewTileIndexData(image, params, options);
+        const maxStorageBinding = Math.max(1, Number(limits.maxStorageBufferBindingSize) || maxBufferSize);
+        if (tileData.indices.byteLength > maxStorageBinding || tileData.offsets.byteLength > maxStorageBinding) {
+          throw new Error("PNG resolution creates more tile references than this GPU can bind; reduce the export long side or Splat scale.");
+        }
+        const tileOffsetsBuffer = makeBuffer(this.device, tileData.offsets, GPUBufferUsage.STORAGE);
+        const tileIndicesBuffer = makeBuffer(this.device, tileData.indices, GPUBufferUsage.STORAGE);
+        temporaryTileBuffers.push(tileOffsetsBuffer, tileIndicesBuffer);
+        renderBuffers = {
+          ...(sourceBuffers || {}),
+          tileOffsetsBuffer,
+          tileIndicesBuffer,
+          orderMode: "tiles",
+        };
+      }
+      await this.render(image, params, renderBuffers, texture.createView(), options);
       const encoder = this.device.createCommandEncoder();
       encoder.copyTextureToBuffer(
         { texture },
@@ -11169,6 +11639,7 @@ fn commit_layers(@builtin(global_invocation_id) id: vec3<u32>) {
       return { rgba, width: preview.width, height: preview.height, padding: preview };
     } finally {
       if (readBuffer.mapState === "mapped") readBuffer.unmap();
+      destroyBuffers(...temporaryTileBuffers);
       readBuffer.destroy();
       texture.destroy();
     }
@@ -16436,7 +16907,7 @@ fn alpha_loss(
   }
 
   async ensureDensityPipelines() {
-    if (this.growSelectPipeline && this.distributionOffsetPipeline && this.residualTileOffsetPipeline && this.relocationApplyPipeline && this.finalBrushRepairPipeline && this.phase45RegionTelemetryPipeline && this.phase45RegionFinalizePipeline && this.phase45DonorSafetyPipeline) {
+    if (this.growSelectPipeline && this.distributionOffsetPipeline && this.residualTileOffsetPipeline && this.relocationApplyPipeline && this.finalBrushRepairPipeline && this.phase45RegionTelemetryPipeline && this.phase45RegionFinalizePipeline && this.phase45DonorSafetyPipeline && this.structureAllocationCollectPipeline) {
       await this.ensureOptimizerResetPipeline();
       return;
     }
@@ -16487,6 +16958,15 @@ const RESIDUAL_TILE_SIZE = ${TILE_SIZE}u;
 var<workgroup> cdfScratch: array<f32, 256>;
 var<workgroup> residualCdfScratch: array<u32, 256>;
 var<workgroup> phase45Demand: array<u32, ${PHASE45_REGION_COUNT}>;
+
+fn active_region_grid() -> u32 {
+  return clamp(u32(config[69]), 4u, PHASE45_REGION_GRID);
+}
+
+fn active_region_count() -> u32 {
+  let grid = active_region_grid();
+  return grid * grid;
+}
 
 fn hash_unit(seed: f32) -> f32 {
   let x = sin((seed + config[33] * 104729.0) * 12.9898) * 43758.5453123;
@@ -16997,6 +17477,28 @@ fn importance_residual(g: u32) -> f32 {
   return im.z / max(im.x, 1.0);
 }
 
+fn structure_allocation_region_at(pos: vec2<f32>) -> u32 {
+  let grid = active_region_grid();
+  let uv = clamp(pos * 0.5 + 0.5, vec2<f32>(0.0), vec2<f32>(0.999999));
+  let cell = min(
+    vec2<u32>(grid - 1u),
+    vec2<u32>(uv * f32(grid))
+  );
+  return cell.y * grid + cell.x;
+}
+
+fn structure_allocation_weight_at(pos: vec2<f32>) -> f32 {
+  if (config[68] <= 0.5 || u32(config[11]) != 1u) { return 1.0; }
+  let capacity = u32(config[10]);
+  let region = structure_allocation_region_at(pos);
+  let base = phase45_region_base(capacity) + region * PHASE45_REGION_STRIDE;
+  let current = f32(atomicLoad(&control[base]));
+  let quota = f32(atomicLoad(&control[base + 9u]));
+  let uniformQuota = max(1.0, config[3] / f32(active_region_count()));
+  let deficit = clamp((quota - current) / uniformQuota, 0.0, 1.0);
+  return mix(0.05, 2.5, deficit);
+}
+
 fn distribution_weight(g: u32, adc: bool) -> f32 {
   let t = transform[g];
   let c = color[g];
@@ -17048,9 +17550,10 @@ fn distribution_weight(g: u32, adc: bool) -> f32 {
   }
   if (adc && config[47] > 0.0) {
     let capacity = u32(config[10]);
+    let grid = active_region_grid();
     let uv = clamp(xy[g].center * 0.5 + 0.5, vec2<f32>(0.0), vec2<f32>(0.999999));
-    let cell = min(vec2<u32>(PHASE45_REGION_GRID - 1u), vec2<u32>(uv * f32(PHASE45_REGION_GRID)));
-    let region = cell.y * PHASE45_REGION_GRID + cell.x;
+    let cell = min(vec2<u32>(grid - 1u), vec2<u32>(uv * f32(grid)));
+    let region = cell.y * grid + cell.x;
     let regionBase = phase45_region_base(capacity) + region * PHASE45_REGION_STRIDE;
     let regionCount = f32(atomicLoad(&control[regionBase]));
     let quota = f32(atomicLoad(&control[regionBase + 9u]));
@@ -17061,6 +17564,7 @@ fn distribution_weight(g: u32, adc: bool) -> f32 {
     let recipientDemand = clamp(max(meanEnergy * 8.0, maxEnergy * 4.0) + meanResidual * 4.0, 0.0, 1.0);
     combined *= 1.0 + clamp(config[47], 0.0, 1.0) * deficit * recipientDemand;
   }
+  combined *= structure_allocation_weight_at(xy[g].center);
   if (config[32] > 0.5) {
     let areaPixels = 3.14159265 * 6.25 * max(0.00000001, t.x * t.y) * max(1.0, (config[0] - 1.0) * (config[1] - 1.0) * 0.25);
     let footprintCost = sqrt(max(1.0, areaPixels / 64.0));
@@ -17076,6 +17580,16 @@ fn cdf_block_sum_base(capacity: u32) -> u32 { return cdf_base(capacity) + capaci
 fn cdf_block_offset_base(capacity: u32) -> u32 { return cdf_block_sum_base(capacity) + cdf_max_blocks(capacity); }
 fn phase45_region_base(capacity: u32) -> u32 { return cdf_block_offset_base(capacity) + cdf_max_blocks(capacity); }
 fn phase45_donor_base(capacity: u32) -> u32 { return phase45_region_base(capacity) + PHASE45_REGION_COUNT * PHASE45_REGION_STRIDE; }
+
+@compute @workgroup_size(64)
+fn collect_structure_allocation_counts(@builtin(global_invocation_id) id: vec3u) {
+  let g = id.x;
+  if (config[68] <= 0.5 || u32(config[11]) != 1u || g >= u32(config[2])) { return; }
+  let region = structure_allocation_region_at(xy[g].center);
+  let base = phase45_region_base(u32(config[10])) + region * PHASE45_REGION_STRIDE;
+  atomicAdd(&control[base], 1u);
+}
+
 fn residual_tile_count() -> u32 {
   return ((u32(config[0]) + RESIDUAL_TILE_SIZE - 1u) / RESIDUAL_TILE_SIZE) *
     ((u32(config[1]) + RESIDUAL_TILE_SIZE - 1u) / RESIDUAL_TILE_SIZE);
@@ -17162,9 +17676,10 @@ fn phase45_collect_region_telemetry(@builtin(global_invocation_id) id: vec3u) {
   if (u32(config[11]) != 3u || config[44] <= 0.5 || g >= count) { return; }
   let width = u32(config[0]);
   let height = u32(config[1]);
+  let grid = active_region_grid();
   let uv = clamp(xy[g].center * 0.5 + 0.5, vec2<f32>(0.0), vec2<f32>(0.999999));
-  let cell = min(vec2<u32>(PHASE45_REGION_GRID - 1u), vec2<u32>(uv * f32(PHASE45_REGION_GRID)));
-  let region = cell.y * PHASE45_REGION_GRID + cell.x;
+  let cell = min(vec2<u32>(grid - 1u), vec2<u32>(uv * f32(grid)));
+  let region = cell.y * grid + cell.x;
   let base = phase45_region_base(capacity) + region * PHASE45_REGION_STRIDE;
   let energy = phase45_sample_energy(g, width, height);
   let im = importance_at(g);
@@ -17189,42 +17704,45 @@ fn phase45_collect_region_telemetry(@builtin(global_invocation_id) id: vec3u) {
   atomicAdd(&control[base + 12u + utilityBin], 1u);
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(${PHASE45_REGION_COUNT})
 fn phase45_finalize_region_telemetry(@builtin(local_invocation_id) localId: vec3u) {
   let region = localId.x;
+  let regionCount = active_region_count();
   let capacity = u32(config[10]);
-  let base = phase45_region_base(capacity) + region * PHASE45_REGION_STRIDE;
-  let regionSplats = atomicLoad(&control[base]);
-  let meanEnergy = f32(atomicLoad(&control[base + 1u])) / (PHASE45_ENERGY_QUANTIZATION * max(1.0, f32(regionSplats)));
-  let maxEnergy = f32(atomicLoad(&control[base + 2u])) / PHASE45_ENERGY_QUANTIZATION;
-  let meanResidual = f32(atomicLoad(&control[base + 3u])) / (PHASE45_RESIDUAL_QUANTIZATION * max(1.0, f32(regionSplats)));
-  let meanSupport = f32(atomicLoad(&control[base + 7u])) / (PHASE45_NORMALIZED_QUANTIZATION * max(1.0, f32(regionSplats)));
-  // The max term is an explicit guard for small high-frequency islands in a smooth region.
-  let multiscaleMaxGuard = max(meanEnergy, maxEnergy * 0.5);
-  let demand = max(1u, u32(round((0.0625 + multiscaleMaxGuard * 8.0 + meanResidual * 4.0 + sqrt(meanSupport)) * 4096.0)));
-  phase45Demand[region] = demand;
-  let donorTarget = max(1u, u32(ceil(f32(regionSplats) * clamp(config[46], 0.0, 1.0))));
-  var donorCumulative = 0u;
-  var donorCutoff = 7u;
-  var donorCutoffFraction = 1.0;
-  var donorCutoffFound = false;
-  for (var bin = 0u; bin < 8u; bin += 1u) {
-    let binCount = atomicLoad(&control[base + 12u + bin]);
-    if (!donorCutoffFound && donorCumulative + binCount >= donorTarget) {
-      donorCutoff = bin;
-      donorCutoffFraction = clamp(f32(donorTarget - donorCumulative) / max(1.0, f32(binCount)), 0.0, 1.0);
-      donorCutoffFound = true;
+  if (region < regionCount) {
+    let base = phase45_region_base(capacity) + region * PHASE45_REGION_STRIDE;
+    let regionSplats = atomicLoad(&control[base]);
+    let meanEnergy = f32(atomicLoad(&control[base + 1u])) / (PHASE45_ENERGY_QUANTIZATION * max(1.0, f32(regionSplats)));
+    let maxEnergy = f32(atomicLoad(&control[base + 2u])) / PHASE45_ENERGY_QUANTIZATION;
+    let meanResidual = f32(atomicLoad(&control[base + 3u])) / (PHASE45_RESIDUAL_QUANTIZATION * max(1.0, f32(regionSplats)));
+    let meanSupport = f32(atomicLoad(&control[base + 7u])) / (PHASE45_NORMALIZED_QUANTIZATION * max(1.0, f32(regionSplats)));
+    // The max term is an explicit guard for small high-frequency islands in a smooth region.
+    let multiscaleMaxGuard = max(meanEnergy, maxEnergy * 0.5);
+    let demand = max(1u, u32(round((0.0625 + multiscaleMaxGuard * 8.0 + meanResidual * 4.0 + sqrt(meanSupport)) * 4096.0)));
+    phase45Demand[region] = demand;
+    let donorTarget = max(1u, u32(ceil(f32(regionSplats) * clamp(config[46], 0.0, 1.0))));
+    var donorCumulative = 0u;
+    var donorCutoff = 7u;
+    var donorCutoffFraction = 1.0;
+    var donorCutoffFound = false;
+    for (var bin = 0u; bin < 8u; bin += 1u) {
+      let binCount = atomicLoad(&control[base + 12u + bin]);
+      if (!donorCutoffFound && donorCumulative + binCount >= donorTarget) {
+        donorCutoff = bin;
+        donorCutoffFraction = clamp(f32(donorTarget - donorCumulative) / max(1.0, f32(binCount)), 0.0, 1.0);
+        donorCutoffFound = true;
+      }
+      donorCumulative += binCount;
     }
-    donorCumulative += binCount;
+    let packedCutoff = min(7u, donorCutoff) | (u32(round(donorCutoffFraction * 65535.0)) << 8u);
+    atomicStore(&control[base + 20u], packedCutoff);
   }
-  let packedCutoff = min(7u, donorCutoff) | (u32(round(donorCutoffFraction * 65535.0)) << 8u);
-  atomicStore(&control[base + 20u], packedCutoff);
   workgroupBarrier();
   if (region != 0u) { return; }
   var totalDemand = 0u;
-  for (var i = 0u; i < PHASE45_REGION_COUNT; i += 1u) { totalDemand += phase45Demand[i]; }
+  for (var i = 0u; i < regionCount; i += 1u) { totalDemand += phase45Demand[i]; }
   var allocated = 0u;
-  for (var i = 0u; i < PHASE45_REGION_COUNT; i += 1u) {
+  for (var i = 0u; i < regionCount; i += 1u) {
     let quota = u32(floor(f32(u32(config[2])) * f32(phase45Demand[i]) / max(1.0, f32(totalDemand))));
     atomicStore(&control[phase45_region_base(capacity) + i * PHASE45_REGION_STRIDE + 9u], quota);
     allocated += quota;
@@ -17233,7 +17751,7 @@ fn phase45_finalize_region_telemetry(@builtin(local_invocation_id) localId: vec3
   for (var extra = 0u; extra < remainder; extra += 1u) {
     var bestRegion = 0u;
     var bestFraction = -1.0;
-    for (var i = 0u; i < PHASE45_REGION_COUNT; i += 1u) {
+    for (var i = 0u; i < regionCount; i += 1u) {
       let rawQuota = f32(u32(config[2])) * f32(phase45Demand[i]) / max(1.0, f32(totalDemand));
       let fraction = rawQuota - floor(rawQuota);
       if (fraction > bestFraction) {
@@ -17285,15 +17803,19 @@ fn phase45_evaluate_donor_safety(@builtin(global_invocation_id) id: vec3u) {
   if (g >= count || config[45] <= 0.5) { return; }
   let width = u32(config[0]);
   let height = u32(config[1]);
+  let grid = active_region_grid();
   let uv = clamp(xy[g].center * 0.5 + 0.5, vec2<f32>(0.0), vec2<f32>(0.999999));
-  let cell = min(vec2<u32>(PHASE45_REGION_GRID - 1u), vec2<u32>(uv * f32(PHASE45_REGION_GRID)));
-  let region = cell.y * PHASE45_REGION_GRID + cell.x;
+  let cell = min(vec2<u32>(grid - 1u), vec2<u32>(uv * f32(grid)));
+  let region = cell.y * grid + cell.x;
   let regionBase = phase45_region_base(capacity) + region * PHASE45_REGION_STRIDE;
   let energy = phase45_sample_energy(g, width, height);
   let im = importance_at(g);
   let expectedInfluence = max(1.0, config[0] * config[1] / max(1.0, config[2]));
   let residual = clamp(im.z / max(im.x, 1.0), 0.0, 1.0);
   let influence = clamp(im.y / expectedInfluence, 0.0, 16.0);
+  let currentContributionNearZero =
+    im.x <= ${CURRENT_CONTRIBUTION_NEAR_ZERO_MAX_COVERAGE}.0 &&
+    im.y <= ${CURRENT_CONTRIBUTION_NEAR_ZERO_MAX_INFLUENCE};
   let utilityBin = phase45_utility_bin(energy.y, residual, influence);
   let packedCutoff = atomicLoad(&control[regionBase + 20u]);
   let cutoffBin = packedCutoff & 7u;
@@ -17346,7 +17868,16 @@ fn phase45_evaluate_donor_safety(@builtin(global_invocation_id) id: vec3u) {
   if (regionSurplus) { flags |= 8u; }
   if (lowQuantile) { flags |= 16u; }
   if (nonfinite) { flags |= 32u; }
-  let eligible = supportSafe && localDetailSafe && regionSurplus && lowQuantile && !nonfinite;
+  // Opaque Rectangle/Brush marks often fail the per-pixel removal simulation
+  // even when they are absent from the accumulated current-view contribution.
+  // Reuse only the same bounded near-zero cohort that the existing compaction
+  // would otherwise delete at this midpoint.
+  // A current-view near-zero row contributes no visible detail to protect and
+  // is already eligible for physical removal by Contribution compaction.
+  // Keep the local-detail guard for simulated-removal donors, but allow that
+  // exact near-zero cohort to be reused instead of deleted.
+  let contributionSafe = (supportSafe && localDetailSafe) || currentContributionNearZero;
+  let eligible = contributionSafe && regionSurplus && lowQuantile && !nonfinite;
   if (eligible) { flags |= PHASE45_DONOR_ELIGIBLE; atomicAdd(&control[regionBase + 22u], 1u); }
   atomicStore(&control[phase45_donor_base(capacity) + g], flags);
 }
@@ -17358,6 +17889,16 @@ fn build_distribution(@builtin(global_invocation_id) id: vec3u) {
   let g = id.x;
   if (g >= count) { return; }
   let adc = is_adc_step(u32(config[4])) || u32(config[11]) == 3u;
+  if (adc && config[45] > 0.5) {
+    // Product over-density donors are write destinations in the following
+    // pass. Exclude them from the read-only source distribution so multiple
+    // destinations can safely share a live source without a read/write race.
+    let donorRecord = atomicLoad(&control[phase45_donor_base(capacity) + g]);
+    if ((donorRecord & PHASE45_DONOR_ELIGIBLE) != 0u) {
+      atomicStore(&control[cdf_base(capacity) + g], bitcast<u32>(0.0));
+      return;
+    }
+  }
   var weight = distribution_weight(g, adc);
   if (weight != weight || abs(weight) > 100000000000000000000.0) {
     atomicAdd(&control[capacity * 2u + 12u], 1u);
@@ -17458,6 +17999,58 @@ fn pick_error_pixel(seedIndex: u32, width: u32, height: u32) -> u32 {
   return bestPixel;
 }
 
+fn pick_structure_allocation_region(seedIndex: u32) -> u32 {
+  let capacity = u32(config[10]);
+  let regionCount = active_region_count();
+  var totalDebt = 0u;
+  for (var region = 0u; region < regionCount; region += 1u) {
+    let base = phase45_region_base(capacity) + region * PHASE45_REGION_STRIDE;
+    let current = atomicLoad(&control[base]);
+    let quota = atomicLoad(&control[base + 9u]);
+    totalDebt += select(0u, quota - current, quota > current);
+  }
+  if (totalDebt == 0u) { return seedIndex % regionCount; }
+  let sample = min(
+    totalDebt - 1u,
+    u32(hash_unit(f32(seedIndex) * 31.17 + config[4] * 0.79) * f32(totalDebt))
+  );
+  var cumulative = 0u;
+  for (var region = 0u; region < regionCount; region += 1u) {
+    let base = phase45_region_base(capacity) + region * PHASE45_REGION_STRIDE;
+    let current = atomicLoad(&control[base]);
+    let quota = atomicLoad(&control[base + 9u]);
+    cumulative += select(0u, quota - current, quota > current);
+    if (sample < cumulative) { return region; }
+  }
+  return regionCount - 1u;
+}
+
+fn pick_structure_allocation_pixel(seedIndex: u32, width: u32, height: u32) -> u32 {
+  let region = pick_structure_allocation_region(seedIndex);
+  let grid = active_region_grid();
+  let regionX = region % grid;
+  let regionY = region / grid;
+  let x0 = regionX * width / grid;
+  let x1 = max(x0 + 1u, (regionX + 1u) * width / grid);
+  let y0 = regionY * height / grid;
+  let y1 = max(y0 + 1u, (regionY + 1u) * height / grid);
+  var bestPixel = min(width * height - 1u, y0 * width + x0);
+  var bestScore = -1.0;
+  for (var candidate = 0u; candidate < 32u; candidate += 1u) {
+    let ux = hash_unit(f32(seedIndex) * 17.17 + f32(candidate) * 91.73 + config[4] * 0.37);
+    let uy = hash_unit(f32(seedIndex) * 43.11 + f32(candidate) * 37.19 + config[4] * 0.61);
+    let x = min(width - 1u, x0 + u32(ux * f32(max(1u, x1 - x0))));
+    let y = min(height - 1u, y0 + u32(uy * f32(max(1u, y1 - y0))));
+    let pixel = y * width + x;
+    let score = errorMap[pixel] + hash_unit(f32(pixel + seedIndex + candidate)) * 0.0001;
+    if (score > bestScore) {
+      bestPixel = pixel;
+      bestScore = score;
+    }
+  }
+  return bestPixel;
+}
+
 fn error_pixel_position(pixel: u32, width: u32, height: u32) -> vec2<f32> {
   let px = pixel % width;
   let py = pixel / width;
@@ -17546,7 +18139,10 @@ fn select_grow(@builtin(global_invocation_id) id: vec3u) {
     u32(config[0]),
     u32(config[1])
   );
-  let useProbeSource = probeParentProfile.x > sampledParentProfile.x;
+  let sampledAllocationWeight = structure_allocation_weight_at(xy[sampledSource].center);
+  let probeAllocationWeight = structure_allocation_weight_at(xy[probeSource].center);
+  let useProbeSource = probeParentProfile.x > sampledParentProfile.x &&
+    probeAllocationWeight >= sampledAllocationWeight * 0.5;
   let source = select(sampledSource, probeSource, useProbeSource);
   let sourceSignal = normalized_stats(source);
   let sourceImportance = importance_at(source);
@@ -17581,6 +18177,13 @@ fn select_grow(@builtin(global_invocation_id) id: vec3u) {
   if (harmfulRectangleProfile.z >= 3.0) { atomicAdd(&control[eventBase + 28u], 1u); }
   if (harmfulRectangleProfile.z >= 5.0) { atomicAdd(&control[eventBase + 29u], 1u); }
   if (harmfulRectangleParent) { atomicAdd(&control[eventBase + 30u], 1u); }
+  if (config[68] > 0.5) {
+    if (structure_allocation_weight_at(xy[source].center) > 1.0) {
+      atomicAdd(&control[eventBase + 34u], 1u);
+    } else {
+      atomicAdd(&control[eventBase + 33u], 1u);
+    }
+  }
   if (config[42] > 0.5 && finalMode != 0u) {
     let token = (local + 1u) & ROLE_TOKEN_MASK;
     let claimValue = select(ROLE_SOURCE_OTHER, ROLE_SOURCE_SPLIT, finalMode == 1u) | token;
@@ -17595,7 +18198,9 @@ fn select_grow(@builtin(global_invocation_id) id: vec3u) {
   var encodedSelection = encode_selection(source, finalMode);
   if ((RESIDUAL_ORACLE_ENABLED || RESIDUAL_TILE_CDF_ENABLED) && finalMode == 0u) {
     var selectedPixel = pick_error_pixel(index, u32(config[0]), u32(config[1]));
-    if (RESIDUAL_TILE_CDF_ENABLED) {
+    if (config[68] > 0.5) {
+      selectedPixel = pick_structure_allocation_pixel(index, u32(config[0]), u32(config[1]));
+    } else if (RESIDUAL_TILE_CDF_ENABLED) {
       selectedPixel = pick_residual_tile_pixel(index, u32(config[0]), u32(config[1]), capacity);
     }
     encodedSelection = (selectedPixel + 1u) & SOURCE_MASK;
@@ -17633,7 +18238,11 @@ fn apply_grow(@builtin(global_invocation_id) id: vec3u) {
   // source that another workgroup may be replacing in this dispatch.
   if (mode == 0u) {
     let gridPos = grid_position(index, targetCount, cols, rows);
-    var residualPos = pick_error_position(index, width, height);
+    var residualPos = select(
+      pick_error_position(index, width, height),
+      error_pixel_position(pick_structure_allocation_pixel(index, width, height), width, height),
+      config[68] > 0.5
+    );
     if (RESIDUAL_ORACLE_ENABLED || RESIDUAL_TILE_CDF_ENABLED) {
       residualPos = error_pixel_position((encoded & SOURCE_MASK) - 1u, width, height);
     }
@@ -17642,8 +18251,11 @@ fn apply_grow(@builtin(global_invocation_id) id: vec3u) {
     let residualError = error_at_position(residualPos, width, height);
     let materiallyWorse =
       residualError > gridResidual + 0.04;
-    var useResidual = materiallyWorse &&
+    let baselineUseResidual = materiallyWorse &&
       (residualPriority || hash_unit(f32(index) * 29.7 + f32(step) * 0.11) < 0.15);
+    let structureAllocationReseed = config[68] > 0.5 &&
+      hash_unit(f32(index) * 47.3 + f32(step) * 0.19) < 0.15;
+    var useResidual = baselineUseResidual || structureAllocationReseed;
     var nextPos = constrain_xy(select(gridPos, residualPos, useResidual));
     var nextScale = max(baseScaleFloor, stageMinScale);
     var nextTheta = 0.0;
@@ -17966,7 +18578,8 @@ fn select_relocation(@builtin(global_invocation_id) id: vec3u) {
   let inactiveAdc = t.w < 0.5 || c.a < 0.025 || radiusPx < 0.65 || (st.w > 32.0 && signal.z < 0.00002 && signal.y < 0.025) || lowImportanceNoise || lowSignificanceSmooth || frontPaintOutlier;
   var inactive = select(inactiveMcmc, inactiveAdc, adcRecycle);
   let phase45DonorRecord = atomicLoad(&control[phase45_donor_base(capacity) + g]);
-  if (adcRecycle && config[45] > 0.5) { inactive = (phase45DonorRecord & PHASE45_DONOR_ELIGIBLE) != 0u; }
+  let productOverdensity = adcRecycle && config[45] > 0.5;
+  if (productOverdensity) { inactive = (phase45DonorRecord & PHASE45_DONOR_ELIGIBLE) != 0u; }
   let lateRecycle = adcRecycle && u32(step) > u32(config[15]);
   let adcSelectionRate = select(config[50], config[51], lateRecycle);
   let selectedRate = select(0.02, adcSelectionRate, adcRecycle);
@@ -17989,18 +18602,20 @@ fn select_relocation(@builtin(global_invocation_id) id: vec3u) {
   let sourceInactiveAdc = sourceT.w < 0.5 || sourceC.a < 0.025 || sourceRadiusPx < 0.65 || (stats[source].w > 32.0 && sourceSignal.z < 0.00002 && sourceSignal.y < 0.025) || sourceLowImportanceNoise;
   let sourceInactive = select(sourceInactiveMcmc, sourceInactiveAdc, adcRecycle);
   if (sourceInactive) { return; }
-  if (adcRecycle && sourceSignal.x + sourceSignal.y * 0.5 <= 0.00015 && !sourceTiltRisk) { return; }
+  if (adcRecycle && !productOverdensity && sourceSignal.x + sourceSignal.y * 0.5 <= 0.00015 && !sourceTiltRisk) { return; }
   let token = (g + 1u) & ROLE_TOKEN_MASK;
   let destinationRole = ROLE_DESTINATION | token;
   if (!try_claim_role(g, destinationRole)) {
     atomicAdd(&control[capacity * 2u + 16u], 1u);
     return;
   }
-  let sourceRole = select(ROLE_SOURCE_OTHER, ROLE_SOURCE_SPLIT, sourceTiltRisk) | token;
-  if (!try_claim_role(source, sourceRole)) {
-    rollback_role(g, destinationRole);
-    atomicAdd(&control[capacity * 2u + 16u], 1u);
-    return;
+  if (!productOverdensity) {
+    let sourceRole = select(ROLE_SOURCE_OTHER, ROLE_SOURCE_SPLIT, sourceTiltRisk) | token;
+    if (!try_claim_role(source, sourceRole)) {
+      rollback_role(g, destinationRole);
+      atomicAdd(&control[capacity * 2u + 16u], 1u);
+      return;
+    }
   }
   atomicAdd(&control[capacity * 2u + 17u], 1u);
   if (sourceTiltRisk) { atomicAdd(&control[capacity * 2u + 19u], 1u); }
@@ -18009,7 +18624,7 @@ fn select_relocation(@builtin(global_invocation_id) id: vec3u) {
   atomicStore(&control[capacity + g], encode_selection(source, relocationMode));
   if (frontPaintOutlier) { atomicAdd(&control[capacity * 2u + 22u], 1u); }
   if (adcRecycle && config[45] > 0.5) {
-    let donorRegion = (phase45DonorRecord >> 8u) & 63u;
+    let donorRegion = (phase45DonorRecord >> 8u) & 255u;
     atomicAdd(&control[phase45_region_base(capacity) + donorRegion * PHASE45_REGION_STRIDE + 23u], 1u);
   }
 }
@@ -18034,6 +18649,7 @@ fn apply_relocation(@builtin(global_invocation_id) id: vec3u) {
   let selectionMode = encoded >> 30u;
   let paintOutlierRecycle = selectionMode == 2u;
   let adcRecycle = selectionMode == 3u;
+  let productOverdensity = adcRecycle && config[45] > 0.5;
   let sourceT = transform[source];
   let sourceC = color[source];
   let sourceStats = stats[source];
@@ -18052,6 +18668,13 @@ fn apply_relocation(@builtin(global_invocation_id) id: vec3u) {
     (hash_unit(f32(g) * 71.0 + step * 2.3) - 0.5) * min(sourceT.x, sourceT.y) * 0.35;
   let major = select(sourceT.y, sourceT.x, useX);
   var nextPos = constrain_xy(xy[source].center + axis * major * select(select(0.52, 0.55, adcRecycle) * side, 0.34, tiltTrueSplit) + perp * select(jitter, 0.0, tiltTrueSplit));
+  if (productOverdensity) {
+    nextPos = error_pixel_position(
+      pick_structure_allocation_pixel(g + 13007u, width, height),
+      width,
+      height
+    );
+  }
   var splitScale = min(sourceT.xy, baseScale * 0.9);
   if (adcRecycle) {
     let splitShrink = select(0.72, clamp(config[41], 0.5, 0.85), tiltTrueSplit);
@@ -18120,7 +18743,7 @@ fn apply_relocation(@builtin(global_invocation_id) id: vec3u) {
     sourceC.rgb,
     tiltTrueSplit
   );
-  if ((config[40] > 3.5 || paintOutlierRecycle) && !tiltTrueSplit) {
+  if ((config[40] > 3.5 || paintOutlierRecycle || productOverdensity) && !tiltTrueSplit) {
     nextColor = targetColor;
   }
   xy[g].center = nextPos;
@@ -18256,6 +18879,7 @@ fn reset_density_aux(@builtin(global_invocation_id) id: vec3u) {
       this.phase45RegionTelemetryPipeline,
       this.phase45RegionFinalizePipeline,
       this.phase45DonorSafetyPipeline,
+      this.structureAllocationCollectPipeline,
     ] = await Promise.all([
       make("build_distribution"),
       make("scan_distribution_blocks"),
@@ -18274,6 +18898,7 @@ fn reset_density_aux(@builtin(global_invocation_id) id: vec3u) {
       make("phase45_collect_region_telemetry"),
       make("phase45_finalize_region_telemetry"),
       make("phase45_evaluate_donor_safety"),
+      make("collect_structure_allocation_counts"),
     ]);
     await this.ensureOptimizerResetPipeline();
   }
@@ -18795,7 +19420,14 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
     return { capacity: fallback, attempts, plan: trainingAllocationPlan(image, params, fallback, this.device), fastPath: true };
   }
 
-  async growExperimentalGpu(image, params, targetCount, step, steps) {
+  async growExperimentalGpu(
+    image,
+    params,
+    targetCount,
+    step,
+    steps,
+    { forceZeroMassFallback = false } = {},
+  ) {
     if (!this.trainState || this.trainState.capacity < targetCount || targetCount <= params.count) return false;
     await this.ensureDensityPipelines();
     const oldCount = params.count;
@@ -18818,6 +19450,20 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
       this.trainState.capacity * 2 * 4,
       this.trainState.zeroDensityEvents,
     );
+    let structureAllocation = null;
+    if (config[68] > 0.5) {
+      const prepared = structureGuidedRegionControl(
+        image,
+        targetCount,
+        this.trainState.capacity,
+      );
+      structureAllocation = prepared.allocation;
+      this.device.queue.writeBuffer(
+        this.trainState.densityControlBuffer,
+        this.phase45RegionTelemetryOffsetBytes(),
+        prepared.control,
+      );
+    }
     if (this.trainState.residualTileControlWords > 0) {
       this.device.queue.writeBuffer(
         this.trainState.densityControlBuffer,
@@ -18832,8 +19478,12 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
     const distributionPass = distributionEncoder.beginComputePass(
       this.profilePassDescriptor(distributionProfileSample, "density_distribution"),
     );
-    distributionPass.setPipeline(this.distributionPipeline);
     distributionPass.setBindGroup(0, bindGroup);
+    if (structureAllocation) {
+      distributionPass.setPipeline(this.structureAllocationCollectPipeline);
+      distributionPass.dispatchWorkgroups(Math.ceil(oldCount / 64));
+    }
+    distributionPass.setPipeline(this.distributionPipeline);
     distributionPass.dispatchWorkgroups(Math.ceil(oldCount / 256));
     distributionPass.setPipeline(this.distributionBlockScanPipeline);
     distributionPass.dispatchWorkgroups(Math.ceil(oldCount / 256));
@@ -18875,7 +19525,9 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
       distributionProfile.readback_wall_ms += performance.now() - candidateReadbackStarted;
       distributionProfile.total_wall_ms = performance.now() - candidateReadbackStarted + distributionProfile.total_wall_ms;
     }
-    if (!Number.isFinite(candidateMass) || candidateMass <= 1e-8) {
+    const finiteCandidateMass = Number.isFinite(candidateMass);
+    const zeroCandidateMass = finiteCandidateMass && candidateMass <= 1e-8;
+    if (!finiteCandidateMass || (zeroCandidateMass && !forceZeroMassFallback)) {
       const qaCounters = phase39Variants().qaGrowthComparisons
         ? await this.readDensityCounters()
         : null;
@@ -18884,6 +19536,7 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
         gpu_densify: false,
         growth_threshold_skipped: true,
         growth_candidate_mass: Number.isFinite(candidateMass) ? candidateMass : null,
+        growth_zero_mass_fallback: false,
         active_count: oldCount,
       };
       return {
@@ -18960,6 +19613,14 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
         0,
         operationCounters?.harmful_rectangle_children_created || 0,
       ),
+      structure_allocation_over_budget_source_selections: Math.max(
+        0,
+        operationCounters?.structure_allocation_over_budget_source_selections || 0,
+      ),
+      structure_allocation_under_budget_source_selections: Math.max(
+        0,
+        operationCounters?.structure_allocation_under_budget_source_selections || 0,
+      ),
     };
     this.trainState.count = targetCount;
     this.lastTrainStats = {
@@ -18973,12 +19634,31 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
       growth_signal_readback_bytes: 4,
       growth_candidate_mass: candidateMass,
       growth_threshold_skipped: false,
+      growth_zero_mass_fallback: zeroCandidateMass,
+      structure_guided_allocation: structureAllocation ? {
+        enabled: true,
+        grid: [structureAllocation.regionGrid, structureAllocation.regionGrid],
+        luma_space: structureAllocation.lumaSpace,
+        region_mode: structureAllocation.regionMode,
+        profile_processing_ms: structureAllocation.processingMs,
+        structure_strength: structureAllocation.structureStrength,
+        gradient_variance_p10: structureAllocation.percentile10,
+        gradient_variance_p90: structureAllocation.percentile90,
+        target_quotas: Array.from(structureAllocation.quotas),
+      } : { enabled: false, baseline: true },
       growth_operations: operations,
       density_profiled: Boolean(distributionProfile || applyProfile),
       density_stats_reset_after_batch: false,
       residual_tile_cdf: residualTileCdfEnabled(),
     };
-    return { grown: true, count: targetCount, candidateMass, operations, residualOracle };
+    return {
+      grown: true,
+      count: targetCount,
+      candidateMass,
+      operations,
+      residualOracle,
+      zeroMassFallback: zeroCandidateMass,
+    };
   }
 
   async readResidualDestinationOracle(image, startIndex, targetCount, step, seedOffset = 0) {
@@ -19205,6 +19885,107 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
     return true;
   }
 
+  async correctMidTrainingOverdensityGpu(
+    image,
+    params,
+    step,
+    learningRates = selectedLearningRates(),
+  ) {
+    if (!this.trainState || this.trainState.capacity < params.count) return null;
+    await this.ensureDensityPipelines();
+    const layout = splatGridLayout(image, params.count);
+    const { config } = densityGpuConfig({
+      image,
+      count: params.count,
+      targetCount: params.count,
+      step,
+      steps: state.metrics?.steps_requested || step,
+      layout,
+      maxAnisotropy: learningRates.maxAnisotropy,
+      capacity: this.trainState.capacity,
+      mode: 3,
+    });
+    this.device.queue.writeBuffer(this.trainState.configBuffer, 0, config);
+    this.device.queue.writeBuffer(this.trainState.densityControlBuffer, 0, this.trainState.zeroDensityScratch);
+    this.device.queue.writeBuffer(
+      this.trainState.densityControlBuffer,
+      this.trainState.capacity * 2 * 4,
+      this.trainState.zeroDensityEvents,
+    );
+    const front = this.trainState.front;
+    const densityBindGroup = this.densityBindGroup(front);
+    const donorBindGroup = this.phase45DonorBindGroup(front);
+    const profileSample = this.operationProfileSample(step);
+    const encoder = this.device.createCommandEncoder();
+    const pass = encoder.beginComputePass(this.profilePassDescriptor(profileSample, "overdensity_correction"));
+
+    pass.setBindGroup(0, densityBindGroup);
+    pass.setPipeline(this.phase45RegionTelemetryPipeline);
+    pass.dispatchWorkgroups(Math.ceil(params.count / 64));
+    pass.setPipeline(this.phase45RegionFinalizePipeline);
+    pass.dispatchWorkgroups(1);
+
+    pass.setBindGroup(0, donorBindGroup);
+    pass.setPipeline(this.phase45DonorSafetyPipeline);
+    pass.dispatchWorkgroups(Math.ceil(params.count / 64));
+
+    pass.setBindGroup(0, densityBindGroup);
+    pass.setPipeline(this.distributionPipeline);
+    pass.dispatchWorkgroups(Math.ceil(params.count / 256));
+    pass.setPipeline(this.distributionBlockScanPipeline);
+    pass.dispatchWorkgroups(Math.ceil(params.count / 256));
+    pass.setPipeline(this.distributionBlockSumsPipeline);
+    pass.dispatchWorkgroups(1);
+    pass.setPipeline(this.distributionOffsetPipeline);
+    pass.dispatchWorkgroups(Math.ceil(params.count / 256));
+    pass.setPipeline(this.relocationSelectPipeline);
+    pass.dispatchWorkgroups(Math.ceil(params.count / 64));
+    pass.setPipeline(this.relocationApplyPipeline);
+    pass.dispatchWorkgroups(Math.ceil(params.count / 64));
+    pass.setPipeline(this.optimizerResetPipeline);
+    pass.setBindGroup(0, this.optimizerResetBindGroup());
+    pass.dispatchWorkgroups(Math.ceil(params.count / 64));
+    pass.setPipeline(this.optimizerSourceResetPipeline);
+    pass.setBindGroup(0, this.optimizerResetBindGroup(this.optimizerSourceResetPipeline));
+    pass.dispatchWorkgroups(Math.ceil(params.count / 64));
+    pass.end();
+
+    const operationProfile = await this.submitProfiledOperation(encoder, profileSample, {
+      resolution: [image.width, image.height],
+      activeSplats: params.count,
+    });
+    if (!operationProfile) await this.device.queue.onSubmittedWorkDone();
+    const [counters, regions] = await Promise.all([
+      this.readDensityCounters(),
+      this.readPhase45RegionReport(params.count),
+    ]);
+    const report = {
+      enabled: true,
+      step,
+      grid: regions?.grid || [phase39Variants().structureRegionGrid, phase39Variants().structureRegionGrid],
+      total_splats: params.count,
+      donor_quantile: phase39Variants().overdensityDonorFraction,
+      eligible_donors: regions?.donor_eligible_count || 0,
+      moved_splats: regions?.moved_out_count || counters?.adc_recycle || 0,
+      provisional_quota: regions?.provisional_quota || 0,
+      fixed_count: true,
+      support_guard: "nine-point leave-one-out-or-current-contribution-near-zero",
+      source_strategy: "shared-read-only-live-source",
+      destination_rgb: "teacher-at-relocated-position",
+      profile_ms: operationProfile?.gpu_ms ?? null,
+      regions,
+    };
+    this.lastTrainStats = {
+      ...(this.lastTrainStats || {}),
+      gpu_relocation: report.moved_splats > 0,
+      gpu_relocation_step: step,
+      weighted_mass_redistribution: true,
+      active_count: params.count,
+      mid_training_overdensity_correction: report,
+    };
+    return report;
+  }
+
   phase45RegionTelemetryOffsetBytes() {
     const capacity = this.trainState.capacity;
     return (capacity * 3 + DENSITY_EVENT_SLOTS + 1 + Math.ceil(capacity / 256) * 2) * 4;
@@ -19220,6 +20001,8 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
 
   async readPhase45RegionReport(currentSplatCount) {
     if (!this.trainState) return null;
+    const regionGrid = phase39Variants().structureRegionGrid;
+    const regionCount = regionGrid * regionGrid;
     const bytes = PHASE45_REGION_COUNT * PHASE45_REGION_STRIDE * 4;
     const readBuffer = this.device.createBuffer({
       size: bytes,
@@ -19243,7 +20026,7 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
       let supportSafeCount = 0;
       let donorEligibleCount = 0;
       let movedOutCount = 0;
-      for (let region = 0; region < PHASE45_REGION_COUNT; region += 1) {
+      for (let region = 0; region < regionCount; region += 1) {
         const base = region * PHASE45_REGION_STRIDE;
         const splatCount = values[base];
         if (splatCount > 0) populatedRegionCount += 1;
@@ -19255,8 +20038,8 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
         movedOutCount += values[base + 23];
         regions.push({
           region,
-          x: region % PHASE45_REGION_GRID,
-          y: Math.floor(region / PHASE45_REGION_GRID),
+          x: region % regionGrid,
+          y: Math.floor(region / regionGrid),
           splat_count: splatCount,
           multiscale_structure_energy: {
             mean: decodeEnergy(values[base + 1]) / Math.max(1, splatCount),
@@ -19277,8 +20060,8 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
         });
       }
       return {
-        grid: [PHASE45_REGION_GRID, PHASE45_REGION_GRID],
-        region_count: PHASE45_REGION_COUNT,
+        grid: [regionGrid, regionGrid],
+        region_count: regionCount,
         populated_region_count: populatedRegionCount,
         current_splat_count: currentSplatCount,
         provisional_quota: provisionalQuota,
@@ -19349,6 +20132,8 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
         harmful_rectangle_candidate_selections: values[30],
         harmful_rectangle_parent_replacements: values[31],
         harmful_rectangle_children_created: values[32],
+        structure_allocation_over_budget_source_selections: values[33],
+        structure_allocation_under_budget_source_selections: values[34],
       };
     } finally {
       readBuffer.destroy();
@@ -21651,11 +22436,12 @@ function plannedAdaptiveGpuBatch({
       state.webgpu.renderer?.trainState?.coarseImage,
       state.webgpu.renderer?.trainState?.midImage,
     );
-    const densityScheduled =
-      growthSettings.densityEventsEnabled &&
-      candidate > densifyWarmupSteps(densitySteps) &&
-      candidate <= growthSteps &&
-      (candidate % growthSettings.densifyInterval === 0 || candidate === growthSteps);
+    const densityScheduled = growthEventScheduled(
+      candidate,
+      densitySteps,
+      growthSteps,
+      growthSettings,
+    );
     const densityDue = paintMutationAllowed && densityScheduled;
     const paintDetailRecoveryScheduled =
       Boolean(state.params?.opaqueLayered) &&
@@ -21819,6 +22605,12 @@ function setInputControlsDisabled(disabled) {
     els.stageGrowthP1,
     els.stageGrowthP2,
     els.stageGrowthP3,
+    els.structureGuidedAllocation,
+    els.structureRegionGrid,
+    els.midTrainingOverdensityCorrection,
+    els.overdensityCorrectionSchedule,
+    els.overdensityCorrectionInterval,
+    els.overdensityDonorPercent,
     els.scaleLearningRate,
     els.rotationLearningRate,
     els.thetaAlignRate,
@@ -21830,6 +22622,7 @@ function setInputControlsDisabled(disabled) {
     els.p2BaseScaleFloorRatio,
     els.densifyInterval,
     els.growthPercentage,
+    els.growthApplyUntil,
     els.growthSignalThreshold,
     els.retryWebGpuButton,
     els.pathInput,
@@ -21879,6 +22672,14 @@ function syncAlgorithmRequirements() {
     els.discreteLayers.checked = true;
   }
   els.opacityLearningRate.disabled = state.running;
+  els.structureRegionGrid.disabled = state.running || (
+    !els.structureGuidedAllocation.checked && !els.midTrainingOverdensityCorrection.checked
+  );
+  els.overdensityDonorPercent.disabled = state.running || !els.midTrainingOverdensityCorrection.checked;
+  els.overdensityCorrectionSchedule.disabled = state.running || !els.midTrainingOverdensityCorrection.checked;
+  els.overdensityCorrectionInterval.disabled = state.running ||
+    !els.midTrainingOverdensityCorrection.checked ||
+    phase39Variants().overdensityCorrectionSchedule !== "interval";
   els.alphaLossWeight.disabled = state.running || brushSelected;
   els.adaptiveGridInitializationFraction.disabled = state.running || algorithmUsesPaintKernel();
   els.adaptiveGridInitializationFraction.title = algorithmUsesPaintKernel()
@@ -21952,6 +22753,7 @@ function syncAlgorithmRequirements() {
   for (const control of [els.stageGrowthP1, els.stageGrowthP2, els.stageGrowthP3]) {
     control.disabled = state.running || !els.stageAwareGrowth.checked;
   }
+  els.structureGuidedAllocation.disabled = state.running;
 }
 
 function syncLayerOrderDependency() {
@@ -22829,6 +23631,12 @@ async function updatePreview(step, final = false, { present = true, readOnlyPeri
     state.metrics.outside_render_splat_count = outsideRender.count;
     state.metrics.outside_render_max_extent = outsideRender.maxLeak;
     state.metrics.shape_stats = shape;
+    if (final) {
+      state.metrics.source_detail_splat_distribution = sourceDetailSplatDistribution(
+        state.image,
+        state.params,
+      );
+    }
     state.metrics.scale_histogram = shape?.scale_histogram || null;
     state.metrics.tiny_splat_count = shape?.tiny_splat_count ?? null;
     state.metrics.tiny_splat_ratio = shape?.tiny_splat_ratio ?? null;
@@ -23063,10 +23871,18 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   const runLiveQualityMetrics = liveQualityMetricsEnabled();
   const runQaPeriodicMetrics = qaPeriodicTrainingEvaluationEnabled();
   const runPeriodicEvaluation = periodicTrainingEvaluationEnabled();
-  const runStageAwareGrowth = phase39Variants().stageAwareGrowth;
-  const runStageGrowthShares = phase39Variants().stageGrowthShares;
+  const runGrowthSettings = phase39Variants();
+  const runStageAwareGrowth = runGrowthSettings.stageAwareGrowth;
+  const runStageGrowthShares = runGrowthSettings.stageGrowthShares;
   const runLayerSettings = phase46Variants();
   const runDiscreteLayerSettings = discreteLayerSettings();
+  const requestedGrowthApplyUntilFraction = runGrowthSettings.growthApplyUntilFraction;
+  const runGrowthApplyUntilFraction = effectiveGrowthApplyUntilFraction(
+    steps,
+    requestedGrowthApplyUntilFraction,
+    runDiscreteLayerSettings.opaqueLayered,
+    runDiscreteLayerSettings.opaquePaintSettleFraction,
+  );
   const runCurrentContributionCompaction = currentContributionCompactionSettings(algorithm);
   let initialCount = baseInitialCount;
   let finalCount = baseFinalCount;
@@ -23736,6 +24552,19 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         : null,
     },
     phase45_region_report: null,
+    mid_training_overdensity_correction: {
+      enabled: runGrowthSettings.midTrainingOverdensityCorrection,
+      schedule: runGrowthSettings.overdensityCorrectionSchedule,
+      interval: runGrowthSettings.overdensityCorrectionInterval,
+      apply_until_step: experimentalGrowthSteps(steps, runGrowthApplyUntilFraction),
+      scheduled_steps: overdensityCorrectionScheduleSteps(
+        steps,
+        experimentalGrowthSteps(steps, runGrowthApplyUntilFraction),
+        runGrowthSettings,
+      ),
+      fixed_count: true,
+      events: [],
+    },
     overlap_diagnostics: null,
     color_space_audit: null,
     performance_trace: [],
@@ -23828,9 +24657,14 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
     growth_schedule: {
       mode: runStageAwareGrowth
         ? "stage-aware-percentage-cap"
-        : "threshold-percentage-cap",
+        : "threshold-percentage-target-closure",
       final_is_cap: true,
+      final_is_target_at_growth_horizon: runGrowthApplyUntilFraction > 0,
       percentage: phase39Variants().growthFraction * 100,
+      requested_apply_until_percentage: requestedGrowthApplyUntilFraction * 100,
+      apply_until_percentage: runGrowthApplyUntilFraction * 100,
+      apply_until_clamped_for_paint_settle:
+        runGrowthApplyUntilFraction < requestedGrowthApplyUntilFraction,
       signal_threshold: phase39Variants().growthSignalThreshold,
       stage_aware: runStageAwareGrowth,
       phase_shares_percentage: {
@@ -23844,6 +24678,8 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         : null,
       growth_stage_target: finalCount,
       cap_reached_step: state.params.count >= finalCount ? 0 : null,
+      target_reached_at_growth_horizon: state.params.count >= finalCount,
+      target_reached_count: state.params.count >= finalCount ? state.params.count : null,
       training_early_stop: false,
       threshold_skips: 0,
     },
@@ -23901,6 +24737,16 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         attempts: [],
       };
     }
+    state.metrics.growth_schedule.growth_stage_target = finalCount;
+    state.metrics.growth_schedule.density_stage_target = runStageAwareGrowth
+      ? Math.min(
+          finalCount,
+          state.metrics.initial_splats + Math.round(
+            (finalCount - state.metrics.initial_splats) *
+            (runStageGrowthShares.p1 + runStageGrowthShares.p2),
+          ),
+        )
+      : null;
     const adaptiveInitializationVariants = {
       ...runAdaptiveGridInitialization,
       monochromeUnderpainting: Boolean(state.params.monochromeUnderpaintingEnabled),
@@ -23997,12 +24843,20 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         break;
       }
       const densitySteps = experimentalDensifySteps(steps);
-      const growthSteps = experimentalGrowthSteps(steps);
+      const growthSteps = experimentalGrowthSteps(steps, runGrowthApplyUntilFraction);
       const growthSettings = {
         ...phase39Variants(),
         stageAwareGrowth: runStageAwareGrowth,
         stageGrowthShares: runStageGrowthShares,
+        growthApplyUntilFraction: runGrowthApplyUntilFraction,
       };
+      const nextOverdensityCorrectionStep =
+        state.metrics.mid_training_overdensity_correction.scheduled_steps[
+          state.metrics.mid_training_overdensity_correction.events.length
+        ] ?? null;
+      const overdensityCorrectionDueAtStep = Boolean(
+        nextOverdensityCorrectionStep !== null && step >= nextOverdensityCorrectionStep
+      );
       const paintMutationAllowedAtStep = opaquePaintStructuralMutationAllowed(
         step,
         steps,
@@ -24010,11 +24864,13 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         runDiscreteLayerSettings.opaquePaintSettleFraction,
       );
       const densifyInterval = growthSettings.densifyInterval;
-      const densifyScheduledAtStep =
-        growthSettings.densityEventsEnabled &&
-        step > densifyWarmupSteps(densitySteps) &&
-        step <= growthSteps &&
-        (step % densifyInterval === 0 || step === growthSteps);
+      const terminalGrowthClosureScheduledAtStep = growthSteps > 0 && step === growthSteps;
+      const densifyScheduledAtStep = growthEventScheduled(
+        step,
+        densitySteps,
+        growthSteps,
+        growthSettings,
+      );
       const densifyDue = paintMutationAllowedAtStep && densifyScheduledAtStep;
       const growthPlan = densifyDue
         ? growthSchedulePlan({
@@ -24024,6 +24880,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
           currentCount: state.params.count,
           finalCount,
           growthFraction: growthSettings.growthFraction,
+          growthApplyUntilFraction: growthSettings.growthApplyUntilFraction,
           densifyInterval,
           stageAware: growthSettings.stageAwareGrowth,
           stageGrowthShares: growthSettings.stageGrowthShares,
@@ -24051,7 +24908,14 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         }
         const densityStarted = performance.now();
         await refreshTrainingResidualSignal(step, "growth", run);
-        growthResult = await awaitTrainingRun(run, renderer.growExperimentalGpu(trainingImage, state.params, requestedTargetCount, step, steps));
+        growthResult = await awaitTrainingRun(run, renderer.growExperimentalGpu(
+          trainingImage,
+          state.params,
+          requestedTargetCount,
+          step,
+          steps,
+          { forceZeroMassFallback: Boolean(growthPlan?.terminalClosure) },
+        ));
         densityGpuMs = performance.now() - densityStarted;
         stepDensityMs += densityGpuMs;
         state.metrics.density_gpu_ms += densityGpuMs;
@@ -24107,6 +24971,11 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
           added: growthResult?.grown ? targetCount - growthStartCount : 0,
           normal_increment: growthPlan.normalIncrement,
           catch_up_limit: growthPlan.catchUpLimit,
+          remaining_growth_events: growthPlan.remainingGrowthEvents,
+          schedule_debt: growthPlan.scheduleDebt,
+          repair_increment: growthPlan.repairIncrement,
+          terminal_capacity_closure: growthPlan.terminalClosure,
+          zero_mass_fallback: Boolean(growthResult?.zeroMassFallback),
           headroom: Math.max(0, finalCount - state.params.count),
           candidate_mass: Number.isFinite(growthResult?.candidateMass) ? growthResult.candidateMass : null,
           eligible_source_count: (operations.source_claims || 0) + (operations.source_claim_conflicts || 0),
@@ -24136,6 +25005,10 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
             operations.harmful_rectangle_parent_replacements || 0,
           harmful_rectangle_children_created:
             operations.harmful_rectangle_children_created || 0,
+          structure_allocation_over_budget_source_selections:
+            operations.structure_allocation_over_budget_source_selections || 0,
+          structure_allocation_under_budget_source_selections:
+            operations.structure_allocation_under_budget_source_selections || 0,
           threshold_skipped: Boolean(growthResult && !growthResult.grown),
           skipped_reason: requestedTargetCount <= growthStartCount
             ? "schedule-no-growth"
@@ -24148,6 +25021,11 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
           metrics_before: densityMetricSnapshot(),
           gpu_ms: densityGpuMs,
         });
+        if (growthPlan.terminalClosure) {
+          state.metrics.growth_schedule.target_reached_at_growth_horizon =
+            state.params.count === finalCount;
+          state.metrics.growth_schedule.target_reached_count = state.params.count;
+        }
         if (residualDestinationOracleRequested()) {
           state.metrics.residual_destination_oracle = state.webgpu.renderer.residualDestinationOracleSummary();
         }
@@ -24175,13 +25053,14 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
           ) ||
           brushSurfaceRecoveryScheduledAtStep
         );
-      const relocationDueAtStep = paintMutationAllowedAtStep && relocationScheduledAtStep;
+      const relocationDueAtStep = paintMutationAllowedAtStep && relocationScheduledAtStep && !overdensityCorrectionDueAtStep;
       const currentVisibilityCompactionDueAtStep = opaquePaintVisibilityCompactionDue(
         step,
         steps,
         {
           ...runDiscreteLayerSettings,
           currentContributionCompactionEnabled: runCurrentContributionCompaction.enabled,
+          growthApplyUntilFraction: runGrowthApplyUntilFraction,
         },
       );
       let currentContributionCompactionDueAtStep = currentContributionCompactionDue(
@@ -24191,6 +25070,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
           ...runCurrentContributionCompaction,
           opaqueLayered: runDiscreteLayerSettings.opaqueLayered,
           opaquePaintSettleFraction: runDiscreteLayerSettings.opaquePaintSettleFraction,
+          growthApplyUntilFraction: runGrowthApplyUntilFraction,
         },
       );
       const currentContributionCompactionResetDueAtStep = currentContributionCompactionResetDue(
@@ -24200,6 +25080,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
           ...runCurrentContributionCompaction,
           opaqueLayered: runDiscreteLayerSettings.opaqueLayered,
           opaquePaintSettleFraction: runDiscreteLayerSettings.opaquePaintSettleFraction,
+          growthApplyUntilFraction: runGrowthApplyUntilFraction,
         },
       );
       const trainingStageAtStep = curriculumTrainingStage(
@@ -24276,6 +25157,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       }
       const structuralStep =
         densifyDue ||
+        overdensityCorrectionDueAtStep ||
         relocationDueAtStep ||
         currentVisibilityCompactionDueAtStep ||
         currentContributionCompactionResetDueAtStep ||
@@ -24323,6 +25205,29 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         ? await awaitTrainingRun(run, renderer.hashTrainParameters(state.params))
         : null;
       const trainStarted = performance.now();
+      if (overdensityCorrectionDueAtStep) {
+        const correctionStarted = performance.now();
+        // Use the completed contribution window before any compaction reset at
+        // the same scheduled step discards that evidence.
+        await refreshTrainingResidualSignal(Math.max(1, step - 1), "overdensity correction", run);
+        const correction = await awaitTrainingRun(
+          run,
+          renderer.correctMidTrainingOverdensityGpu(
+            trainingImage,
+            state.params,
+            Math.max(1, step - 1),
+            learningRates,
+          ),
+        );
+        const correctionMs = performance.now() - correctionStarted;
+        stepRelocationMs += correctionMs;
+        state.metrics.relocation_gpu_ms += correctionMs;
+        if (correction) {
+          state.metrics.mid_training_overdensity_correction.events.push({ ...correction, trigger_step: step });
+          state.metrics.phase45_region_report = correction.regions;
+          if (correction.moved_splats > 0 && renderer.trainState) renderer.trainState.tileReady = false;
+        }
+      }
       if (currentVisibilityCompactionDueAtStep || currentContributionCompactionResetDueAtStep) {
         await awaitTrainingRun(run, renderer.resetImportanceWindowGpu(state.params.count));
       }
@@ -24843,6 +25748,59 @@ const EXPORT_FORMATS = {
   },
 };
 
+function selectedPngExportResolutionMode() {
+  const value = els.pngExportResolution?.value;
+  return ["training", "2048", "4096", "custom"].includes(value)
+    ? value
+    : DEFAULT_PNG_EXPORT_RESOLUTION;
+}
+
+function pngExportFrameSpec(image = state.image) {
+  const trainingWidth = Math.max(1, Math.round(Number(image?.width) || Number(els.trainSize?.value) || DEFAULT_MAX_SIDE));
+  const trainingHeight = Math.max(1, Math.round(Number(image?.height) || trainingWidth));
+  const trainingLongSide = Math.max(trainingWidth, trainingHeight);
+  const mode = selectedPngExportResolutionMode();
+  const requestedLongSide = mode === "training"
+    ? trainingLongSide
+    : mode === "custom"
+      ? Number(els.pngExportLongSide?.value)
+      : Number(mode);
+  const longSide = Math.round(clampNumber(
+    requestedLongSide,
+    MIN_PNG_EXPORT_LONG_SIDE,
+    MAX_PNG_EXPORT_LONG_SIDE,
+    trainingLongSide,
+  ));
+  if (mode === "training") {
+    return { mode, longSide: trainingLongSide, width: trainingWidth, height: trainingHeight };
+  }
+  const scale = longSide / trainingLongSide;
+  return {
+    mode,
+    longSide,
+    width: Math.max(1, Math.round(trainingWidth * scale)),
+    height: Math.max(1, Math.round(trainingHeight * scale)),
+  };
+}
+
+function syncPngExportResolutionUi() {
+  const spec = pngExportFrameSpec();
+  if (selectedPngExportResolutionMode() !== "custom") {
+    els.pngExportLongSide.value = String(spec.longSide);
+  } else {
+    els.pngExportLongSide.value = String(Math.round(clampNumber(
+      els.pngExportLongSide.value,
+      MIN_PNG_EXPORT_LONG_SIDE,
+      MAX_PNG_EXPORT_LONG_SIDE,
+      spec.longSide,
+    )));
+  }
+  els.pngExportResolution.disabled = state.exporting;
+  els.pngExportLongSide.disabled = state.exporting;
+  els.pngExportResolutionStatus.textContent = `${spec.width} x ${spec.height}px`;
+  return spec;
+}
+
 function currentSplatPngSpec() {
   const renderOptions = {
     ...splatAlphaRenderOptions(),
@@ -24861,6 +25819,7 @@ function currentSplatPngSpec() {
 }
 
 function updateExportPanel() {
+  const pngFrame = syncPngExportResolutionUi();
   const enabled = state.exportReady && !state.exporting;
   const algorithm = displayedResultAlgorithm();
   const plySupported = algorithmSupportsExport("ply", algorithm);
@@ -24887,6 +25846,10 @@ function updateExportPanel() {
   data.exportReady = String(enabled);
   data.exportResultAlgorithm = algorithm.id;
   data.pngExportReady = String(pngEnabled);
+  data.pngExportResolution = pngFrame.mode;
+  data.pngExportLongSide = String(pngFrame.longSide);
+  data.pngExportWidth = String(pngFrame.width);
+  data.pngExportHeight = String(pngFrame.height);
   data.plyExportReady = String(plyEnabled);
   data.plyExportPeakMb = plyPlan?.estimatedPeakMB || "";
   data.plyExportBudgetMb = plyPlan?.budgetMB || "";
@@ -24994,13 +25957,20 @@ async function makeSplatPreviewPngBlob() {
     throw new Error("No trained splat result to export.");
   }
   const spec = currentSplatPngSpec();
+  const exportFrame = pngExportFrameSpec(state.image);
+  const renderImage = exportFrame.mode === "training"
+    ? state.image
+    : { ...state.image, width: exportFrame.width, height: exportFrame.height };
   const displayParams = state.params;
   const renderBuffers = state.webgpu.renderer.currentResultBuffers(displayParams);
   const capture = await state.webgpu.renderer.captureRenderedRgba(
-    state.image,
+    renderImage,
     displayParams,
     renderBuffers,
-    spec.renderOptions,
+    {
+      ...spec.renderOptions,
+      rebuildTiles: exportFrame.width !== state.image.width || exportFrame.height !== state.image.height,
+    },
   );
   const { rgba, width, height } = capture;
   let nonblackPixels = 0;
@@ -25036,6 +26006,7 @@ async function makeSplatPreviewPngBlob() {
     blob,
     width,
     height,
+    exportFrame,
     spec,
     padding: capture.padding,
     nonblackPixels,
@@ -26099,7 +27070,7 @@ async function saveExport({ download = true, formatKey = "ply" } = {}) {
   publishState();
   try {
     if (formatKey === "png") {
-      const { blob, width, height, spec, padding, nonblackPixels, meanRgb, pngRgbaParity } = await makeSplatPreviewPngBlob();
+      const { blob, width, height, exportFrame, spec, padding, nonblackPixels, meanRgb, pngRgbaParity } = await makeSplatPreviewPngBlob();
       const bytes = new Uint8Array(await blob.arrayBuffer());
       if (download) downloadBlob(filename, blob);
       state.exportMessage = `${filename} ${download ? "saved" : "validated"} (${(bytes.byteLength / 1024).toFixed(1)} KiB).`;
@@ -26110,6 +27081,8 @@ async function saveExport({ download = true, formatKey = "ply" } = {}) {
         bytes: bytes.byteLength,
         width,
         height,
+        resolution_mode: exportFrame.mode,
+        requested_long_side: exportFrame.longSide,
         splat_shape: spec.shape,
         splat_parameter_effects: Boolean(els.splatParameterEffects?.checked),
         splat_small_first_order: Boolean(spec.renderOptions.splatSmallFirstOrder),
@@ -26129,6 +27102,7 @@ async function saveExport({ download = true, formatKey = "ply" } = {}) {
         bytes,
         width,
         height,
+        exportFrame,
         spec,
         padding,
         nonblackPixels,
@@ -26859,12 +27833,41 @@ els.stageAwareGrowth.addEventListener("change", () => {
   syncAlgorithmRequirements();
   publishState();
 });
+els.structureGuidedAllocation.addEventListener("change", () => {
+  syncAlgorithmRequirements();
+  publishState();
+});
+els.structureRegionGrid.addEventListener("change", () => {
+  els.structureRegionGrid.value = String(phase39Variants().structureRegionGrid);
+  publishState();
+});
+els.midTrainingOverdensityCorrection.addEventListener("change", () => {
+  syncAlgorithmRequirements();
+  publishState();
+});
+els.overdensityCorrectionSchedule.addEventListener("change", () => {
+  syncAlgorithmRequirements();
+  publishState();
+});
+els.overdensityCorrectionInterval.addEventListener("change", () => {
+  els.overdensityCorrectionInterval.value = String(
+    phase39Variants().overdensityCorrectionInterval,
+  );
+  publishState();
+});
+els.overdensityDonorPercent.addEventListener("change", () => {
+  els.overdensityDonorPercent.value = String(
+    phase39Variants().overdensityDonorFraction * 100,
+  );
+  publishState();
+});
 for (const element of [els.stageGrowthP1, els.stageGrowthP2, els.stageGrowthP3]) {
   element.addEventListener("input", publishState);
 }
 els.detailCoherence.addEventListener("input", publishState);
 els.densifyInterval.addEventListener("input", publishState);
 els.growthPercentage.addEventListener("input", publishState);
+els.growthApplyUntil.addEventListener("input", publishState);
 els.growthSignalThreshold.addEventListener("input", publishState);
 els.retryWebGpuButton.addEventListener("click", async () => {
   if (trainingLifecycleInputLocked() || state.webgpu.supported) return;
@@ -26918,6 +27921,24 @@ els.savePlyButton.addEventListener("click", () => {
 });
 els.savePngButton.addEventListener("click", () => {
   saveExport({ formatKey: "png" }).catch((error) => log(error.message));
+});
+els.pngExportResolution.addEventListener("change", () => {
+  syncPngExportResolutionUi();
+  updateExportPanel();
+  publishState();
+});
+els.pngExportLongSide.addEventListener("input", () => {
+  els.pngExportResolution.value = "custom";
+  const value = Number(els.pngExportLongSide.value);
+  if (Number.isFinite(value) && value >= MIN_PNG_EXPORT_LONG_SIDE) {
+    const spec = pngExportFrameSpec();
+    els.pngExportResolutionStatus.textContent = `${spec.width} x ${spec.height}px`;
+  }
+});
+els.pngExportLongSide.addEventListener("change", () => {
+  els.pngExportResolution.value = "custom";
+  updateExportPanel();
+  publishState();
 });
 
 function activateDetailTab(name) {
@@ -27146,6 +28167,11 @@ function endCanvasPan(event) {
 els.viewer.addEventListener("pointerup", endCanvasPan);
 els.viewer.addEventListener("pointercancel", endCanvasPan);
 document.documentElement.dataset.algorithm = selectedAlgorithm().id;
+// Keep the existing desktop-first status view while saving vertical space on
+// phones. This is an initial default only; later resizes preserve user choice.
+if (window.matchMedia("(max-width: 520px)").matches) {
+  els.trainingStatusDetails.open = false;
+}
 activateDetailTab("training");
 syncLayerOrderDependency();
 syncVirtualCameraDependency();
@@ -27276,6 +28302,7 @@ detectWebGpu()
 
 if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
   loadGeneratedSample,
+  structureGuidedProfileBenchmark,
   initialSplatOrientation,
   initialSplatShape,
   initialOrientationStats,
@@ -27675,6 +28702,7 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
       webgpu_refine_events: m.webgpu_refine_events,
       densify_events: m.densify_events,
       growth_schedule: m.growth_schedule,
+      source_detail_splat_distribution: m.source_detail_splat_distribution || null,
       gpu_densify_requested: Boolean(m.webgpu_densify_requested),
       gpu_densify: Boolean(m.webgpu_densify),
       density_counters: m.density_counters,
@@ -27691,6 +28719,9 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
       phase45_variants: m.phase45_variants,
       phase46_variants: m.phase46_variants,
       phase45_region_report: m.phase45_region_report,
+      mid_training_overdensity_correction: m.mid_training_overdensity_correction
+        ? structuredClone(m.mid_training_overdensity_correction)
+        : null,
       ...(m.brush_contribution_diagnostics
         ? { brush_contribution_diagnostics: structuredClone(m.brush_contribution_diagnostics) }
         : {}),

@@ -299,6 +299,29 @@ canvas[hidden] {
   overflow: hidden;
 }
 
+.training-status-details {
+  min-width: 0;
+}
+
+.training-status-details > summary {
+  padding: 5px 8px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  cursor: pointer;
+  user-select: none;
+}
+
+.training-status-details[open] > summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.training-status-details .progress {
+  border-top: 0;
+}
+
 .progress div {
   grid-column: span 1;
   min-width: 0;
@@ -672,21 +695,24 @@ select {
   gap: 6px;
 }
 
-.rectangle-edge-ratio-row {
+.rectangle-edge-ratio-row,
+.paired-setting-row {
   display: grid;
   grid-template-columns: minmax(104px, 1.2fr) repeat(2, minmax(72px, 0.9fr));
   gap: 6px;
   align-items: end;
 }
 
-.rectangle-edge-ratio-heading {
+.rectangle-edge-ratio-heading,
+.paired-setting-heading {
   align-self: center;
   color: var(--muted);
   font-size: 11px;
   font-weight: 700;
 }
 
-.rectangle-edge-ratio-row label {
+.rectangle-edge-ratio-row label,
+.paired-setting-row label {
   min-width: 0;
 }
 
@@ -1152,7 +1178,7 @@ button:disabled {
 
 .splat-shape-options {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   width: 100%;
   gap: 5px;
 }
@@ -1163,12 +1189,7 @@ button:disabled {
   padding: 5px 8px;
   border-radius: 5px;
   line-height: 1.15;
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.splat-shape-options button:last-child {
-  grid-column: 1 / -1;
+  white-space: nowrap;
 }
 
 .splat-shape-options button.active {
@@ -1253,6 +1274,16 @@ button:disabled {
 
 .export-actions .panel-message {
   margin: 0;
+}
+
+.export-resolution-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 7px;
+}
+
+.export-resolution-controls label {
+  min-width: 0;
 }
 
 .export-button-secondary {
@@ -1358,6 +1389,14 @@ button:disabled {
 }
 
 @media (max-width: 520px) {
+  .paired-setting-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .paired-setting-heading {
+    grid-column: 1 / -1;
+  }
+
   .layer-toggle-grid {
     grid-template-columns: 1fr;
   }
