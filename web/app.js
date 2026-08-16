@@ -5291,24 +5291,6 @@ async function probeImageDimensions(file) {
   return parseImageDimensions(bytes, file.type);
 }
 
-function normalizeExifOrientedBitmap(bitmap, orientation, encodedWidth, encodedHeight, width, height) {
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext("2d");
-  if (!context) {
-    releaseCanvasBackingStore(canvas);
-    throw new Error("2D canvas is unavailable for EXIF orientation normalization.");
-  }
-  if (orientation === 5) context.setTransform(0, 1, 1, 0, 0, 0);
-  else if (orientation === 6) context.setTransform(0, 1, -1, 0, width, 0);
-  else if (orientation === 7) context.setTransform(0, -1, -1, 0, width, height);
-  else if (orientation === 8) context.setTransform(0, -1, 1, 0, 0, height);
-  else throw new Error(`Unsupported axis-swapping EXIF orientation: ${orientation}`);
-  context.drawImage(bitmap, 0, 0, encodedWidth, encodedHeight);
-  return canvas;
-}
-
 async function decodeImageFile(file) {
   const probed = await probeImageDimensions(file).catch(() => null);
   if (!probed) {
@@ -5334,15 +5316,22 @@ async function decodeImageFile(file) {
     INPUT_CACHE_MAX_SIDE,
   );
   const needsBoundedDecode = desiredWidth !== originalWidth || desiredHeight !== originalHeight;
-  const [encodedDesiredWidth, encodedDesiredHeight] = resizedSize(
-    encodedWidth,
-    encodedHeight,
-    INPUT_CACHE_MAX_SIDE,
-    INPUT_CACHE_MAX_SIDE,
-  );
   const swapsAxes = orientationSwapsImageAxes(orientation);
 
-  if (needsBoundedDecode && !swapsAxes && typeof ImageDecoder === "function") {
+  // WebKit can lose EXIF orientation when createImageBitmap() receives a Blob,
+  // while its HTMLImageElement path is display-oriented. Dimensions alone
+  // cannot reveal whether pixels were already rotated when resizeWidth and
+  // resizeHeight force an exact output size, so avoid manual double rotation.
+  if (swapsAxes) {
+    return decodeImageFileViaHtmlElement(file, {
+      expectedWidth: originalWidth,
+      expectedHeight: originalHeight,
+      orientation,
+      mode: needsBoundedDecode ? "html-image-bounded-exif" : "html-image-exif",
+    });
+  }
+
+  if (needsBoundedDecode && typeof ImageDecoder === "function") {
     let decoder = null;
     let frame = null;
     try {
@@ -5390,43 +5379,13 @@ async function decodeImageFile(file) {
 
   if (typeof createImageBitmap === "function") {
     try {
-      const bitmapOptions = {};
-      if (swapsAxes) bitmapOptions.imageOrientation = "none";
-      if (needsBoundedDecode) {
-        bitmapOptions.resizeWidth = swapsAxes ? encodedDesiredWidth : desiredWidth;
-        bitmapOptions.resizeHeight = swapsAxes ? encodedDesiredHeight : desiredHeight;
-        bitmapOptions.resizeQuality = "high";
-      }
-      const bitmap = Object.keys(bitmapOptions).length > 0
-        ? await createImageBitmap(file, bitmapOptions)
+      const bitmap = needsBoundedDecode
+        ? await createImageBitmap(file, {
+          resizeWidth: desiredWidth,
+          resizeHeight: desiredHeight,
+          resizeQuality: "high",
+        })
         : await createImageBitmap(file);
-      if (swapsAxes && bitmap.width === encodedDesiredWidth && bitmap.height === encodedDesiredHeight) {
-        let canvas;
-        try {
-          canvas = normalizeExifOrientedBitmap(
-            bitmap,
-            orientation,
-            encodedDesiredWidth,
-            encodedDesiredHeight,
-            desiredWidth,
-            desiredHeight,
-          );
-        } finally {
-          bitmap.close?.();
-        }
-        return {
-          source: canvas,
-          width: desiredWidth,
-          height: desiredHeight,
-          originalWidth,
-          originalHeight,
-          orientation,
-          mode: needsBoundedDecode
-            ? "imagebitmap-bounded-exif-normalized"
-            : "imagebitmap-exif-normalized",
-          close: () => releaseCanvasBackingStore(canvas),
-        };
-      }
       const decodedAspect = bitmap.width / Math.max(1, bitmap.height);
       const expectedAspect = desiredWidth / Math.max(1, desiredHeight);
       if (Math.abs(decodedAspect - expectedAspect) > Math.max(1e-6, expectedAspect * 0.001)) {
@@ -5447,6 +5406,20 @@ async function decodeImageFile(file) {
       log(`createImageBitmap decode failed; using Canvas image decode: ${error.message}`);
     }
   }
+  return decodeImageFileViaHtmlElement(file, {
+    expectedWidth: originalWidth,
+    expectedHeight: originalHeight,
+    orientation,
+    mode: "html-image-canvas",
+  });
+}
+
+async function decodeImageFileViaHtmlElement(file, {
+  expectedWidth,
+  expectedHeight,
+  orientation,
+  mode,
+}) {
   const url = URL.createObjectURL(file);
   let image = null;
   try {
@@ -5455,7 +5428,7 @@ async function decodeImageFile(file) {
       throw new Error(`Decoded image is too large (maximum ${MAX_INPUT_DECODED_PIXELS.toLocaleString()} pixels).`);
     }
     const fallbackAspect = image.naturalWidth / Math.max(1, image.naturalHeight);
-    const expectedAspect = originalWidth / Math.max(1, originalHeight);
+    const expectedAspect = expectedWidth / Math.max(1, expectedHeight);
     if (Math.abs(fallbackAspect - expectedAspect) > Math.max(1e-6, expectedAspect * 0.001)) {
       throw new Error(
         `Image orientation could not be decoded safely (expected aspect ${expectedAspect.toFixed(6)}, got ${fallbackAspect.toFixed(6)}).`,
@@ -5481,7 +5454,7 @@ async function decodeImageFile(file) {
         originalWidth: image.naturalWidth,
         originalHeight: image.naturalHeight,
         orientation,
-        mode: "html-image-canvas",
+        mode,
         close() {
           releaseCanvasBackingStore(canvas);
         },
