@@ -21836,6 +21836,7 @@ function displayRgbaParity(a, b) {
       alpha_max_abs: 255,
       premultiplied_max_abs: 255,
       premultiplied_mean_abs: Number.POSITIVE_INFINITY,
+      premultiplied_tolerance: 1,
     };
   }
   let alphaMaximum = 0;
@@ -21867,10 +21868,13 @@ function displayRgbaParity(a, b) {
     if (pixelMaximum > 1) premultipliedMismatchPixels += 1;
   }
   // The training buffer and the standalone render target quantize the same
-  // float alpha through different 8-bit paths. Accept one code-value of
-  // round-off in both alpha and premultiplied color, while retaining the
-  // export block for any visually meaningful divergence.
-  const displayEquivalent = alphaMaximum <= 1 && premultipliedMaximum <= 1;
+  // float alpha through different 8-bit paths. A one-code alpha difference
+  // can add one more code of premultiplied-color round-off, so allow two only
+  // when that alpha difference is present. An alpha-identical two-code color
+  // difference remains a real render mismatch and still blocks export.
+  const premultipliedTolerance = alphaMaximum > 0 ? 2 : 1;
+  const displayEquivalent =
+    alphaMaximum <= 1 && premultipliedMaximum <= premultipliedTolerance;
   return {
     exact: displayEquivalent,
     display_equivalent: displayEquivalent,
@@ -21880,6 +21884,7 @@ function displayRgbaParity(a, b) {
     alpha_max_abs: alphaMaximum,
     premultiplied_max_abs: premultipliedMaximum,
     premultiplied_mean_abs: premultipliedTotal / Math.max(1, channels),
+    premultiplied_tolerance: premultipliedTolerance,
     premultiplied_mismatch_pixels: premultipliedMismatchPixels,
     maximum_pixel: maximumPixel,
   };

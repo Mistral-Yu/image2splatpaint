@@ -159,7 +159,12 @@ export async function verifyRelease(sitePath) {
   check("app has a visible local-only privacy notice", /\b(?:no uploads?|never uploads?|processed locally|kept locally|stays? (?:on|in) (?:this|your) (?:device|browser))\b/i.test(webHtml), failures);
   check("live quality metrics are default-off", liveMetricsInput.includes('type="checkbox"') && !/\bchecked(?:\s|=|>)/i.test(liveMetricsInput), failures);
   check("app exposes exactly four public algorithms", JSON.stringify(algorithmValues) === JSON.stringify(expectedAlgorithms), failures);
-  check("export parity permits only one 8-bit round-off step", app.includes("alphaMaximum <= 1 && premultipliedMaximum <= 1"), failures);
+  check(
+    "export parity accounts for one alpha quantization step in premultiplied color",
+    app.includes("const premultipliedTolerance = alphaMaximum > 0 ? 2 : 1") &&
+      app.includes("alphaMaximum <= 1 && premultipliedMaximum <= premultipliedTolerance"),
+    failures,
+  );
   check("README uses the verified public UI screenshot", readme.includes('src="assets/readme-ui.png"') && screenshotIsPng, failures);
   check("HTML has no remote script or stylesheet", localAssetReferences(`${rootHtml}\n${webHtml}`), failures);
   check("CSS has no remote stylesheet or URL", !/(?:@import|url)\s*(?:\(|)["']?(?:https?:)?\/\//i.test(styles), failures);
