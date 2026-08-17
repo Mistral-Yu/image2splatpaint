@@ -1,10 +1,7 @@
 <div align="center">
   <h1>Image2SplatPaint</h1>
-  <p><strong>Explore a new differentiable stylization medium built from trainable splats, directly in your browser.</strong></p>
-  <p>
-    Turn one image into Gaussian, geometric, and paint-like representations,
-    inspect how they transform it, and export the result.
-  </p>
+  <p><strong>Recreate or stylize an image with trainable splats.</strong></p>
+  <p>Runs directly in your WebGPU browser.</p>
   <p>
     <a href="https://mistral-yu.github.io/image2splatpaint/web/index.html"><strong>Launch the app</strong></a>
     ·
