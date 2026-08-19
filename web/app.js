@@ -157,8 +157,9 @@ const VIRTUAL_CAMERA_GOLDEN_ANGLE_RADIANS = Math.PI * (3 - Math.sqrt(5));
 // opacity-gradient multipliers. Slot 118 carries the learned paint-opacity
 // maximum and slot 119 carries Brush's minimum long/short aspect ratio.
 // Slots 120-122 carry the phase-relative geometric scale floor, its soft
-// correction strength, and the optimizer enable flag.
-const TRAIN_CONFIG_FLOATS = 124;
+// correction strength, and the optimizer enable flag. Slots 123-126 carry
+// Rectangle and Brush center-to-edge opacity multiplier Min/Max pairs.
+const TRAIN_CONFIG_FLOATS = 128;
 const TRAIN_CONFIG_BYTES = TRAIN_CONFIG_FLOATS * 4;
 const MAX_TRAIN_BATCH_SIZE = 16;
 const TRAIN_BATCH_CONFIG_BYTES = TRAIN_CONFIG_BYTES * MAX_TRAIN_BATCH_SIZE;
@@ -573,6 +574,21 @@ function configurePaintKernel(config, params = state.params) {
     ),
     LIMITS.maxAnisotropyMin,
   );
+  config[123] = clampNumber(params?.rectangleCenterOpacityGradientMin, 0, 1, 1);
+  config[124] = clampNumber(
+    params?.rectangleCenterOpacityGradientMax,
+    config[123],
+    1,
+    1,
+  );
+  config[125] = clampNumber(params?.brushCenterOpacityGradientMin, 0, 1, 1);
+  config[126] = clampNumber(
+    params?.brushCenterOpacityGradientMax,
+    config[125],
+    1,
+    1,
+  );
+  config[127] = 0;
   return config;
 }
 
@@ -620,6 +636,26 @@ function selectedRectangleOpacityGradient() {
     1,
   );
   return { min: minimum, max: maximum };
+}
+
+function selectedOpacityMultiplierRange(minimumSelector, maximumSelector) {
+  const min = clampNumber(document.querySelector(minimumSelector)?.value, 0, 1, 1);
+  const max = clampNumber(document.querySelector(maximumSelector)?.value, min, 1, 1);
+  return { min, max };
+}
+
+function selectedRectangleCenterOpacityGradient() {
+  return selectedOpacityMultiplierRange(
+    "#rectangleCenterOpacityGradientMin",
+    "#rectangleCenterOpacityGradientMax",
+  );
+}
+
+function selectedLayeredBrushCenterOpacityGradient() {
+  return selectedOpacityMultiplierRange(
+    "#layeredBrushCenterOpacityGradientMin",
+    "#layeredBrushCenterOpacityGradientMax",
+  );
 }
 
 function selectedLayeredBrushDirectionalEffects() {
@@ -1313,7 +1349,9 @@ fn rectangle_trapezoid_kernel_sample(
   maximumRatioInput: f32,
   asymmetricSoftness: bool,
   opacityMinimumInput: f32,
-  opacityMaximumInput: f32
+  opacityMaximumInput: f32,
+  centerOpacityMinimumInput: f32,
+  centerOpacityMaximumInput: f32
 ) -> RectangleTrapezoidSample {
   let feather = clamp(featherInput, 0.01, 0.49);
   let minimumRatio = clamp(minimumRatioInput, 0.0, 1.0);
@@ -1383,8 +1421,36 @@ fn rectangle_trapezoid_kernel_sample(
     0.5 * (opacityMaximum - opacityMinimum),
     normalized.y > -1.0 && normalized.y < 1.0
   );
-  let gradient = baseGradient * opacityFactor + vec2<f32>(0.0, baseKernel * dOpacityFactorDy);
-  return RectangleTrapezoidSample(baseKernel * opacityFactor, gradient);
+  // Squared shape-relative distance is 0 at the center and 1 along every
+  // trapezoid edge. It avoids a circular mask cutting across the paint shape.
+  let radialCoordinate = max(axisCoordinate.x, axisCoordinate.y);
+  let radialProgress = clamp(radialCoordinate * radialCoordinate, 0.0, 1.0);
+  let dRadialCoordinate = select(
+    vec2<f32>(0.0, sign(normalized.y)),
+    vec2<f32>(sign(normalized.x) / halfWidth, dHorizontalDy),
+    axisCoordinate.x >= axisCoordinate.y
+  );
+  let dRadialProgress = select(
+    vec2<f32>(0.0),
+    2.0 * radialCoordinate * dRadialCoordinate,
+    radialCoordinate > 0.0 && radialCoordinate < 1.0
+  );
+  let centerOpacityMaximum = clamp(centerOpacityMaximumInput, 0.0, 1.0);
+  let centerOpacityMinimum = clamp(centerOpacityMinimumInput, 0.0, centerOpacityMaximum);
+  let centerOpacityFactor = mix(
+    centerOpacityMaximum,
+    centerOpacityMinimum,
+    radialProgress
+  );
+  let centerOpacityGradient =
+    (centerOpacityMinimum - centerOpacityMaximum) * dRadialProgress;
+  let combinedOpacityFactor = opacityFactor * centerOpacityFactor;
+  let combinedOpacityGradient =
+    vec2<f32>(0.0, dOpacityFactorDy) * centerOpacityFactor +
+    centerOpacityGradient * opacityFactor;
+  let gradient =
+    baseGradient * combinedOpacityFactor + baseKernel * combinedOpacityGradient;
+  return RectangleTrapezoidSample(baseKernel * combinedOpacityFactor, gradient);
 }
 `;
 
@@ -1417,6 +1483,8 @@ fn illustrative_oil_kernel_sample(
   widthTaperEnabled: bool,
   opacityStart: f32,
   opacityEnd: f32,
+  centerOpacityMinimumInput: f32,
+  centerOpacityMaximumInput: f32,
   widthStart: f32,
   widthEnd: f32
 ) -> OilKernelSample {
@@ -1494,9 +1562,41 @@ fn illustrative_oil_kernel_sample(
   );
   let opacityGradientLongTrans = vec2<f32>(dOpacityDLongitudinal, 0.0);
   let opacityGradient = select(opacityGradientLongTrans.yx, opacityGradientLongTrans, majorIsX);
-  let kernel = baseKernel * opacityFactor;
-  let gradient = baseGradient * opacityFactor + baseKernel * opacityGradient;
-  let taperGradient = dKernelDq * dQdTaper * opacityFactor;
+  // q=1 is the connected Brush contour. sqrt(q) is squared distance in its
+  // quartic shape coordinates, giving a finite zero derivative at the center.
+  let radialProgress = clamp(sqrt(max(q, 0.0)), 0.0, 1.0);
+  let dRadialProgressDq = select(
+    0.0,
+    0.5 / max(radialProgress, 0.000001),
+    q > 0.000000000001 && q < 1.0
+  );
+  let centerOpacityMaximum = clamp(centerOpacityMaximumInput, 0.0, 1.0);
+  let centerOpacityMinimum = clamp(centerOpacityMinimumInput, 0.0, centerOpacityMaximum);
+  let centerOpacityFactor = mix(
+    centerOpacityMaximum,
+    centerOpacityMinimum,
+    radialProgress
+  );
+  let dCenterOpacityDq =
+    (centerOpacityMinimum - centerOpacityMaximum) * dRadialProgressDq;
+  let centerOpacityGradientLongTrans = dCenterOpacityDq * vec2<f32>(
+    dQdLongitudinal,
+    dQdTransverse
+  );
+  let centerOpacityGradient = select(
+    centerOpacityGradientLongTrans.yx,
+    centerOpacityGradientLongTrans,
+    majorIsX
+  );
+  let combinedOpacityFactor = opacityFactor * centerOpacityFactor;
+  let combinedOpacityGradient =
+    opacityGradient * centerOpacityFactor + centerOpacityGradient * opacityFactor;
+  let kernel = baseKernel * combinedOpacityFactor;
+  let gradient =
+    baseGradient * combinedOpacityFactor + baseKernel * combinedOpacityGradient;
+  let taperGradient =
+    dKernelDq * dQdTaper * combinedOpacityFactor +
+    baseKernel * opacityFactor * dCenterOpacityDq * dQdTaper;
   return OilKernelSample(kernel, gradient, taperGradient);
 }
 
@@ -3042,10 +3142,14 @@ const els = {
   opaquePaintSummary: document.querySelector("#opaquePaintSummary"),
   rectangleOpacityGradientMin: document.querySelector("#rectangleOpacityGradientMin"),
   rectangleOpacityGradientMax: document.querySelector("#rectangleOpacityGradientMax"),
+  rectangleCenterOpacityGradientMin: document.querySelector("#rectangleCenterOpacityGradientMin"),
+  rectangleCenterOpacityGradientMax: document.querySelector("#rectangleCenterOpacityGradientMax"),
   rectangleLearnedOpacityMin: document.querySelector("#rectangleLearnedOpacityMin"),
   rectangleLearnedOpacityMax: document.querySelector("#rectangleLearnedOpacityMax"),
   layeredBrushOpacityGradientStart: document.querySelector("#layeredBrushOpacityGradientStart"),
   layeredBrushOpacityGradientEnd: document.querySelector("#layeredBrushOpacityGradientEnd"),
+  layeredBrushCenterOpacityGradientMin: document.querySelector("#layeredBrushCenterOpacityGradientMin"),
+  layeredBrushCenterOpacityGradientMax: document.querySelector("#layeredBrushCenterOpacityGradientMax"),
   layeredBrushLearnedOpacityMin: document.querySelector("#layeredBrushLearnedOpacityMin"),
   layeredBrushLearnedOpacityMax: document.querySelector("#layeredBrushLearnedOpacityMax"),
   layeredBrushWidthTaperStart: document.querySelector("#layeredBrushWidthTaperStart"),
@@ -6741,6 +6845,18 @@ function snapshotParams(params) {
       1,
       1,
     ),
+    rectangleCenterOpacityGradientMin: clampNumber(
+      params.rectangleCenterOpacityGradientMin,
+      0,
+      1,
+      1,
+    ),
+    rectangleCenterOpacityGradientMax: clampNumber(
+      params.rectangleCenterOpacityGradientMax,
+      clampNumber(params.rectangleCenterOpacityGradientMin, 0, 1, 1),
+      1,
+      1,
+    ),
     rectangleMinAspectRatio: clampNumber(
       params.rectangleMinAspectRatio,
       MIN_RECTANGLE_ASPECT_RATIO,
@@ -6830,6 +6946,13 @@ function snapshotParams(params) {
     brushOpacityGradientEnabled: Boolean(params.brushOpacityGradientEnabled),
     brushOpacityGradientStart: clampNumber(params.brushOpacityGradientStart, 0, 1, 0),
     brushOpacityGradientEnd: clampNumber(params.brushOpacityGradientEnd, 0, 1, 1),
+    brushCenterOpacityGradientMin: clampNumber(params.brushCenterOpacityGradientMin, 0, 1, 1),
+    brushCenterOpacityGradientMax: clampNumber(
+      params.brushCenterOpacityGradientMax,
+      clampNumber(params.brushCenterOpacityGradientMin, 0, 1, 1),
+      1,
+      1,
+    ),
     brushWidthTaperEnabled: Boolean(params.brushWidthTaperEnabled),
     brushWidthTaperStart: clampNumber(params.brushWidthTaperStart, 0, 1, 1),
     brushWidthTaperEnd: clampNumber(params.brushWidthTaperEnd, 0, 1, 0),
@@ -7788,6 +7911,9 @@ function initOpaqueLayeredPaint(image, count, kernelShape) {
   const rectangleOpacityGradient = selectedRectangleOpacityGradient();
   params.rectangleOpacityGradientMin = rectangleOpacityGradient.min;
   params.rectangleOpacityGradientMax = rectangleOpacityGradient.max;
+  const rectangleCenterOpacityGradient = selectedRectangleCenterOpacityGradient();
+  params.rectangleCenterOpacityGradientMin = rectangleCenterOpacityGradient.min;
+  params.rectangleCenterOpacityGradientMax = rectangleCenterOpacityGradient.max;
   const learnedOpacity = kernelShape === "rectangle"
     ? selectedRectangleLearnedOpacity()
     : selectedLayeredBrushLearnedOpacity();
@@ -7831,6 +7957,7 @@ function initOpaqueLayeredPaint(image, count, kernelShape) {
     harmfulRectangleParentSplitSettings().enabled;
   params.frontSplitChildrenEnabled = frontSplitChildrenSettings().enabled;
   const directionalEffects = selectedLayeredBrushDirectionalEffects();
+  const brushCenterOpacityGradient = selectedLayeredBrushCenterOpacityGradient();
   params.minimumOpacityEnabled = true;
   params.minimumOpacity = learnedOpacity.min;
   params.maximumOpacity = learnedOpacity.max;
@@ -7849,6 +7976,8 @@ function initOpaqueLayeredPaint(image, count, kernelShape) {
   params.brushOpacityGradientEnabled = illustrativeOil && directionalEffects.opacity;
   params.brushOpacityGradientStart = directionalEffects.opacityStart;
   params.brushOpacityGradientEnd = directionalEffects.opacityEnd;
+  params.brushCenterOpacityGradientMin = brushCenterOpacityGradient.min;
+  params.brushCenterOpacityGradientMax = brushCenterOpacityGradient.max;
   params.brushWidthTaperEnabled = illustrativeOil && directionalEffects.widthTaper;
   params.brushWidthTaperStart = directionalEffects.widthStart;
   params.brushWidthTaperEnd = directionalEffects.widthEnd;
@@ -8702,6 +8831,18 @@ function growParamPlaceholders(params, targetCount) {
       1,
       1,
     ),
+    rectangleCenterOpacityGradientMin: clampNumber(
+      params.rectangleCenterOpacityGradientMin,
+      0,
+      1,
+      1,
+    ),
+    rectangleCenterOpacityGradientMax: clampNumber(
+      params.rectangleCenterOpacityGradientMax,
+      clampNumber(params.rectangleCenterOpacityGradientMin, 0, 1, 1),
+      1,
+      1,
+    ),
     rectangleMinAspectRatio: clampNumber(
       params.rectangleMinAspectRatio,
       MIN_RECTANGLE_ASPECT_RATIO,
@@ -8765,6 +8906,13 @@ function growParamPlaceholders(params, targetCount) {
     brushOpacityGradientEnabled: Boolean(params.brushOpacityGradientEnabled),
     brushOpacityGradientStart: clampNumber(params.brushOpacityGradientStart, 0, 1, 0),
     brushOpacityGradientEnd: clampNumber(params.brushOpacityGradientEnd, 0, 1, 1),
+    brushCenterOpacityGradientMin: clampNumber(params.brushCenterOpacityGradientMin, 0, 1, 1),
+    brushCenterOpacityGradientMax: clampNumber(
+      params.brushCenterOpacityGradientMax,
+      clampNumber(params.brushCenterOpacityGradientMin, 0, 1, 1),
+      1,
+      1,
+    ),
     brushMinAspectRatio: clampNumber(params.brushMinAspectRatio, LIMITS.maxAnisotropyMin, params.brushMaxAspectRatio, LIMITS.maxAnisotropyMin),
     brushMaxAspectRatio: clampNumber(params.brushMaxAspectRatio, LIMITS.maxAnisotropyMin, LIMITS.maxAnisotropyMax, DEFAULT_MAX_ANISOTROPY),
     brushWidthTaperEnabled: Boolean(params.brushWidthTaperEnabled),
@@ -9956,6 +10104,10 @@ struct Uniforms {
   reservedPreview1: f32,
   reservedPreview2: f32,
   pad2: f32,
+  centerOpacityMin: f32,
+  centerOpacityMax: f32,
+  pad3: f32,
+  pad4: f32,
 };
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 struct SplatPosition { center: vec2f, rawDepth: f32, depthGradient: f32, };
@@ -10017,6 +10169,8 @@ fn preview_kernel(
       uniforms.reservedPreview2 > 0.5,
       uniforms.reservedPreview0,
       uniforms.pad2,
+      uniforms.centerOpacityMin,
+      uniforms.centerOpacityMax,
       uniforms.padPaint0,
       uniforms.padPaint1
     ).kernel;
@@ -10046,7 +10200,9 @@ fn preview_kernel(
         ${RECTANGLE_FLAG_ASYMMETRIC_SOFTNESS}u
       ),
       uniforms.reservedPreview0,
-      uniforms.pad2
+      uniforms.pad2,
+      uniforms.centerOpacityMin,
+      uniforms.centerOpacityMax
     ).kernel;
   }
   if (uniforms.shapeMode > 0.5) {
@@ -10544,7 +10700,7 @@ fn sort_tiles(
 }
 `;
     const shader = `
-struct Config { values: array<vec4<f32>, 31>, };
+struct Config { values: array<vec4<f32>, 32>, };
 @group(0) @binding(0) var<uniform> config: Config;
 struct SplatPosition { center: vec2<f32>, rawDepth: f32, depthGradient: f32, };
 @group(0) @binding(1) var<storage, read> xy: array<SplatPosition>;
@@ -10725,7 +10881,7 @@ ${sortTilesFunction}`;
   async ensureDiscreteLayerPipelines() {
     if (this.discreteLayerAssignPipeline && this.discreteLayerCommitPipeline) return;
     const shader = `
-struct Config { values: array<vec4<f32>, 31>, };
+struct Config { values: array<vec4<f32>, 32>, };
 struct SplatPosition { center: vec2<f32>, rawDepth: f32, depthGradient: f32, };
 struct AdamState {
   mGeom: vec4<f32>,
@@ -11536,6 +11692,13 @@ fn commit_layers(@builtin(global_invocation_id) id: vec3<u32>) {
       !useTileOrder &&
       !useCachedGlobalOrder &&
       (Boolean(params.layerOrderEnabled) || useSplatPreviewOrder);
+    const paintKernelShape = normalizedKernelShape(params.kernelShape);
+    const centerOpacityMin = paintKernelShape === "rectangle"
+      ? clampNumber(params.rectangleCenterOpacityGradientMin, 0, 1, 1)
+      : clampNumber(params.brushCenterOpacityGradientMin, 0, 1, 1);
+    const centerOpacityMax = paintKernelShape === "rectangle"
+      ? clampNumber(params.rectangleCenterOpacityGradientMax, centerOpacityMin, 1, 1)
+      : clampNumber(params.brushCenterOpacityGradientMax, centerOpacityMin, 1, 1);
     const uniform = new Float32Array([
       preview.width,
       preview.height,
@@ -11579,14 +11742,18 @@ fn commit_layers(@builtin(global_invocation_id) id: vec3<u32>) {
         ? Math.max(0, Number(options.splatScaleMultiplier))
         : 1,
       Math.max(0.000001, Number(options.localAspectRatio) || 1),
-      normalizedKernelShape(params.kernelShape) === "rectangle"
+      paintKernelShape === "rectangle"
         ? clampNumber(params.rectangleOpacityGradientMin, 0, 1, 1)
         : clampNumber(params.brushOpacityGradientStart, 0, 1, 1),
       params.brushOpacityGradientEnabled ? 1 : 0,
       params.brushWidthTaperEnabled ? 1 : 0,
-      normalizedKernelShape(params.kernelShape) === "rectangle"
+      paintKernelShape === "rectangle"
         ? clampNumber(params.rectangleOpacityGradientMax, 0, 1, 1)
         : clampNumber(params.brushOpacityGradientEnd, 0, 1, 1),
+      centerOpacityMin,
+      centerOpacityMax,
+      0,
+      0,
     ]);
     const buffers = [];
     try {
@@ -12126,7 +12293,7 @@ fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   let importanceW = select(previousImportance.w + 1.0, previousImportance.w + coherenceNorm, densityGradientMode == 2u);
   stats[capacity + g] = vec4<f32>(mix(previousImportance.xyz, measuredImportance, importanceAlpha), importanceW);`;
     const renderShader = `
-struct Config { values: array<vec4<f32>, 31>, };
+struct Config { values: array<vec4<f32>, 32>, };
 struct AlphaState { compositeAlpha: f32, acceptedEnd: u32, pad0: f32, pad1: u32, };
 @group(0) @binding(0) var<uniform> config: Config;
 struct SplatPosition { center: vec2<f32>, rawDepth: f32, depthGradient: f32, };
@@ -12179,6 +12346,8 @@ fn training_kernel(
       cfg(95u) > 0.5,
       cfg(101u),
       cfg(102u),
+      cfg(125u),
+      cfg(126u),
       cfg(103u),
       cfg(104u)
     ).kernel;
@@ -12201,7 +12370,9 @@ fn training_kernel(
     widthRatios.y,
     rectangle_flag_enabled(cfg(97u), ${RECTANGLE_FLAG_ASYMMETRIC_SOFTNESS}u),
     cfg(116u),
-    cfg(117u)
+    cfg(117u),
+    cfg(123u),
+    cfg(124u)
   ).kernel;
 }
 
@@ -12816,7 +12987,7 @@ fn alpha_ssim_tiles(
 }`;
 
     const lossGradientShader = [
-      "struct Config { values: array<vec4<f32>, 31>, };",
+      "struct Config { values: array<vec4<f32>, 32>, };",
       "@group(0) @binding(0) var<uniform> config: Config;",
       "@group(0) @binding(1) var<storage, read> targetRgb: array<f32>;",
       "@group(0) @binding(2) var<storage, read> targetAlpha: array<f32>;",
@@ -13048,7 +13219,7 @@ fn alpha_ssim_tiles(
       ];
     const exactBackwardShader = [
       this.subgroupExactBackwardEnabled ? "enable subgroups;" : "",
-      "struct Config { values: array<vec4<f32>, 31>, };",
+      "struct Config { values: array<vec4<f32>, 32>, };",
       "struct AlphaState { compositeAlpha: f32, acceptedEnd: u32, pad0: f32, pad1: u32, };",
       "struct KernelSample { kernel: f32, dCenter: vec2<f32>, dLogScale: vec2<f32>, dTheta: f32, dTaper: f32, };",
       "struct KernelEvaluation { rawKernel: f32, weightedKernel: f32, dCenter: vec2<f32>, dLogScale: vec2<f32>, dTheta: f32, dDepth: f32, };",
@@ -13091,6 +13262,8 @@ fn alpha_ssim_tiles(
       "      cfg(95u) > 0.5,",
       "      cfg(101u),",
       "      cfg(102u),",
+      "      cfg(125u),",
+      "      cfg(126u),",
       "      cfg(103u),",
       "      cfg(104u)",
       "    );",
@@ -13112,7 +13285,7 @@ fn alpha_ssim_tiles(
       "    let extentScale = max(sampleScale * extent * areaCompensation, vec2<f32>(0.0001));",
       "    let normalized = r / extentScale;",
       `    let asymmetricSoftness = rectangle_flag_enabled(cfg(97u), ${RECTANGLE_FLAG_ASYMMETRIC_SOFTNESS}u);`,
-      "    let sample = rectangle_trapezoid_kernel_sample(normalized, feather, widthRatios.x, widthRatios.y, asymmetricSoftness, cfg(116u), cfg(117u));",
+      "    let sample = rectangle_trapezoid_kernel_sample(normalized, feather, widthRatios.x, widthRatios.y, asymmetricSoftness, cfg(116u), cfg(117u), cfg(123u), cfg(124u));",
       "    if (sample.kernel <= 0.00000001) { return KernelSample(0.0, vec2<f32>(0.0), vec2<f32>(0.0), 0.0, 0.0); }",
       "    let dLogDNormalized = sample.gradient / max(sample.kernel, 0.000001);",
       "    let dLogDr = dLogDNormalized / extentScale;",
@@ -13570,7 +13743,7 @@ fn alpha_ssim_tiles(
     ].join("\n");
 
     const segmentedReferenceShader = `
-struct Config { values: array<vec4<f32>, 31>, };
+struct Config { values: array<vec4<f32>, 32>, };
 @group(0) @binding(0) var<uniform> config: Config;
 @group(0) @binding(1) var<storage, read> tileOffsets: array<u32>;
 @group(0) @binding(2) var<storage, read> tileIndices: array<u32>;
@@ -13889,7 +14062,7 @@ fn virtual_order_penalty(
 `;
 
     const brushLocalColorFlowShader = `
-struct Config { values: array<vec4<f32>, 31>, };
+struct Config { values: array<vec4<f32>, 32>, };
 struct SplatPosition { center: vec2<f32>, rawDepth: f32, depthGradient: f32, };
 @group(0) @binding(0) var<uniform> config: Config;
 @group(0) @binding(1) var<storage, read> xy: array<SplatPosition>;
@@ -13964,7 +14137,7 @@ fn brush_local_color_flow(@builtin(global_invocation_id) id: vec3<u32>) {
 `;
 
     const optimizerShader = `
-struct Config { values: array<vec4<f32>, 31>, };
+struct Config { values: array<vec4<f32>, 32>, };
 struct AdamState {
   mGeom: vec4<f32>,
   vGeom: vec4<f32>,
@@ -22766,10 +22939,14 @@ function setInputControlsDisabled(disabled) {
     els.rectangleLearnedOpacityMax,
     els.rectangleOpacityGradientMin,
     els.rectangleOpacityGradientMax,
+    els.rectangleCenterOpacityGradientMin,
+    els.rectangleCenterOpacityGradientMax,
     els.layeredBrushLearnedOpacityMin,
     els.layeredBrushLearnedOpacityMax,
     els.layeredBrushOpacityGradientStart,
     els.layeredBrushOpacityGradientEnd,
+    els.layeredBrushCenterOpacityGradientMin,
+    els.layeredBrushCenterOpacityGradientMax,
     els.layeredBrushWidthTaperStart,
     els.layeredBrushWidthTaperEnd,
     els.layeredBrushLocalColorFlow,
@@ -22883,10 +23060,14 @@ function syncAlgorithmRequirements() {
   els.rectangleLearnedOpacityMax.disabled = state.running || !rectangleSelected;
   els.rectangleOpacityGradientMin.disabled = state.running || !rectangleSelected;
   els.rectangleOpacityGradientMax.disabled = state.running || !rectangleSelected;
+  els.rectangleCenterOpacityGradientMin.disabled = state.running || !rectangleSelected;
+  els.rectangleCenterOpacityGradientMax.disabled = state.running || !rectangleSelected;
   els.layeredBrushLearnedOpacityMin.disabled = state.running || !brushSelected;
   els.layeredBrushLearnedOpacityMax.disabled = state.running || !brushSelected;
   els.layeredBrushOpacityGradientStart.disabled = state.running || !brushSelected;
   els.layeredBrushOpacityGradientEnd.disabled = state.running || !brushSelected;
+  els.layeredBrushCenterOpacityGradientMin.disabled = state.running || !brushSelected;
+  els.layeredBrushCenterOpacityGradientMax.disabled = state.running || !brushSelected;
   els.layeredBrushWidthTaperStart.disabled = state.running || !brushSelected;
   els.layeredBrushWidthTaperEnd.disabled = state.running || !brushSelected;
   els.layeredBrushLocalColorFlow.disabled = state.running || !brushSelected;
@@ -24084,7 +24265,9 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   const runRectangleLearnedOpacity = selectedRectangleLearnedOpacity();
   const runBrushLearnedOpacity = selectedLayeredBrushLearnedOpacity();
   const runRectangleOpacityGradient = selectedRectangleOpacityGradient();
+  const runRectangleCenterOpacityGradient = selectedRectangleCenterOpacityGradient();
   const runBrushDirectionalEffects = selectedLayeredBrushDirectionalEffects();
+  const runBrushCenterOpacityGradient = selectedLayeredBrushCenterOpacityGradient();
   const runBrushMinAspectRatio = selectedBrushMinAspectRatio();
   const runBrushMaxAspectRatio = selectedBrushMaxAspectRatio();
   const runBrushAspectFloors = selectedBrushAspectFloors();
@@ -24170,10 +24353,14 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   els.layerUpdateInterval.value = String(runLayerSettings.layerUpdateInterval);
   els.rectangleOpacityGradientMin.value = String(runRectangleOpacityGradient.min);
   els.rectangleOpacityGradientMax.value = String(runRectangleOpacityGradient.max);
+  els.rectangleCenterOpacityGradientMin.value = String(runRectangleCenterOpacityGradient.min);
+  els.rectangleCenterOpacityGradientMax.value = String(runRectangleCenterOpacityGradient.max);
   els.rectangleLearnedOpacityMin.value = String(runRectangleLearnedOpacity.min);
   els.rectangleLearnedOpacityMax.value = String(runRectangleLearnedOpacity.max);
   els.layeredBrushOpacityGradientStart.value = String(runBrushDirectionalEffects.opacityStart);
   els.layeredBrushOpacityGradientEnd.value = String(runBrushDirectionalEffects.opacityEnd);
+  els.layeredBrushCenterOpacityGradientMin.value = String(runBrushCenterOpacityGradient.min);
+  els.layeredBrushCenterOpacityGradientMax.value = String(runBrushCenterOpacityGradient.max);
   els.layeredBrushLearnedOpacityMin.value = String(runBrushLearnedOpacity.min);
   els.layeredBrushLearnedOpacityMax.value = String(runBrushLearnedOpacity.max);
   els.layeredBrushWidthTaperStart.value = String(runBrushDirectionalEffects.widthStart);
@@ -24271,6 +24458,8 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       : DEFAULT_RECTANGLE_TOP_RATIO_MAX;
     state.params.rectangleOpacityGradientMin = runRectangleOpacityGradient.min;
     state.params.rectangleOpacityGradientMax = runRectangleOpacityGradient.max;
+    state.params.rectangleCenterOpacityGradientMin = runRectangleCenterOpacityGradient.min;
+    state.params.rectangleCenterOpacityGradientMax = runRectangleCenterOpacityGradient.max;
     state.params.rectangleMinAspectRatio = algorithmUsesRectangleKernel(algorithm)
       ? runRectangleMinAspectRatio
       : DEFAULT_RECTANGLE_MIN_ASPECT_RATIO;
@@ -24300,6 +24489,8 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       brushSelected && runBrushDirectionalEffects.opacity;
     state.params.brushOpacityGradientStart = runBrushDirectionalEffects.opacityStart;
     state.params.brushOpacityGradientEnd = runBrushDirectionalEffects.opacityEnd;
+    state.params.brushCenterOpacityGradientMin = runBrushCenterOpacityGradient.min;
+    state.params.brushCenterOpacityGradientMax = runBrushCenterOpacityGradient.max;
     state.params.brushWidthTaperEnabled =
       brushSelected && runBrushDirectionalEffects.widthTaper;
     state.params.brushWidthTaperStart = runBrushDirectionalEffects.widthStart;
@@ -24524,6 +24715,14 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         : null,
       rectangleLearnedOpacityRange:
         algorithmUsesRectangleKernel(algorithm) ? [runRectangleLearnedOpacity.min, runRectangleLearnedOpacity.max] : null,
+      rectangleDirectionalOpacityGradientRange:
+        algorithmUsesRectangleKernel(algorithm)
+          ? [runRectangleOpacityGradient.min, runRectangleOpacityGradient.max]
+          : null,
+      rectangleCenterOpacityGradientRange:
+        algorithmUsesRectangleKernel(algorithm)
+          ? [runRectangleCenterOpacityGradient.min, runRectangleCenterOpacityGradient.max]
+          : null,
       layeredBrushLearnedOpacityRange:
         algorithmUsesLayeredOpaqueBrush(algorithm) ? [runBrushLearnedOpacity.min, runBrushLearnedOpacity.max] : null,
       layeredBrushMinimumAspectRatio:
@@ -24535,6 +24734,10 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       layeredBrushOpacityGradientRange:
         algorithmUsesLayeredOpaqueBrush(algorithm)
           ? [runBrushDirectionalEffects.opacityStart, runBrushDirectionalEffects.opacityEnd]
+          : null,
+      layeredBrushCenterOpacityGradientRange:
+        algorithmUsesLayeredOpaqueBrush(algorithm)
+          ? [runBrushCenterOpacityGradient.min, runBrushCenterOpacityGradient.max]
           : null,
       layeredBrushWidthTaper:
         algorithmUsesLayeredOpaqueBrush(algorithm) ? runBrushDirectionalEffects.widthTaper : null,
@@ -27948,6 +28151,27 @@ for (const control of [
     els.rectangleOpacityGradientMax.value = String(gradient.max);
     publishState();
   });
+}
+for (const [minimumControl, maximumControl, selector] of [
+  [
+    els.rectangleCenterOpacityGradientMin,
+    els.rectangleCenterOpacityGradientMax,
+    selectedRectangleCenterOpacityGradient,
+  ],
+  [
+    els.layeredBrushCenterOpacityGradientMin,
+    els.layeredBrushCenterOpacityGradientMax,
+    selectedLayeredBrushCenterOpacityGradient,
+  ],
+]) {
+  for (const control of [minimumControl, maximumControl]) {
+    control.addEventListener("change", () => {
+      const gradient = selector();
+      minimumControl.value = String(gradient.min);
+      maximumControl.value = String(gradient.max);
+      publishState();
+    });
+  }
 }
 els.monochromeUnderpainting.addEventListener("change", () => {
   syncAlgorithmRequirements();

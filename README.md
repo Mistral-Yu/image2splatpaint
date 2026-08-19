@@ -93,10 +93,12 @@ while tapering, point the narrow edge toward stronger local structure, prefer
 the selected Max ratio in flat regions, and use a harder narrow edge with a
 softer wide edge. `1 / 1` retains the existing Rectangle training path.
 `Learned opacity (before gradient)` bounds each Rectangle's trainable opacity
-to `0.005...0.995`. `Opacity gradient multiplier (short / long)` is a fixed
-`0...1` multiplier that changes linearly from the trapezoid's short edge to its
-long edge. Final opacity is `learned opacity × gradient multiplier`. The defaults
-`0.995 / 0.995` and `1 / 1` preserve the former uniform `0.995` behavior.
+to `0.005...0.995`. `Directional opacity multiplier (short / long)` changes
+linearly from the trapezoid's short edge to its long edge.
+`Center-to-edge opacity multiplier` independently changes from Max at the
+center to Min at the perimeter. Final opacity is
+`learned opacity × directional multiplier × center-to-edge multiplier`.
+The default `1 / 1` for both multipliers preserves the former uniform behavior.
 
 ### Brush Splats settings
 
@@ -107,7 +109,8 @@ setting, so the defaults retain the accepted Brush path.
 | Setting | What it changes |
 | --- | --- |
 | `Learned opacity (before gradient)` | Bounds each trainable Brush opacity to Min...Max in the safe `0.005...0.995` range. The default is `0.995 / 0.995`. |
-| `Opacity gradient multiplier` | A fixed `0...1` directional multiplier; it is not trained. Final opacity is learned opacity multiplied by this gradient in training, preview, standard-alpha overlap, and PNG export. The default `1 / 1` is uniform. |
+| `Directional opacity multiplier` | A fixed `0...1` end-to-end multiplier; it is not trained. The default `1 / 1` is uniform. |
+| `Center-to-edge opacity multiplier` | A fixed `0...1` multiplier from Max at the center to Min at the Brush perimeter. It can be combined with the directional multiplier; both multiply learned opacity in training, preview, standard-alpha overlap, and PNG export. The default `1 / 1` is uniform. |
 | `Aspect ratio (long side / short side)` | Sets Brush-specific Min and Max anisotropy in one row. Defaults are `1 / 8`; both values override the Shared `Max anisotropy` behavior during Brush training. |
 | `Train directional width taper` | Learns a separate taper amount per splat between the configured directional Min and Max widths. Equal endpoints disable the directional change; the default `1 / 1` preserves the prior untapered path. |
 | `Local color-flow orientation` | Softly aligns nearby directional splats when their colors and paint layers are similar. Broad patches and strong direction crossings are excluded. This is experimental. |

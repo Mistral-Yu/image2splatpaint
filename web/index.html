@@ -329,7 +329,7 @@
                           </label>
                         </div>
                         <div class="rectangle-edge-ratio-row field-wide" role="group" aria-labelledby="rectangleOpacityGradientHeading">
-                          <span id="rectangleOpacityGradientHeading" class="rectangle-edge-ratio-heading">Opacity gradient multiplier (short / long)</span>
+                          <span id="rectangleOpacityGradientHeading" class="rectangle-edge-ratio-heading">Directional opacity multiplier (short / long)</span>
                           <label title="Fixed opacity multiplier at the trapezoid short side. It is multiplied by learned opacity and is not trained.">
                             Min
                             <input id="rectangleOpacityGradientMin" data-testid="rectangle-opacity-gradient-min" type="number" min="0" max="1" step="0.005" value="1" />
@@ -337,6 +337,17 @@
                           <label title="Fixed opacity multiplier at the trapezoid long side. It is multiplied by learned opacity and is not trained.">
                             Max
                             <input id="rectangleOpacityGradientMax" data-testid="rectangle-opacity-gradient-max" type="number" min="0" max="1" step="0.005" value="1" />
+                          </label>
+                        </div>
+                        <div class="rectangle-edge-ratio-row field-wide" role="group" aria-labelledby="rectangleCenterOpacityGradientHeading">
+                          <span id="rectangleCenterOpacityGradientHeading" class="rectangle-edge-ratio-heading">Center-to-edge opacity multiplier</span>
+                          <label title="Fixed opacity multiplier at the Rectangle perimeter. It is multiplied by the directional gradient and learned opacity.">
+                            Min
+                            <input id="rectangleCenterOpacityGradientMin" data-testid="rectangle-center-opacity-gradient-min" type="number" min="0" max="1" step="0.005" value="1" />
+                          </label>
+                          <label title="Fixed opacity multiplier at the Rectangle center. It is multiplied by the directional gradient and learned opacity.">
+                            Max
+                            <input id="rectangleCenterOpacityGradientMax" data-testid="rectangle-center-opacity-gradient-max" type="number" min="0" max="1" step="0.005" value="1" />
                           </label>
                         </div>
                         <div class="rectangle-edge-ratio-row field-wide" role="group" aria-labelledby="rectangleEdgeRatioHeading">
@@ -410,7 +421,7 @@
                           </label>
                         </div>
                         <div class="rectangle-edge-ratio-row field-wide" role="group" aria-labelledby="brushOpacityGradientHeading">
-                          <span id="brushOpacityGradientHeading" class="rectangle-edge-ratio-heading">Opacity gradient multiplier</span>
+                          <span id="brushOpacityGradientHeading" class="rectangle-edge-ratio-heading">Directional opacity multiplier</span>
                           <label title="Fixed minimum directional Brush opacity multiplier. It is multiplied by learned opacity and is not trained.">
                             Min
                             <input id="layeredBrushOpacityGradientStart" data-testid="layered-brush-opacity-gradient-start" type="number" min="0" max="1" step="0.005" value="1" />
@@ -418,6 +429,17 @@
                           <label title="Fixed maximum directional Brush opacity multiplier. It is multiplied by learned opacity and is not trained.">
                             Max
                             <input id="layeredBrushOpacityGradientEnd" data-testid="layered-brush-opacity-gradient-end" type="number" min="0" max="1" step="0.005" value="1" />
+                          </label>
+                        </div>
+                        <div class="rectangle-edge-ratio-row field-wide" role="group" aria-labelledby="brushCenterOpacityGradientHeading">
+                          <span id="brushCenterOpacityGradientHeading" class="rectangle-edge-ratio-heading">Center-to-edge opacity multiplier</span>
+                          <label title="Fixed opacity multiplier at the Brush perimeter. It is multiplied by the directional gradient and learned opacity.">
+                            Min
+                            <input id="layeredBrushCenterOpacityGradientMin" data-testid="layered-brush-center-opacity-gradient-min" type="number" min="0" max="1" step="0.005" value="1" />
+                          </label>
+                          <label title="Fixed opacity multiplier at the Brush center. It is multiplied by the directional gradient and learned opacity.">
+                            Max
+                            <input id="layeredBrushCenterOpacityGradientMax" data-testid="layered-brush-center-opacity-gradient-max" type="number" min="0" max="1" step="0.005" value="1" />
                           </label>
                         </div>
                         <div class="rectangle-edge-ratio-row field-wide" role="group" aria-labelledby="brushAspectRatioHeading">
