@@ -2,6 +2,8 @@ const ROW_BYTES = 32;
 const SH_C0 = 0.28209479177387814;
 const MB = 1024 * 1024;
 const GB = 1024 * MB;
+const MEMORY_LIMITER_UNLOCK_MULTIPLIER = 4;
+const MEMORY_LIMITER_UNLOCK_MAX_BYTES = 8 * GB;
 const MAX_INPUT_FILE_BYTES = 128 * MB;
 // Keep the cached source independent from the smaller training resolution.
 // Large originals are decoded once, reduced to this long side, then the
@@ -3117,6 +3119,7 @@ const els = {
   stepCount: document.querySelector("#stepCount"),
   previewRefresh: document.querySelector("#previewRefresh"),
   liveQualityMetrics: document.querySelector("#liveQualityMetrics"),
+  memoryLimiterUnlock: document.querySelector("#memoryLimiterUnlock"),
   currentContributionCompaction: document.querySelector("#currentContributionCompaction"),
   currentContributionCompactionStart: document.querySelector("#currentContributionCompactionStart"),
   currentContributionCompactionInterval: document.querySelector("#currentContributionCompactionInterval"),
@@ -3330,7 +3333,14 @@ const state = {
   },
   webgpu: { supported: false, renderer: null, reason: "checking", limits: null, adapterInfo: null },
   recommendation: null,
-  safety: { mode: "on", lastStopReason: "", lastStopEstimateMB: "", lastStopBudgetMB: "", lastRecommended: "" },
+  safety: {
+    mode: "on",
+    memoryLimiterUnlocked: false,
+    lastStopReason: "",
+    lastStopEstimateMB: "",
+    lastStopBudgetMB: "",
+    lastRecommended: "",
+  },
   lastDownload: "",
   lastGpuLoss: null,
   lastInputMode: "",
@@ -3904,8 +3914,11 @@ function publishState() {
   data.safetyStopEstimateMb = state.safety.lastStopEstimateMB;
   data.safetyStopBudgetMb = state.safety.lastStopBudgetMB;
   data.safetyRecommended = state.safety.lastRecommended;
+  data.memoryLimiterUnlocked = String(state.safety.memoryLimiterUnlocked);
   if (state.recommendation) {
     data.memoryBudgetMb = String(state.recommendation.budgetMB);
+    data.memoryBudgetMode = String(state.recommendation.memoryBudgetMode);
+    data.memoryBudgetMultiplier = String(state.recommendation.memoryBudgetMultiplier);
     data.memoryEstimatedMb = String(state.recommendation.estimatedMB);
     data.memoryHeadroomMb = String(state.recommendation.headroomMB);
     data.memoryHintSource = String(state.recommendation.memoryHintSource);
@@ -3922,6 +3935,8 @@ function publishState() {
     data.vramExact = "false";
   } else {
     data.memoryBudgetMb = "";
+    data.memoryBudgetMode = "";
+    data.memoryBudgetMultiplier = "";
     data.memoryEstimatedMb = "";
     data.memoryHeadroomMb = "";
     data.memoryHintSource = "";
@@ -4754,12 +4769,31 @@ function autoBudgetInfo(limits) {
   };
 }
 
-function autoBudgetBytes(limits) {
-  return autoBudgetInfo(limits).budgetBytes;
+function memoryBudgetInfo(limits) {
+  const automatic = autoBudgetInfo(limits);
+  if (!state.safety.memoryLimiterUnlocked) {
+    return { ...automatic, mode: "automatic", multiplier: 1 };
+  }
+  const budgetBytes = Math.min(
+    MEMORY_LIMITER_UNLOCK_MAX_BYTES,
+    automatic.budgetBytes * MEMORY_LIMITER_UNLOCK_MULTIPLIER,
+  );
+  const memoryHint = browserMemoryHintBytes();
+  return {
+    ...automatic,
+    budgetBytes,
+    reservedBytes: memoryHint.bytes > 0 ? Math.max(0, memoryHint.bytes - budgetBytes) : 0,
+    webgpuEnvelope: Math.min(
+      MEMORY_LIMITER_UNLOCK_MAX_BYTES,
+      automatic.webgpuEnvelope * MEMORY_LIMITER_UNLOCK_MULTIPLIER,
+    ),
+    mode: "unlocked",
+    multiplier: MEMORY_LIMITER_UNLOCK_MULTIPLIER,
+  };
 }
 
 function memoryBudgetBytes() {
-  return autoBudgetBytes(state.webgpu.limits);
+  return memoryBudgetInfo(state.webgpu.limits).budgetBytes;
 }
 
 function computeBudgetFor(trainSize, finalSplats, steps) {
@@ -4767,7 +4801,8 @@ function computeBudgetFor(trainSize, finalSplats, steps) {
   trainSize = Math.round(clampNumber(trainSize, LIMITS.trainSizeMin, LIMITS.trainSizeMax, DEFAULT_MAX_SIDE));
   finalSplats = normalizeUiSplatCount(finalSplats, DEFAULT_FINAL_SPLATS);
   steps = normalizeStepInteger(steps, { min: LIMITS.stepsMin, max: LIMITS.stepsMax, fallback: DEFAULT_ITERATIONS });
-  const budgetBytes = memoryBudgetBytes();
+  const budgetInfo = memoryBudgetInfo(limits);
+  const budgetBytes = budgetInfo.budgetBytes;
   const memoryHint = browserMemoryHintBytes();
   const autoBudget = autoBudgetInfo(limits);
   const current = estimateGpuMemory(trainSize, finalSplats);
@@ -4811,6 +4846,8 @@ function computeBudgetFor(trainSize, finalSplats, steps) {
     headroomMB: bytesToMB(headroomBytes).toFixed(1),
     memoryHintSource: memoryHint.source,
     memoryHintMB: memoryHint.bytes > 0 ? bytesToMB(memoryHint.bytes).toFixed(0) : "",
+    memoryBudgetMode: budgetInfo.mode,
+    memoryBudgetMultiplier: budgetInfo.multiplier,
     autoBudgetExact: false,
     autoBudgetSource: autoBudget.source,
     autoReservedMB: autoBudget.reservedBytes > 0 ? bytesToMB(autoBudget.reservedBytes).toFixed(0) : "",
@@ -4924,7 +4961,14 @@ function applyDeviceLimiter(rec, { reconcileSplatCounts = true } = {}) {
   return false;
 }
 
+function syncMemoryLimiterUnlockUi() {
+  const unlocked = state.safety.memoryLimiterUnlocked;
+  els.memoryLimiterUnlock.setAttribute("aria-pressed", String(unlocked));
+  els.memoryLimiterUnlock.textContent = `Memory limiter unlock: ${unlocked ? "ON" : "OFF"}`;
+}
+
 function updateMemoryRecommendation({ reconcileSplatCounts = true } = {}) {
+  syncMemoryLimiterUnlockUi();
   let rec = computeRecommendation();
   for (let i = 0; i < 3 && applyDeviceLimiter(rec, { reconcileSplatCounts }); i += 1) {
     rec = computeRecommendation();
@@ -4943,7 +4987,9 @@ function updateMemoryRecommendation({ reconcileSplatCounts = true } = {}) {
     ? "Current settings exceed a WebGPU buffer limit."
     : rec.overBudget
       ? "Current settings exceed the safety budget; apply recommended or lower values."
-      : `Auto uses ${rec.autoBudgetSource} and WebGPU limits; ${rec.autoReservedMB ? `${rec.autoReservedMB} MB remains outside the app estimate` : "a conservative fallback is active"}. Exact free VRAM is unavailable.`;
+      : state.safety.memoryLimiterUnlocked
+        ? `Unlocked mode uses a ${rec.memoryBudgetMultiplier}x app working-set budget (${rec.budgetMB} MB). WebGPU hard limits still apply; browser or device termination is more likely.`
+        : `Auto uses ${rec.autoBudgetSource} and WebGPU limits; ${rec.autoReservedMB ? `${rec.autoReservedMB} MB remains outside the app estimate` : "a conservative fallback is active"}. Exact free VRAM is unavailable.`;
   publishState();
   return rec;
 }
@@ -6060,8 +6106,10 @@ function stageMinimumScale(image, initialCount, trainingStage, ratio) {
   );
 }
 
-function stageBaseScaleFloorRatio(trainingStage, variants) {
-  if (variants.phaseRelativeScaleGuard) return 0;
+function stageBaseScaleFloorRatio(trainingStage) {
+  // Growth/reseed birth size is independent of the optional optimizer guard.
+  // The optimizer may shrink useful detail later, but a phase transition must
+  // not make new children start at the absolute minimum scale.
   if (trainingStage === "coarse") return DEFAULT_P1_BASE_SCALE_FLOOR_RATIO;
   if (trainingStage === "mid") return DEFAULT_P2_BASE_SCALE_FLOOR_RATIO;
   return DEFAULT_P3_BASE_SCALE_FLOOR_RATIO;
@@ -8560,7 +8608,7 @@ function densityGpuConfig({ image, count, targetCount, step, steps, layout, maxA
     trainingStage,
     variants.stageMinScaleRatio,
   );
-  const baseScaleFloorRatio = stageBaseScaleFloorRatio(trainingStage, variants);
+  const baseScaleFloorRatio = stageBaseScaleFloorRatio(trainingStage);
   const shaderStepLimit = mode === 3 ? schedule.densityHorizon : steps;
   const config = new Float32Array(TRAIN_CONFIG_FLOATS);
   config.set([
@@ -21750,7 +21798,7 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
         tile_cooperative_renderer: renderChoice.cooperative,
         tile_cooperative_supported: renderChoice.supported,
         stage_min_scale_ratio: trainingStage === "full" ? 0 : variants.stageMinScaleRatio,
-        stage_base_scale_floor_ratio: stageBaseScaleFloorRatio(trainingStage, variants),
+        stage_base_scale_floor_ratio: stageBaseScaleFloorRatio(trainingStage),
         stage_min_scale_normalized: config[80],
         bind_group_cache_enabled: this.trainState.bindGroupCacheEnabled,
         bind_group_cache_entries: this.trainState.bindGroupCache.size,
@@ -22908,6 +22956,7 @@ function setInputControlsDisabled(disabled) {
     els.adaptiveGridInitializationFraction,
     els.finalSplatCount,
     els.capacityMode,
+    els.memoryLimiterUnlock,
     els.stepCount,
     els.previewRefresh,
     els.liveQualityMetrics,
@@ -28060,6 +28109,12 @@ els.pathButton.addEventListener("click", () => {
 for (const element of [els.trainSize, els.initialSplatCount, els.capacityMode, els.stepCount]) {
   element.addEventListener("input", updateMemoryRecommendation);
 }
+els.memoryLimiterUnlock.addEventListener("click", () => {
+  if (trainingLifecycleInputLocked()) return;
+  state.safety.memoryLimiterUnlocked = !state.safety.memoryLimiterUnlocked;
+  clearSafetyStop();
+  updateMemoryRecommendation();
+});
 els.finalSplatCount.addEventListener("input", () => {
   updateMemoryRecommendation({ reconcileSplatCounts: false });
 });

@@ -764,6 +764,26 @@ select {
   text-transform: uppercase;
 }
 
+.memory-limiter-toggle {
+  width: 100%;
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--line));
+  color: #704600;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.memory-limiter-toggle[aria-pressed="true"] {
+  border-color: var(--danger);
+  background: #fff0ee;
+  color: var(--danger);
+}
+
+.memory-limiter-help {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
 .layer-toggle-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
