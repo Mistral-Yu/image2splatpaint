@@ -3531,6 +3531,8 @@ function publishState() {
   data.previewCanvasWidth = String(state.previewPadding.width || els.gpuCanvas.width);
   data.previewCanvasHeight = String(state.previewPadding.height || els.gpuCanvas.height);
   data.previewOnlyBytes = String(state.previewPadding.bytes);
+  data.previewTileMode = state.webgpu.renderer?.lastPreviewStats?.tile_mode || "";
+  data.previewTileReferences = String(state.webgpu.renderer?.lastPreviewStats?.tile_references || 0);
   data.canvasViewMode = state.canvasView.mode;
   data.canvasViewScale = String(state.canvasView.scale);
   updateCanvasViewControls();
@@ -6552,6 +6554,9 @@ function buildPreviewTileIndexData(image, params, options = {}) {
   const tileCols = Math.ceil(preview.width / TILE_SIZE);
   const tileRows = Math.ceil(preview.height / TILE_SIZE);
   const tileCount = tileCols * tileRows;
+  const maxTileReferences = Number.isFinite(Number(options.maxTileReferences))
+    ? Math.max(1, Math.floor(Number(options.maxTileReferences)))
+    : Number.MAX_SAFE_INTEGER;
   const counts = new Uint32Array(tileCount);
   const bounds = new Int32Array(params.count * 4);
   const aspectStretch = Math.sqrt(Math.max(0.000001, Number(options.localAspectRatio) || 1));
@@ -6562,6 +6567,7 @@ function buildPreviewTileIndexData(image, params, options = {}) {
   const pixelSigma = MIP_PIXEL_SIGMA * 2 / Math.max(image.width, image.height);
   const pixelPadX = useEwa && image.width > 1 ? 0.5 / (image.width - 1) : 0;
   const pixelPadY = useEwa && image.height > 1 ? 0.5 / (image.height - 1) : 0;
+  let referenceCount = 0;
   for (let index = 0; index < params.count; index += 1) {
     const theta = params.theta?.[index] || 0;
     const c = Math.abs(Math.cos(theta));
@@ -6585,6 +6591,10 @@ function buildPreviewTileIndexData(image, params, options = {}) {
     bounds.set([minTileX, maxTileX, minTileY, maxTileY], index * 4);
     for (let tileY = minTileY; tileY <= maxTileY; tileY += 1) {
       for (let tileX = minTileX; tileX <= maxTileX; tileX += 1) {
+        referenceCount += 1;
+        if (referenceCount > maxTileReferences) {
+          throw new Error("Preview creates too many tile references; reduce Splat scale or Local aspect ratio.");
+        }
         counts[tileY * tileCols + tileX] += 1;
       }
     }
@@ -11430,12 +11440,32 @@ fn commit_layers(@builtin(global_invocation_id) id: vec3<u32>) {
     this.ensurePipeline(params.count);
     const preview = previewPaddingSpec(image, params, options.outside ?? els.outsidePreviewToggle.checked);
     const presentingToCanvas = !targetView;
+    const padded = preview.x > 0 || preview.y > 0;
+    const maxStorageBinding = Math.max(
+      4,
+      Number(this.device.limits?.maxStorageBufferBindingSize) || 128 * MB,
+    );
+    // Padded/resized frames cannot reuse the training-frame tile coordinates.
+    // Rebuild exact view-local tiles instead of falling back to an unsafe
+    // per-pixel scan of every splat, independent of the training culling toggle.
+    const rebuildPreviewTiles = padded || Boolean(options.rebuildTiles);
+    let paddedTileData = null;
+    if (rebuildPreviewTiles) {
+      const tileCount = Math.ceil(preview.width / TILE_SIZE) * Math.ceil(preview.height / TILE_SIZE);
+      if ((tileCount + 1) * 4 > maxStorageBinding) {
+        throw new Error("Preview needs more tile offsets than this GPU can bind.");
+      }
+      paddedTileData = buildPreviewTileIndexData(image, params, {
+        ...options,
+        outside: Boolean(options.outside ?? els.outsidePreviewToggle.checked),
+        maxTileReferences: Math.floor(maxStorageBinding / 4),
+      });
+    }
     if (presentingToCanvas) {
       state.previewPadding = preview;
       if (this.canvas.width !== preview.width) this.canvas.width = preview.width;
       if (this.canvas.height !== preview.height) this.canvas.height = preview.height;
     }
-    const padded = preview.x > 0 || preview.y > 0;
     const alphaBackground = Array.isArray(options.alphaBackground)
       ? options.alphaBackground
       : [params.bg[0], params.bg[1], params.bg[2]];
@@ -11452,12 +11482,12 @@ fn commit_layers(@builtin(global_invocation_id) id: vec3<u32>) {
     // Shape changes only the footprint kernel. Paint kernels and Gaussian
     // share the trained layer order unless the user explicitly enables the
     // preview-only small-first override.
-    const useTileOrder =
+    const useTileOrder = Boolean(paddedTileData) || (
       !useSplatPreviewOrder &&
-      !padded &&
       els.tileCullingToggle.checked &&
       sourceBuffers?.orderMode === "tiles" &&
-      Boolean(sourceBuffers?.tileOffsetsBuffer);
+      Boolean(sourceBuffers?.tileOffsetsBuffer)
+    );
     const useCachedGlobalOrder =
       !useSplatPreviewOrder &&
       !useTileOrder &&
@@ -11521,120 +11551,141 @@ fn commit_layers(@builtin(global_invocation_id) id: vec3<u32>) {
         : clampNumber(params.brushOpacityGradientEnd, 0, 1, 1),
     ]);
     const buffers = [];
-    let xyBuffer = sourceBuffers?.xyBuffer;
-    let transformBuffer = sourceBuffers?.transformBuffer;
-    let colorBuffer = sourceBuffers?.colorBuffer;
-    let tileOffsetsBuffer = sourceBuffers?.tileOffsetsBuffer;
-    let tileIndicesBuffer = sourceBuffers?.tileIndicesBuffer;
-    if (!xyBuffer || !transformBuffer || !colorBuffer) {
-      const color = packColors(params);
-      const transform = packTransforms(params);
-      xyBuffer = makeBuffer(this.device, packPositions(params), GPUBufferUsage.STORAGE);
-      transformBuffer = makeBuffer(this.device, transform, GPUBufferUsage.STORAGE);
-      colorBuffer = makeBuffer(this.device, color, GPUBufferUsage.STORAGE);
-      buffers.push(xyBuffer, transformBuffer, colorBuffer);
-    }
-    const resultState = this.resultRenderState;
-    const resultStateMatchesSource = Boolean(
-      resultState?.sourceParams === params &&
-      resultState.count === params.count &&
-      xyBuffer === resultState.xyBuffer &&
-      transformBuffer === resultState.transformBuffer &&
-      colorBuffer === resultState.colorBuffer,
-    );
-    if (useGlobalOrder) {
-      let ordered;
-      if (useSplatPreviewOrder) {
-        ordered = cachedResultSmallFirstOrder(resultStateMatchesSource ? resultState : null, params) || buildSplatPreviewOrder(params);
-      } else {
-        ordered = new Uint32Array(params.count);
-        for (let i = 0; i < params.count; i += 1) ordered[i] = i;
-        ordered.sort((a, b) => layerOrderComparator(a, b, params));
-      }
-      tileOffsetsBuffer = makeBuffer(this.device, new Uint32Array([0, params.count]), GPUBufferUsage.STORAGE);
-      tileIndicesBuffer = makeBuffer(this.device, ordered, GPUBufferUsage.STORAGE);
-      buffers.push(tileOffsetsBuffer, tileIndicesBuffer);
-    } else if (useCachedGlobalOrder) {
-      tileOffsetsBuffer = sourceBuffers.tileOffsetsBuffer;
-      tileIndicesBuffer = sourceBuffers.tileIndicesBuffer;
-    } else if (!tileOffsetsBuffer || !tileIndicesBuffer) {
-      tileOffsetsBuffer = makeBuffer(this.device, new Uint32Array([0, params.count]), GPUBufferUsage.STORAGE);
-      tileIndicesBuffer = makeBuffer(this.device, new Uint32Array([0]), GPUBufferUsage.STORAGE);
-      buffers.push(tileOffsetsBuffer, tileIndicesBuffer);
-    }
-    const usePersistentPreviewState =
-      !useGlobalOrder &&
-      resultState?.count === params.count &&
-      xyBuffer === resultState.xyBuffer &&
-      transformBuffer === resultState.transformBuffer &&
-      colorBuffer === resultState.colorBuffer &&
-      tileOffsetsBuffer === resultState.tileOffsetsBuffer &&
-      tileIndicesBuffer === resultState.tileIndicesBuffer;
-    let uniformBuffer;
-    let bindGroup;
-    if (usePersistentPreviewState) {
-      if (!resultState.previewUniformBuffer) {
-        resultState.previewUniformBuffer = this.device.createBuffer({
-          size: Math.ceil(uniform.byteLength / 4) * 4,
-          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-        });
-        resultState.buffers.push(resultState.previewUniformBuffer);
-        resultState.previewUniformAllocations =
-          (resultState.previewUniformAllocations || 0) + 1;
-      }
-      uniformBuffer = resultState.previewUniformBuffer;
-      this.device.queue.writeBuffer(
-        uniformBuffer,
-        0,
-        uniform.buffer,
-        uniform.byteOffset,
-        uniform.byteLength,
-      );
-      resultState.previewUniformWrites =
-        (resultState.previewUniformWrites || 0) + 1;
-      if (!resultState.previewBindGroup || resultState.previewPipeline !== this.pipeline) {
-        resultState.previewBindGroup = this.device.createBindGroup({
-          layout: this.pipeline.getBindGroupLayout(0),
-          entries: [
-            { binding: 0, resource: { buffer: uniformBuffer } },
-            { binding: 1, resource: { buffer: xyBuffer } },
-            { binding: 2, resource: { buffer: transformBuffer } },
-            { binding: 3, resource: { buffer: colorBuffer } },
-            { binding: 4, resource: { buffer: tileOffsetsBuffer } },
-            { binding: 5, resource: { buffer: tileIndicesBuffer } },
-          ],
-        });
-        resultState.previewPipeline = this.pipeline;
-        resultState.previewBindGroupCreations =
-          (resultState.previewBindGroupCreations || 0) + 1;
-      }
-      bindGroup = resultState.previewBindGroup;
-      if (state.metrics?.result_render_cache) {
-        state.metrics.result_render_cache.preview_uniform_allocations =
-          resultState.previewUniformAllocations || 0;
-        state.metrics.result_render_cache.preview_uniform_writes =
-          resultState.previewUniformWrites || 0;
-        state.metrics.result_render_cache.preview_bind_group_creations =
-          resultState.previewBindGroupCreations || 0;
-        state.metrics.result_render_cache.bytes =
-          this.resultRenderMemorySnapshot().reservedBytes;
-      }
-    } else {
-      uniformBuffer = makeBuffer(this.device, uniform, GPUBufferUsage.UNIFORM);
-      buffers.push(uniformBuffer);
-    }
     try {
+      let xyBuffer = sourceBuffers?.xyBuffer;
+      let transformBuffer = sourceBuffers?.transformBuffer;
+      let colorBuffer = sourceBuffers?.colorBuffer;
+      let tileOffsetsBuffer = sourceBuffers?.tileOffsetsBuffer;
+      let tileIndicesBuffer = sourceBuffers?.tileIndicesBuffer;
+      if (!xyBuffer || !transformBuffer || !colorBuffer) {
+        const color = packColors(params);
+        const transform = packTransforms(params);
+        xyBuffer = makeBuffer(this.device, packPositions(params), GPUBufferUsage.STORAGE);
+        buffers.push(xyBuffer);
+        transformBuffer = makeBuffer(this.device, transform, GPUBufferUsage.STORAGE);
+        buffers.push(transformBuffer);
+        colorBuffer = makeBuffer(this.device, color, GPUBufferUsage.STORAGE);
+        buffers.push(colorBuffer);
+      }
+      if (paddedTileData) {
+        tileOffsetsBuffer = makeBuffer(this.device, paddedTileData.offsets, GPUBufferUsage.STORAGE);
+        buffers.push(tileOffsetsBuffer);
+        tileIndicesBuffer = makeBuffer(this.device, paddedTileData.indices, GPUBufferUsage.STORAGE);
+        buffers.push(tileIndicesBuffer);
+      }
+      const resultState = this.resultRenderState;
+      const resultStateMatchesSource = Boolean(
+        resultState?.sourceParams === params &&
+        resultState.count === params.count &&
+        xyBuffer === resultState.xyBuffer &&
+        transformBuffer === resultState.transformBuffer &&
+        colorBuffer === resultState.colorBuffer,
+      );
+      if (useGlobalOrder) {
+        let ordered;
+        if (useSplatPreviewOrder) {
+          ordered = cachedResultSmallFirstOrder(resultStateMatchesSource ? resultState : null, params) || buildSplatPreviewOrder(params);
+        } else {
+          ordered = new Uint32Array(params.count);
+          for (let i = 0; i < params.count; i += 1) ordered[i] = i;
+          ordered.sort((a, b) => layerOrderComparator(a, b, params));
+        }
+        tileOffsetsBuffer = makeBuffer(this.device, new Uint32Array([0, params.count]), GPUBufferUsage.STORAGE);
+        buffers.push(tileOffsetsBuffer);
+        tileIndicesBuffer = makeBuffer(this.device, ordered, GPUBufferUsage.STORAGE);
+        buffers.push(tileIndicesBuffer);
+      } else if (useCachedGlobalOrder) {
+        tileOffsetsBuffer = sourceBuffers.tileOffsetsBuffer;
+        tileIndicesBuffer = sourceBuffers.tileIndicesBuffer;
+      } else if (!tileOffsetsBuffer || !tileIndicesBuffer) {
+        tileOffsetsBuffer = makeBuffer(this.device, new Uint32Array([0, params.count]), GPUBufferUsage.STORAGE);
+        buffers.push(tileOffsetsBuffer);
+        tileIndicesBuffer = makeBuffer(this.device, new Uint32Array([0]), GPUBufferUsage.STORAGE);
+        buffers.push(tileIndicesBuffer);
+      }
+      const usePersistentPreviewState =
+        !useGlobalOrder &&
+        resultState?.count === params.count &&
+        xyBuffer === resultState.xyBuffer &&
+        transformBuffer === resultState.transformBuffer &&
+        colorBuffer === resultState.colorBuffer &&
+        tileOffsetsBuffer === resultState.tileOffsetsBuffer &&
+        tileIndicesBuffer === resultState.tileIndicesBuffer;
+      this.lastPreviewStats = {
+        padded,
+        tile_mode: paddedTileData
+          ? (padded ? "padded-tiles" : "rebuilt-tiles")
+          : useTileOrder
+            ? "cached-tiles"
+            : useCachedGlobalOrder || useGlobalOrder
+              ? "global-order"
+              : "linear",
+        tile_references: paddedTileData?.indices.length || 0,
+      };
+      let uniformBuffer;
+      let bindGroup;
+      if (usePersistentPreviewState) {
+        if (!resultState.previewUniformBuffer) {
+          resultState.previewUniformBuffer = this.device.createBuffer({
+            size: Math.ceil(uniform.byteLength / 4) * 4,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+          });
+          resultState.buffers.push(resultState.previewUniformBuffer);
+          resultState.previewUniformAllocations =
+            (resultState.previewUniformAllocations || 0) + 1;
+        }
+        uniformBuffer = resultState.previewUniformBuffer;
+        this.device.queue.writeBuffer(
+          uniformBuffer,
+          0,
+          uniform.buffer,
+          uniform.byteOffset,
+          uniform.byteLength,
+        );
+        resultState.previewUniformWrites =
+          (resultState.previewUniformWrites || 0) + 1;
+        if (!resultState.previewBindGroup || resultState.previewPipeline !== this.pipeline) {
+          resultState.previewBindGroup = this.device.createBindGroup({
+            layout: this.pipeline.getBindGroupLayout(0),
+            entries: [
+              { binding: 0, resource: { buffer: uniformBuffer } },
+              { binding: 1, resource: { buffer: xyBuffer } },
+              { binding: 2, resource: { buffer: transformBuffer } },
+              { binding: 3, resource: { buffer: colorBuffer } },
+              { binding: 4, resource: { buffer: tileOffsetsBuffer } },
+              { binding: 5, resource: { buffer: tileIndicesBuffer } },
+            ],
+          });
+          resultState.previewPipeline = this.pipeline;
+          resultState.previewBindGroupCreations =
+            (resultState.previewBindGroupCreations || 0) + 1;
+        }
+        bindGroup = resultState.previewBindGroup;
+        if (state.metrics?.result_render_cache) {
+          state.metrics.result_render_cache.preview_uniform_allocations =
+            resultState.previewUniformAllocations || 0;
+          state.metrics.result_render_cache.preview_uniform_writes =
+            resultState.previewUniformWrites || 0;
+          state.metrics.result_render_cache.preview_bind_group_creations =
+            resultState.previewBindGroupCreations || 0;
+          state.metrics.result_render_cache.bytes =
+            this.resultRenderMemorySnapshot().reservedBytes;
+        }
+      } else {
+        uniformBuffer = makeBuffer(this.device, uniform, GPUBufferUsage.UNIFORM);
+        buffers.push(uniformBuffer);
+      }
       bindGroup ||= this.device.createBindGroup({
-          layout: this.pipeline.getBindGroupLayout(0),
-          entries: [
-            { binding: 0, resource: { buffer: uniformBuffer } },
-            { binding: 1, resource: { buffer: xyBuffer } },
-            { binding: 2, resource: { buffer: transformBuffer } },
-            { binding: 3, resource: { buffer: colorBuffer } },
-            { binding: 4, resource: { buffer: tileOffsetsBuffer } },
-            { binding: 5, resource: { buffer: tileIndicesBuffer } },
-          ],
-        });
+        layout: this.pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: uniformBuffer } },
+          { binding: 1, resource: { buffer: xyBuffer } },
+          { binding: 2, resource: { buffer: transformBuffer } },
+          { binding: 3, resource: { buffer: colorBuffer } },
+          { binding: 4, resource: { buffer: tileOffsetsBuffer } },
+          { binding: 5, resource: { buffer: tileIndicesBuffer } },
+        ],
+      });
       const encoder = this.device.createCommandEncoder();
       const pass = encoder.beginRenderPass({
         colorAttachments: [
@@ -11686,26 +11737,8 @@ fn commit_layers(@builtin(global_invocation_id) id: vec3<u32>) {
       size: readbackBytes,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
-    const temporaryTileBuffers = [];
     try {
-      let renderBuffers = sourceBuffers;
-      if (options.rebuildTiles) {
-        const tileData = buildPreviewTileIndexData(image, params, options);
-        const maxStorageBinding = Math.max(1, Number(limits.maxStorageBufferBindingSize) || maxBufferSize);
-        if (tileData.indices.byteLength > maxStorageBinding || tileData.offsets.byteLength > maxStorageBinding) {
-          throw new Error("PNG resolution creates more tile references than this GPU can bind; reduce the export long side or Splat scale.");
-        }
-        const tileOffsetsBuffer = makeBuffer(this.device, tileData.offsets, GPUBufferUsage.STORAGE);
-        const tileIndicesBuffer = makeBuffer(this.device, tileData.indices, GPUBufferUsage.STORAGE);
-        temporaryTileBuffers.push(tileOffsetsBuffer, tileIndicesBuffer);
-        renderBuffers = {
-          ...(sourceBuffers || {}),
-          tileOffsetsBuffer,
-          tileIndicesBuffer,
-          orderMode: "tiles",
-        };
-      }
-      await this.render(image, params, renderBuffers, texture.createView(), options);
+      await this.render(image, params, sourceBuffers, texture.createView(), options);
       const encoder = this.device.createCommandEncoder();
       encoder.copyTextureToBuffer(
         { texture },
@@ -11732,7 +11765,6 @@ fn commit_layers(@builtin(global_invocation_id) id: vec3<u32>) {
       return { rgba, width: preview.width, height: preview.height, padding: preview };
     } finally {
       if (readBuffer.mapState === "mapped") readBuffer.unmap();
-      destroyBuffers(...temporaryTileBuffers);
       readBuffer.destroy();
       texture.destroy();
     }
@@ -28202,7 +28234,8 @@ els.viewer.addEventListener("contextmenu", (event) => {
 });
 els.viewer.addEventListener("pointerdown", (event) => {
   const directPointer = event.pointerType !== "mouse";
-  if (!state.image || event.target === els.tiltCanvas || (!directPointer && event.button !== 2) || !(event.target instanceof HTMLCanvasElement)) return;
+  const mousePanButton = event.button === 0 || event.button === 2;
+  if (!state.image || event.target === els.tiltCanvas || (!directPointer && !mousePanButton) || !(event.target instanceof HTMLCanvasElement)) return;
   event.preventDefault();
   if (canvasViewInputLocked()) return;
   state.canvasView.pointerId = event.pointerId;
