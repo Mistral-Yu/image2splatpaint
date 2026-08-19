@@ -42,6 +42,11 @@ const MIN_SPLAT_SCALE = 0.0015;
 const DEFAULT_STAGE_MIN_SCALE_RATIO = 0.05;
 const DEFAULT_P1_BASE_SCALE_FLOOR_RATIO = 0.50;
 const DEFAULT_P2_BASE_SCALE_FLOOR_RATIO = 0.35;
+const DEFAULT_P3_BASE_SCALE_FLOOR_RATIO = 0.35;
+const DEFAULT_P1_RELATIVE_SCALE_FLOOR_RATIO = 0.50;
+const DEFAULT_P2_RELATIVE_SCALE_FLOOR_RATIO = 0.35;
+const DEFAULT_P3_RELATIVE_SCALE_FLOOR_RATIO = 0.15;
+const DEFAULT_RELATIVE_SCALE_GUARD_STRENGTH = 0.20;
 const BACKGROUND_EXPOSURE_EPSILON = 1e-8;
 const MIP_PIXEL_SIGMA = 0.35;
 // Start with overlapping but not over-expanded footprints. Density growth can
@@ -151,7 +156,9 @@ const VIRTUAL_CAMERA_GOLDEN_ANGLE_RADIANS = Math.PI * (3 - Math.sqrt(5));
 // aspect ratio. Slots 116-117 carry Rectangle's short-side and long-side
 // opacity-gradient multipliers. Slot 118 carries the learned paint-opacity
 // maximum and slot 119 carries Brush's minimum long/short aspect ratio.
-const TRAIN_CONFIG_FLOATS = 120;
+// Slots 120-122 carry the phase-relative geometric scale floor, its soft
+// correction strength, and the optimizer enable flag.
+const TRAIN_CONFIG_FLOATS = 124;
 const TRAIN_CONFIG_BYTES = TRAIN_CONFIG_FLOATS * 4;
 const MAX_TRAIN_BATCH_SIZE = 16;
 const TRAIN_BATCH_CONFIG_BYTES = TRAIN_CONFIG_BYTES * MAX_TRAIN_BATCH_SIZE;
@@ -2235,13 +2242,21 @@ function phase33Variants() {
     coarseMaxSide: Math.max(64, Math.round(finite("coarseMaxSide", PHASE33_COARSE_MAX_SIDE))),
     coarseSteps: Number.isFinite(coarseStepsOverride) ? Math.max(0, Math.round(coarseStepsOverride)) : null,
     stageMinScaleRatio: Math.max(0, Math.min(0.25, finite("stageMinScaleRatio", DEFAULT_STAGE_MIN_SCALE_RATIO))),
-    p1BaseScaleFloorRatio: Math.max(0, Math.min(1, finite(
-      "p1BaseScaleFloorRatio",
-      inputNumber("#p1BaseScaleFloorRatio", DEFAULT_P1_BASE_SCALE_FLOOR_RATIO),
+    phaseRelativeScaleGuard: enabled(
+      "phaseRelativeScaleGuard",
+      Boolean(document.querySelector("#phaseRelativeScaleGuard")?.checked),
+    ),
+    p1RelativeScaleFloorRatio: Math.max(0, Math.min(1, finite(
+      "p1RelativeScaleFloorRatio",
+      inputNumber("#p1RelativeScaleFloorRatio", DEFAULT_P1_RELATIVE_SCALE_FLOOR_RATIO),
     ))),
-    p2BaseScaleFloorRatio: Math.max(0, Math.min(1, finite(
-      "p2BaseScaleFloorRatio",
-      inputNumber("#p2BaseScaleFloorRatio", DEFAULT_P2_BASE_SCALE_FLOOR_RATIO),
+    p2RelativeScaleFloorRatio: Math.max(0, Math.min(1, finite(
+      "p2RelativeScaleFloorRatio",
+      inputNumber("#p2RelativeScaleFloorRatio", DEFAULT_P2_RELATIVE_SCALE_FLOOR_RATIO),
+    ))),
+    p3RelativeScaleFloorRatio: Math.max(0, Math.min(1, finite(
+      "p3RelativeScaleFloorRatio",
+      inputNumber("#p3RelativeScaleFloorRatio", DEFAULT_P3_RELATIVE_SCALE_FLOOR_RATIO),
     ))),
   };
 }
@@ -3015,8 +3030,10 @@ const els = {
   discreteLayerCount: document.querySelector("#discreteLayerCount"),
   discreteLayerMoveRadius: document.querySelector("#discreteLayerMoveRadius"),
   layerUpdateInterval: document.querySelector("#layerUpdateInterval"),
-  p1BaseScaleFloorRatio: document.querySelector("#p1BaseScaleFloorRatio"),
-  p2BaseScaleFloorRatio: document.querySelector("#p2BaseScaleFloorRatio"),
+  phaseRelativeScaleGuard: document.querySelector("#phaseRelativeScaleGuard"),
+  p1RelativeScaleFloorRatio: document.querySelector("#p1RelativeScaleFloorRatio"),
+  p2RelativeScaleFloorRatio: document.querySelector("#p2RelativeScaleFloorRatio"),
+  p3RelativeScaleFloorRatio: document.querySelector("#p3RelativeScaleFloorRatio"),
   positionLearningRate: document.querySelector("#positionLearningRate"),
   colorLearningRate: document.querySelector("#colorLearningRate"),
   opacityLearningRate: document.querySelector("#opacityLearningRate"),
@@ -5940,9 +5957,27 @@ function stageMinimumScale(image, initialCount, trainingStage, ratio) {
 }
 
 function stageBaseScaleFloorRatio(trainingStage, variants) {
-  if (trainingStage === "coarse") return variants.p1BaseScaleFloorRatio;
-  if (trainingStage === "mid") return variants.p2BaseScaleFloorRatio;
-  return DEFAULT_P2_BASE_SCALE_FLOOR_RATIO;
+  if (variants.phaseRelativeScaleGuard) return 0;
+  if (trainingStage === "coarse") return DEFAULT_P1_BASE_SCALE_FLOOR_RATIO;
+  if (trainingStage === "mid") return DEFAULT_P2_BASE_SCALE_FLOOR_RATIO;
+  return DEFAULT_P3_BASE_SCALE_FLOOR_RATIO;
+}
+
+function stageRelativeScaleFloorRatio(trainingStage, variants = phase33Variants()) {
+  if (trainingStage === "coarse") return variants.p1RelativeScaleFloorRatio;
+  if (trainingStage === "mid") return variants.p2RelativeScaleFloorRatio;
+  return variants.p3RelativeScaleFloorRatio;
+}
+
+function geometricMeanScaleMedian(params) {
+  const values = [];
+  for (let i = 0; i < (params?.count || 0); i += 1) {
+    const sx = Math.max(MIN_SPLAT_SCALE, Number(params.scale[i * 2]) || MIN_SPLAT_SCALE);
+    const sy = Math.max(MIN_SPLAT_SCALE, Number(params.scale[i * 2 + 1]) || MIN_SPLAT_SCALE);
+    values.push(Math.sqrt(sx * sy));
+  }
+  values.sort((a, b) => a - b);
+  return values[Math.floor(values.length / 2)] || MIN_SPLAT_SCALE;
 }
 
 function splatGridAt(layout, index) {
@@ -7044,6 +7079,7 @@ function splatShapeStats(params, image) {
   const opacityValues = [];
   const sxValues = [];
   const syValues = [];
+  const geometricMeanScaleValues = [];
   const radiusValues = [];
   const anisotropyValues = [];
   const rotationValues = [];
@@ -7076,6 +7112,7 @@ function splatShapeStats(params, image) {
       opacityValues.push(opacity);
       sxValues.push(sx);
       syValues.push(sy);
+      geometricMeanScaleValues.push(areaScale);
       radiusValues.push(radiusPx);
       anisotropyValues.push(ratio);
       rotationValues.push(rotation);
@@ -7131,6 +7168,7 @@ function splatShapeStats(params, image) {
       opacity: distributionStats(opacityValues, 8, [0, 1]),
       scale_x: distributionStats(sxValues),
       scale_y: distributionStats(syValues),
+      geometric_mean_scale: distributionStats(geometricMeanScaleValues),
       radius_px: distributionStats(radiusValues),
       anisotropy: distributionStats(anisotropyValues, 8, [1, Math.max(1, anisotropyMax)]),
       rotation: distributionStats(rotationValues, 8, [-Math.PI, Math.PI]),
@@ -10506,7 +10544,7 @@ fn sort_tiles(
 }
 `;
     const shader = `
-struct Config { values: array<vec4<f32>, 30>, };
+struct Config { values: array<vec4<f32>, 31>, };
 @group(0) @binding(0) var<uniform> config: Config;
 struct SplatPosition { center: vec2<f32>, rawDepth: f32, depthGradient: f32, };
 @group(0) @binding(1) var<storage, read> xy: array<SplatPosition>;
@@ -10687,7 +10725,7 @@ ${sortTilesFunction}`;
   async ensureDiscreteLayerPipelines() {
     if (this.discreteLayerAssignPipeline && this.discreteLayerCommitPipeline) return;
     const shader = `
-struct Config { values: array<vec4<f32>, 30>, };
+struct Config { values: array<vec4<f32>, 31>, };
 struct SplatPosition { center: vec2<f32>, rawDepth: f32, depthGradient: f32, };
 struct AdamState {
   mGeom: vec4<f32>,
@@ -12088,7 +12126,7 @@ fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
   let importanceW = select(previousImportance.w + 1.0, previousImportance.w + coherenceNorm, densityGradientMode == 2u);
   stats[capacity + g] = vec4<f32>(mix(previousImportance.xyz, measuredImportance, importanceAlpha), importanceW);`;
     const renderShader = `
-struct Config { values: array<vec4<f32>, 30>, };
+struct Config { values: array<vec4<f32>, 31>, };
 struct AlphaState { compositeAlpha: f32, acceptedEnd: u32, pad0: f32, pad1: u32, };
 @group(0) @binding(0) var<uniform> config: Config;
 struct SplatPosition { center: vec2<f32>, rawDepth: f32, depthGradient: f32, };
@@ -12778,7 +12816,7 @@ fn alpha_ssim_tiles(
 }`;
 
     const lossGradientShader = [
-      "struct Config { values: array<vec4<f32>, 30>, };",
+      "struct Config { values: array<vec4<f32>, 31>, };",
       "@group(0) @binding(0) var<uniform> config: Config;",
       "@group(0) @binding(1) var<storage, read> targetRgb: array<f32>;",
       "@group(0) @binding(2) var<storage, read> targetAlpha: array<f32>;",
@@ -13010,7 +13048,7 @@ fn alpha_ssim_tiles(
       ];
     const exactBackwardShader = [
       this.subgroupExactBackwardEnabled ? "enable subgroups;" : "",
-      "struct Config { values: array<vec4<f32>, 30>, };",
+      "struct Config { values: array<vec4<f32>, 31>, };",
       "struct AlphaState { compositeAlpha: f32, acceptedEnd: u32, pad0: f32, pad1: u32, };",
       "struct KernelSample { kernel: f32, dCenter: vec2<f32>, dLogScale: vec2<f32>, dTheta: f32, dTaper: f32, };",
       "struct KernelEvaluation { rawKernel: f32, weightedKernel: f32, dCenter: vec2<f32>, dLogScale: vec2<f32>, dTheta: f32, dDepth: f32, };",
@@ -13532,7 +13570,7 @@ fn alpha_ssim_tiles(
     ].join("\n");
 
     const segmentedReferenceShader = `
-struct Config { values: array<vec4<f32>, 30>, };
+struct Config { values: array<vec4<f32>, 31>, };
 @group(0) @binding(0) var<uniform> config: Config;
 @group(0) @binding(1) var<storage, read> tileOffsets: array<u32>;
 @group(0) @binding(2) var<storage, read> tileIndices: array<u32>;
@@ -13851,7 +13889,7 @@ fn virtual_order_penalty(
 `;
 
     const brushLocalColorFlowShader = `
-struct Config { values: array<vec4<f32>, 30>, };
+struct Config { values: array<vec4<f32>, 31>, };
 struct SplatPosition { center: vec2<f32>, rawDepth: f32, depthGradient: f32, };
 @group(0) @binding(0) var<uniform> config: Config;
 @group(0) @binding(1) var<storage, read> xy: array<SplatPosition>;
@@ -13926,7 +13964,7 @@ fn brush_local_color_flow(@builtin(global_invocation_id) id: vec3<u32>) {
 `;
 
     const optimizerShader = `
-struct Config { values: array<vec4<f32>, 30>, };
+struct Config { values: array<vec4<f32>, 31>, };
 struct AdamState {
   mGeom: vec4<f32>,
   vGeom: vec4<f32>,
@@ -14433,6 +14471,16 @@ fn apply_optimizer(
   let minScale = max(${MIN_SPLAT_SCALE}, cfg(80u));
   nextTheta = clamp(nextTheta, -3.14159265, 3.14159265);
   nextScale = max(nextScale, vec2<f32>(minScale));
+  if (cfg(122u) > 0.5 && cfg(120u) > minScale) {
+    let geometricScale = sqrt(max(minScale * minScale, nextScale.x * nextScale.y));
+    if (geometricScale < cfg(120u)) {
+      let correction = pow(
+        cfg(120u) / max(geometricScale, minScale),
+        clamp(cfg(121u), 0.0, 1.0)
+      );
+      nextScale *= correction;
+    }
+  }
   let phaseOneProgress = clamp(step / max(cfg(39u), 1.0), 0.0, 1.0);
   let phaseMaxPlanarScale = mix(max(cfg(62u), ${PHASE_ONE_MAX_PLANAR_SCALE}), max(cfg(62u), minScale), phaseOneProgress);
   nextScale = min(nextScale, vec2<f32>(phaseMaxPlanarScale));
@@ -14748,6 +14796,16 @@ fn optimize(@builtin(global_invocation_id) id: vec3<u32>) {
   let minScale = max(${MIN_SPLAT_SCALE}, cfg(80u));
   nextTheta = clamp(nextTheta, -3.14159265, 3.14159265);
   nextScale = max(nextScale, vec2<f32>(minScale));
+  if (cfg(122u) > 0.5 && cfg(120u) > minScale) {
+    let geometricScale = sqrt(max(minScale * minScale, nextScale.x * nextScale.y));
+    if (geometricScale < cfg(120u)) {
+      let correction = pow(
+        cfg(120u) / max(geometricScale, minScale),
+        clamp(cfg(121u), 0.0, 1.0)
+      );
+      nextScale *= correction;
+    }
+  }
   let phaseOneProgress = clamp(step / max(cfg(39u), 1.0), 0.0, 1.0);
   let phaseMaxPlanarScale = mix(max(cfg(62u), ${PHASE_ONE_MAX_PLANAR_SCALE}), max(cfg(62u), minScale), phaseOneProgress);
   nextScale = min(nextScale, vec2<f32>(phaseMaxPlanarScale));
@@ -20888,6 +20946,10 @@ fn compact_state(@builtin(global_invocation_id) id: vec3u) {
       ? Math.max(0.00001, Number(params.virtualDepthPriorDelta) || DEFAULT_VIRTUAL_DEPTH_PRIOR_DELTA)
       : DEFAULT_VIRTUAL_DEPTH_PRIOR_DELTA;
     config[110] = boundedDepthEnabled && params.virtualDepthSoftConstraintEnabled !== false ? 1 : 0;
+    const relativeScaleGuard = this.trainState.phaseRelativeScaleGuard;
+    config[120] = relativeScaleGuard?.enabled ? relativeScaleGuard.floor : 0;
+    config[121] = relativeScaleGuard?.enabled ? relativeScaleGuard.strength : 0;
+    config[122] = relativeScaleGuard?.enabled ? 1 : 0;
     const sourceDomainActive = config[72] > 0.5;
     const segmentedExactBackwardActive = Boolean(
       useExactBackward &&
@@ -22748,8 +22810,10 @@ function setInputControlsDisabled(disabled) {
     els.maxPlanarScale,
     els.boundarySigma,
     els.detailCoherence,
-    els.p1BaseScaleFloorRatio,
-    els.p2BaseScaleFloorRatio,
+    els.phaseRelativeScaleGuard,
+    els.p1RelativeScaleFloorRatio,
+    els.p2RelativeScaleFloorRatio,
+    els.p3RelativeScaleFloorRatio,
     els.densifyInterval,
     els.growthPercentage,
     els.growthApplyUntil,
@@ -24001,6 +24065,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   const runLiveQualityMetrics = liveQualityMetricsEnabled();
   const runQaPeriodicMetrics = qaPeriodicTrainingEvaluationEnabled();
   const runPeriodicEvaluation = periodicTrainingEvaluationEnabled();
+  const runPhase33 = phase33Variants();
   const runGrowthSettings = phase39Variants();
   const runStageAwareGrowth = runGrowthSettings.stageAwareGrowth;
   const runStageGrowthShares = runGrowthSettings.stageGrowthShares;
@@ -24928,6 +24993,19 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       `training start algorithm=${state.metrics.algorithm} backend=${state.metrics.backend} metrics=${periodicEvaluation ? "periodic-read-only" : "final-only"} growth=${state.metrics.growth_schedule.percentage}% threshold=${state.metrics.growth_schedule.signal_threshold} cap=${finalCount}`,
     );
 
+    state.metrics.phase_relative_scale_guard = {
+      enabled: runPhase33.phaseRelativeScaleGuard,
+      reference: "phase-start geometric-mean scale median",
+      correction: "aspect-preserving soft log-scale floor",
+      strength: DEFAULT_RELATIVE_SCALE_GUARD_STRENGTH,
+      ratios: {
+        P1: runPhase33.p1RelativeScaleFloorRatio,
+        P2: runPhase33.p2RelativeScaleFloorRatio,
+        P3: runPhase33.p3RelativeScaleFloorRatio,
+      },
+      events: [],
+    };
+
     const metricInterval = Math.max(1, Math.min(DEFAULT_MAX_METRIC_INTERVAL, state.recommendation?.metricInterval || Math.floor(steps / 60)));
     let appliedRuntimeSettingsRevision = state.runtimeSettingsRevision;
     resetTrainingTiming(false);
@@ -24941,6 +25019,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       submittedIterations: 0,
       maximumObservedSize: 1,
     };
+    let relativeScaleGuardStage = null;
     for (let step = 1; step <= steps; step += 1) {
       const traceProfileLabels = state.webgpu.profile?.timing_backend === "timestamp-query"
         ? performanceProfileLabels(step, steps)
@@ -24971,6 +25050,39 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         state.metrics.stopped = true;
         log(`stopped at step ${step - 1}`);
         break;
+      }
+      const optimizerStage = curriculumTrainingStage(
+        step,
+        steps,
+        runPhase33,
+        renderer.trainState?.coarseImage,
+        renderer.trainState?.midImage,
+      );
+      if (runPhase33.phaseRelativeScaleGuard && optimizerStage !== relativeScaleGuardStage) {
+        if (relativeScaleGuardStage !== null) {
+          await awaitTrainingRun(run, renderer.readTrainedColors(state.params));
+        }
+        const median = geometricMeanScaleMedian(state.params);
+        const ratio = stageRelativeScaleFloorRatio(optimizerStage, runPhase33);
+        const phase = optimizerStage === "coarse" ? "P1" : optimizerStage === "mid" ? "P2" : "P3";
+        renderer.trainState.phaseRelativeScaleGuard = {
+          enabled: ratio > 0,
+          stage: optimizerStage,
+          phase,
+          median,
+          ratio,
+          floor: median * ratio,
+          strength: DEFAULT_RELATIVE_SCALE_GUARD_STRENGTH,
+        };
+        state.metrics.phase_relative_scale_guard.events.push({
+          step,
+          phase,
+          splats: state.params.count,
+          median,
+          ratio,
+          floor: median * ratio,
+        });
+        relativeScaleGuardStage = optimizerStage;
       }
       const densitySteps = experimentalDensifySteps(steps);
       const growthSteps = experimentalGrowthSteps(steps, runGrowthApplyUntilFraction);
@@ -27948,8 +28060,10 @@ els.discreteLayerMoveRadius.addEventListener("change", () => {
   publishState();
 });
 els.layerUpdateInterval.addEventListener("input", publishState);
-els.p1BaseScaleFloorRatio.addEventListener("input", publishState);
-els.p2BaseScaleFloorRatio.addEventListener("input", publishState);
+els.phaseRelativeScaleGuard.addEventListener("change", publishState);
+els.p1RelativeScaleFloorRatio.addEventListener("input", publishState);
+els.p2RelativeScaleFloorRatio.addEventListener("input", publishState);
+els.p3RelativeScaleFloorRatio.addEventListener("input", publishState);
 els.virtualBoundedDepth.addEventListener("change", publishState);
 els.virtualGofDensity.addEventListener("change", publishState);
 els.virtualCameraShare.addEventListener("input", publishState);
@@ -28851,6 +28965,9 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
       phase40_variants: m.phase40_variants,
       phase45_variants: m.phase45_variants,
       phase46_variants: m.phase46_variants,
+      phase_relative_scale_guard: m.phase_relative_scale_guard
+        ? structuredClone(m.phase_relative_scale_guard)
+        : null,
       phase45_region_report: m.phase45_region_report,
       mid_training_overdensity_correction: m.mid_training_overdensity_correction
         ? structuredClone(m.mid_training_overdensity_correction)
