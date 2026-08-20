@@ -5,6 +5,7 @@ const {
   limitNumber,
 } = globalThis.Image2SplatPaintNumeric;
 const { canvasToBlob } = globalThis.Image2SplatPaintCanvasBlob;
+const { serializeBinaryPly } = globalThis.Image2SplatPaintPlySerializer;
 const {
   displayOrientedImageSize,
   orientationSwapsImageAxes,
@@ -26650,46 +26651,24 @@ function makePly(params = state.params, image = state.image) {
   assertFiniteParams(params, "ply-export");
   const layerOrderEnabled = Boolean(params.layerOrderEnabled);
   const header = plyHeaderText(params, image);
-  const headerBytes = new TextEncoder().encode(header);
-  const rowBytes = params.count * PLY_ROW_BYTES;
-  const buffer = new ArrayBuffer(headerBytes.byteLength + rowBytes);
-  const bytes = new Uint8Array(buffer);
-  bytes.set(headerBytes, 0);
-  const view = new DataView(buffer, headerBytes.byteLength);
-  let o = 0;
-  const writeFloat = (value) => {
-    view.setFloat32(o, value, true);
-    o += 4;
-  };
-  for (let i = 0; i < params.count; i += 1) {
-    const geometry = transformPlanarSplatForPly(
+  return serializeBinaryPly({
+    header,
+    count: params.count,
+    rowBytes: PLY_ROW_BYTES,
+    shC0: SH_C0,
+    geometryAt: (i) => transformPlanarSplatForPly(
       params.xy[i * 2],
       params.xy[i * 2 + 1],
       params.scale[i * 2],
       params.scale[i * 2 + 1],
       params.theta?.[i] || 0,
       image,
-    );
-    const halfTheta = geometry.theta * 0.5;
-    writeFloat(geometry.x);
-    writeFloat(geometry.y);
-    writeFloat(plyLayerDepth(i, params, layerOrderEnabled));
-    writeFloat(0);
-    writeFloat(0);
-    writeFloat(0);
-    writeFloat((params.rgb[i * 3] - 0.5) / SH_C0);
-    writeFloat((params.rgb[i * 3 + 1] - 0.5) / SH_C0);
-    writeFloat((params.rgb[i * 3 + 2] - 0.5) / SH_C0);
-    writeFloat(logit(params.opacity[i]));
-    writeFloat(Math.log(Math.max(geometry.sx, 1e-6)));
-    writeFloat(Math.log(Math.max(geometry.sy, 1e-6)));
-    writeFloat(Math.log(1e-4));
-    writeFloat(Math.cos(halfTheta));
-    writeFloat(0);
-    writeFloat(0);
-    writeFloat(Math.sin(halfTheta));
-  }
-  return buffer;
+    ),
+    depthAt: (i) => plyLayerDepth(i, params, layerOrderEnabled),
+    rgbAt: (i) => [params.rgb[i * 3], params.rgb[i * 3 + 1], params.rgb[i * 3 + 2]],
+    opacityAt: (i) => params.opacity[i],
+    logit,
+  });
 }
 
 function currentTiltRevision() {
