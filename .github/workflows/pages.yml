@@ -32,6 +32,7 @@ jobs:
             web/app.js \
             web/core/numeric-utils.js \
             web/export/canvas-blob.js \
+            web/input/image-metadata.js \
             web/sample-image-data.js \
             web/tilt-camera.mjs \
             web/tilt-browser-entry.mjs \
@@ -47,10 +48,12 @@ jobs:
           mkdir -p _site/web _site/web/vendor _site/assets/source-images
           mkdir -p _site/web/core
           mkdir -p _site/web/export
+          mkdir -p _site/web/input
           cp -f .nojekyll LICENSE THIRD_PARTY_NOTICES.md index.html _site/
           cp -f web/index.html web/app.js web/styles.css web/sample-image-data.js web/tilt-viewer.bundle.js _site/web/
           cp -f web/core/numeric-utils.js _site/web/core/
           cp -f web/export/canvas-blob.js _site/web/export/
+          cp -f web/input/image-metadata.js _site/web/input/
           cp -f web/vendor/PLAYCANVAS-LICENSE.txt _site/web/vendor/
           cp -f assets/source-images/README.md assets/source-images/ramen-photo.jpg assets/source-images/generated-geometric-sample.jpg _site/assets/source-images/
       - name: Verify release gate
