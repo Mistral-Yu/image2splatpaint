@@ -5,7 +5,12 @@ const {
   limitNumber,
 } = globalThis.Image2SplatPaintNumeric;
 const { canvasToBlob } = globalThis.Image2SplatPaintCanvasBlob;
-const { serializeBinaryPly } = globalThis.Image2SplatPaintPlySerializer;
+const {
+  createPlyHeader,
+  plyFrameScale: exportedPlyFrameScale,
+  serializeBinaryPly,
+  transformPlanarSplat,
+} = globalThis.Image2SplatPaintPlySerializer;
 const {
   displayOrientedImageSize,
   orientationSwapsImageAxes,
@@ -26349,29 +26354,14 @@ function browserCpuMemoryInfo() {
 }
 
 function plyHeaderText(params, image) {
-  const props = [
-    "property float x",
-    "property float y",
-    "property float z",
-    "property float nx",
-    "property float ny",
-    "property float nz",
-    "property float f_dc_0",
-    "property float f_dc_1",
-    "property float f_dc_2",
-    "property float opacity",
-    "property float scale_0",
-    "property float scale_1",
-    "property float scale_2",
-    "property float rot_0",
-    "property float rot_1",
-    "property float rot_2",
-    "property float rot_3",
-  ];
-  const frame = plyFrameScale(image);
-  const layerOrderEnabled = Boolean(params.layerOrderEnabled);
   const boundarySigma = Number.isFinite(params.boundarySigma) ? params.boundarySigma : selectedBoundarySigma();
-  return `ply\nformat binary_little_endian 1.0\ncomment image2gaussianpaint_frame ${frame.width} ${frame.height}\ncomment image2gaussianpaint_blend standard_alpha\ncomment image2gaussianpaint_edge_containment ${boundarySigma}\ncomment image2gaussianpaint_layer_order ${layerOrderEnabled ? "micro_z" : "flat_z0"} ${PLY_LAYER_DEPTH_SPAN}\nelement vertex ${params.count}\n${props.join("\n")}\nend_header\n`;
+  return createPlyHeader({
+    count: params.count,
+    image,
+    boundarySigma,
+    layerOrderEnabled: Boolean(params.layerOrderEnabled),
+    layerDepthSpan: PLY_LAYER_DEPTH_SPAN,
+  });
 }
 
 function plyExportMemoryPlan(
@@ -26479,40 +26469,12 @@ function assertTiltViewerCapacity(params = state.params, image = state.image) {
 }
 
 function plyFrameScale(image = state.image) {
-  const width = Math.max(1, Number(image?.width) || 1);
-  const height = Math.max(1, Number(image?.height) || 1);
-  const longSide = Math.max(width, height);
-  return {
-    x: width / longSide,
-    y: height / longSide,
-    width,
-    height,
-    aspect: width / height,
-  };
+  return exportedPlyFrameScale(image);
 }
 
 function transformPlanarSplatForPly(x, y, sx, sy, theta, image = state.image) {
   // This is the single NDC-to-isotropic-world conversion, independent of grid initialization.
-  const frame = plyFrameScale(image);
-  const c = Math.cos(theta);
-  const s = Math.sin(theta);
-  const sx2 = sx * sx;
-  const sy2 = sy * sy;
-  const covarianceX = frame.x * frame.x * (c * c * sx2 + s * s * sy2);
-  const covarianceY = frame.y * frame.y * (s * s * sx2 + c * c * sy2);
-  const covarianceXY = -frame.x * frame.y * c * s * (sx2 - sy2);
-  const trace = covarianceX + covarianceY;
-  const delta = Math.hypot(covarianceX - covarianceY, 2 * covarianceXY);
-  const lambda0 = Math.max(1e-12, 0.5 * (trace + delta));
-  const lambda1 = Math.max(1e-12, 0.5 * (trace - delta));
-  return {
-    x: x * frame.x,
-    y: -y * frame.y,
-    sx: Math.sqrt(lambda0),
-    sy: Math.sqrt(lambda1),
-    theta: 0.5 * Math.atan2(2 * covarianceXY, covarianceX - covarianceY),
-    frame,
-  };
+  return transformPlanarSplat(x, y, sx, sy, theta, image);
 }
 
 function sourceRgbAtNdc(image, x, y) {
