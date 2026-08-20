@@ -16,6 +16,7 @@ const artifactFiles = Object.freeze([
   "web/core/numeric-utils.js",
   "web/export/canvas-blob.js",
   "web/export/ply-serializer.js",
+  "web/export/ply-inspector.js",
   "web/input/image-metadata.js",
   "web/gpu/metrics.js",
   "web/index.html",
