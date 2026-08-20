@@ -13,6 +13,7 @@ const artifactFiles = Object.freeze([
   "assets/source-images/generated-geometric-sample.jpg",
   "assets/source-images/ramen-photo.jpg",
   "web/app.js",
+  "web/core/numeric-utils.js",
   "web/index.html",
   "web/sample-image-data.js",
   "web/styles.css",
