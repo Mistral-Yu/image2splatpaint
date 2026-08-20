@@ -20,6 +20,7 @@ const artifactFiles = Object.freeze([
   "web/input/image-metadata.js",
   "web/gpu/metrics.js",
   "web/gpu/device.js",
+  "web/gpu/renderer.js",
   "web/index.html",
   "web/sample-image-data.js",
   "web/styles.css",
