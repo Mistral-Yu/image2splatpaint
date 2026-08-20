@@ -18,6 +18,7 @@ const {
   parseImageDimensions,
 } = globalThis.Image2SplatPaintImageMetadata;
 const { profileDistributionSummary } = globalThis.Image2SplatPaintGpuMetrics;
+const { requestWebGpuDevice } = globalThis.Image2SplatPaintGpuDevice;
 
 const ROW_BYTES = 32;
 const SH_C0 = 0.28209479177387814;
@@ -9428,54 +9429,28 @@ async function detectWebGpu() {
     return false;
   }
   try {
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) throw new Error("adapter unavailable");
-    const adapterInfo = adapter.info || null;
-    const adapterFeatures = Array.from(adapter.features || []).sort();
     const profileRequested = performanceProfileRequested();
-    const timestampQuery = profileRequested && adapter.features.has("timestamp-query");
-    const subgroups = adapter.features.has("subgroups");
-    const adapterStorageBuffers = Number(adapter.limits?.maxStorageBuffersPerShaderStage || 8);
-    if (adapterStorageBuffers < REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE) {
-      throw new Error(
-        `adapter supports ${adapterStorageBuffers} storage buffers per shader stage; ${REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE} required`,
-      );
-    }
-    const requiredLimits = {
-      maxStorageBuffersPerShaderStage: Math.min(adapterStorageBuffers, PREFERRED_STORAGE_BUFFERS_PER_SHADER_STAGE),
-    };
-    let device;
-    try {
-      device = await adapter.requestDevice({
-        requiredFeatures: [
-          ...(timestampQuery ? ["timestamp-query"] : []),
-          ...(subgroups ? ["subgroups"] : []),
-        ],
-        requiredLimits,
-      });
-    } catch (error) {
-      device = await adapter.requestDevice({
-        requiredFeatures: timestampQuery ? ["timestamp-query"] : [],
-        requiredLimits,
-      });
-    }
+    const requested = await requestWebGpuDevice(navigator.gpu, {
+      profileRequested,
+      subgroupExactBackward: performanceVariants().subgroupExactBackward,
+      requiredStorageBuffersPerShaderStage: REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE,
+      preferredStorageBuffersPerShaderStage: PREFERRED_STORAGE_BUFFERS_PER_SHADER_STAGE,
+    });
+    const { device } = requested;
     const renderer = new WebGpuPreview(device, els.gpuCanvas, {
       profileRequested,
-      timestampQuery: timestampQuery && device.features.has("timestamp-query"),
-      subgroupExactBackward: performanceVariants().subgroupExactBackward && device.features.has("subgroups"),
+      timestampQuery: requested.timestampQuery,
+      subgroupExactBackward: requested.subgroupExactBackward,
     });
     state.webgpu = {
       supported: true,
       renderer,
       reason: "available",
-      limits: device.limits || adapter.limits || null,
-      adapterInfo,
-      adapterFeatures,
-      profile: {
-        requested: profileRequested,
-        timing_backend: timestampQuery && device.features.has("timestamp-query") ? "timestamp-query" : profileRequested ? "unavailable" : "off",
-      },
-      subgroups: device.features.has("subgroups"),
+      limits: requested.limits,
+      adapterInfo: requested.adapterInfo,
+      adapterFeatures: requested.adapterFeatures,
+      profile: requested.profile,
+      subgroups: requested.subgroups,
     };
     device.lost.then((info) => handleWebGpuDeviceLoss(renderer, info));
     els.backendText.textContent = "webgpu available";
