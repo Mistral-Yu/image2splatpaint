@@ -14,6 +14,7 @@ const artifactFiles = Object.freeze([
   "assets/source-images/ramen-photo.jpg",
   "web/app.js",
   "web/core/numeric-utils.js",
+  "web/core/config.js",
   "web/export/canvas-blob.js",
   "web/export/ply-serializer.js",
   "web/export/ply-inspector.js",
