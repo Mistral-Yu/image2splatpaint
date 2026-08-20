@@ -4,6 +4,7 @@ const {
   hexColorToRgb,
   limitNumber,
 } = globalThis.Image2SplatPaintNumeric;
+const { canvasToBlob } = globalThis.Image2SplatPaintCanvasBlob;
 
 const ROW_BYTES = 32;
 const SH_C0 = 0.28209479177387814;
@@ -26382,15 +26383,6 @@ function downloadBlob(name, blob) {
   log(`download ${name} bytes=${blob.size}`);
   publishState();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function canvasToBlob(canvas, type = "image/png") {
-  return new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => {
-      if (blob) resolve(blob);
-      else reject(new Error("Canvas image encoding failed."));
-    }, type);
-  });
 }
 
 async function decodeImageBlobRgba(blob, width, height) {
