@@ -39,6 +39,7 @@ jobs:
             web/gpu/metrics.js \
             web/gpu/device.js \
             web/gpu/renderer.js \
+            web/gpu/tile-runtime.js \
             web/training/trainer.js \
             web/ui/controls.js \
             web/sample-image-data.js \
@@ -65,7 +66,7 @@ jobs:
           cp -f web/core/numeric-utils.js _site/web/core/
           cp -f web/export/canvas-blob.js web/export/ply-serializer.js web/export/ply-inspector.js _site/web/export/
           cp -f web/input/image-metadata.js web/input/image-loader.js _site/web/input/
-          cp -f web/gpu/metrics.js web/gpu/device.js web/gpu/renderer.js _site/web/gpu/
+          cp -f web/gpu/metrics.js web/gpu/device.js web/gpu/renderer.js web/gpu/tile-runtime.js _site/web/gpu/
           cp -f web/training/trainer.js _site/web/training/
           cp -f web/ui/controls.js _site/web/ui/
           cp -f web/vendor/PLAYCANVAS-LICENSE.txt _site/web/vendor/
