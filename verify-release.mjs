@@ -23,6 +23,7 @@ const artifactFiles = Object.freeze([
   "web/gpu/device.js",
   "web/gpu/renderer.js",
   "web/gpu/tile-runtime.js",
+  "web/gpu/optimizer-runtime.js",
   "web/training/trainer.js",
   "web/ui/controls.js",
   "web/index.html",
