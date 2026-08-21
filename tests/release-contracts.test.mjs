@@ -21,6 +21,7 @@ test("every local app script is shipped and critical classic-script order is sta
   assert.ok(indexOf("gpu/shaders/tile-pipeline.js") < indexOf("gpu/tile-pipelines.js"));
   assert.ok(indexOf("gpu/shaders/optimizer-reset.js") < indexOf("gpu/optimizer-runtime.js"));
   assert.ok(indexOf("gpu/shaders/training-pipelines.js") < indexOf("gpu/renderer.js"));
+  assert.ok(indexOf("gpu/shaders/preview-pipelines.js") < indexOf("gpu/renderer.js"));
   assert.ok(indexOf("gpu/renderer.js") < indexOf("gpu/tile-pipelines.js"));
   assert.ok(indexOf("gpu/renderer.js") < indexOf("gpu/optimizer-runtime.js"));
   assert.ok(indexOf("app.js") < indexOf("ui/bootstrap.js"));

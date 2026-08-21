@@ -115,3 +115,33 @@ test("WGSL factories preserve byte-stable tile and optimizer reset sources", asy
   assert.equal(optimizerReset.length, 1866);
   assert.equal(createHash("sha256").update(optimizerReset).digest("hex"), "946e15a4b94356a399ddae7ea2b48da581472575ec70484f897d31d0672ca2d1");
 });
+
+test("preview WGSL factories preserve generated source fingerprints", async () => {
+  const context = vm.createContext({
+    ILLUSTRATIVE_OIL_WGSL: "IO",
+    LAYERED_OPAQUE_BRUSH_EDGE_SOFTNESS: 2,
+    LAYERED_OPAQUE_BRUSH_KERNEL_EXTENT: 1,
+    LAYER_CODE_RANGE: 6,
+    MAX_DISCRETE_LAYER_COUNT: 8,
+    MIN_DISCRETE_LAYER_COUNT: 7,
+    Object,
+    RECTANGLE_EDGE_SOFTNESS: 4,
+    RECTANGLE_FLAG_ASYMMETRIC_SOFTNESS: 5,
+    RECTANGLE_KERNEL_EXTENT: 3,
+    RECTANGLE_TRAPEZOID_WGSL: "RT",
+    RENDER_SIGMA: 4,
+    TILE_SIZE: 16,
+  });
+  context.globalThis = context;
+  vm.runInContext(
+    await readFile(new URL("../web/gpu/shaders/preview-pipelines.js", import.meta.url), "utf8"),
+    context,
+  );
+  const shaders = Object.keys(context.Image2SplatPaintPreviewShaders)
+    .map((name) => context.Image2SplatPaintPreviewShaders[name]());
+  assert.deepEqual(shaders.map((shader) => shader.length), [9565, 3557, 7465, 375, 809]);
+  assert.equal(
+    createHash("sha256").update(shaders.join("\u0000")).digest("hex"),
+    "cb624d452f9cb10e95b80910f00dc6f22c973a25f20b8c6bd64b363a09cb54e1",
+  );
+});
