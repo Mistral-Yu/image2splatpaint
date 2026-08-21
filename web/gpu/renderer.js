@@ -1,15 +1,50 @@
-function installWebGpuPreviewMethods(sourcePrototype, sourceName) {
+const webGpuPreviewFeatureDefinitions = new Map();
+
+class WebGpuPreviewFeatureAdapter {
+  constructor(owner, sourceName, methods) {
+    this.owner = owner;
+    this.sourceName = sourceName;
+    this.methods = methods;
+  }
+
+  invoke(name, args) {
+    const descriptor = this.methods.get(name);
+    if (!descriptor) throw new Error(`WebGpuPreview feature method missing: ${this.sourceName}.${name}`);
+    return descriptor.value.apply(this.owner, args);
+  }
+}
+
+function registerWebGpuPreviewFeature(sourcePrototype, sourceName) {
+  if (webGpuPreviewFeatureDefinitions.has(sourceName)) {
+    throw new Error(`WebGpuPreview feature already registered: ${sourceName}`);
+  }
+  const methods = new Map();
   for (const name of Object.getOwnPropertyNames(sourcePrototype)) {
     if (name === "constructor") continue;
     if (Object.prototype.hasOwnProperty.call(WebGpuPreview.prototype, name)) {
       throw new Error(`WebGpuPreview method collision: ${sourceName}.${name}`);
     }
+    const descriptor = Object.getOwnPropertyDescriptor(sourcePrototype, name);
+    if (typeof descriptor?.value !== "function") {
+      throw new Error(`WebGpuPreview feature method must be callable: ${sourceName}.${name}`);
+    }
+    methods.set(name, descriptor);
     Object.defineProperty(
       WebGpuPreview.prototype,
       name,
-      Object.getOwnPropertyDescriptor(sourcePrototype, name),
+      {
+        configurable: descriptor.configurable,
+        enumerable: descriptor.enumerable,
+        writable: descriptor.writable,
+        value(...args) {
+          const feature = this.webGpuFeatureAdapters?.get(sourceName);
+          if (!feature) throw new Error(`WebGpuPreview feature unavailable: ${sourceName}`);
+          return feature.invoke(name, args);
+        },
+      },
     );
   }
+  webGpuPreviewFeatureDefinitions.set(sourceName, methods);
 }
 
 class WebGpuPreview {
@@ -110,6 +145,12 @@ class WebGpuPreview {
         : () => {},
     };
     this.resultRenderState = null;
+    this.webGpuFeatureAdapters = new Map(
+      Array.from(webGpuPreviewFeatureDefinitions, ([sourceName, methods]) => [
+        sourceName,
+        new WebGpuPreviewFeatureAdapter(this, sourceName, methods),
+      ]),
+    );
   }
 
   configureExperimentalPerformance(performance = performanceVariants()) {

@@ -355,4 +355,4 @@ ${sortTilesFunction}`;
 
 }
 
-installWebGpuPreviewMethods(WebGpuTilePipelines.prototype, "WebGpuTilePipelines");
+registerWebGpuPreviewFeature(WebGpuTilePipelines.prototype, "WebGpuTilePipelines");

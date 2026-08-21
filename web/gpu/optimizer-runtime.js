@@ -1168,4 +1168,4 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
 
 }
 
-installWebGpuPreviewMethods(WebGpuOptimizerRuntime.prototype, "WebGpuOptimizerRuntime");
+registerWebGpuPreviewFeature(WebGpuOptimizerRuntime.prototype, "WebGpuOptimizerRuntime");

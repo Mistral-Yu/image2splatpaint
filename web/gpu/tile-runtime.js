@@ -184,4 +184,4 @@ class WebGpuTileRuntime {
 
 }
 
-installWebGpuPreviewMethods(WebGpuTileRuntime.prototype, "WebGpuTileRuntime");
+registerWebGpuPreviewFeature(WebGpuTileRuntime.prototype, "WebGpuTileRuntime");

@@ -34,14 +34,18 @@ test("Pages workflow uses tracked source, contract, build, and release gates", a
   assert.doesNotMatch(workflow, /scripts\//);
 });
 
-test("GPU prototype extension rejects silent method replacement", async () => {
+test("GPU feature composition rejects collisions without copying implementations", async () => {
   const renderer = await readFile(new URL("../web/gpu/renderer.js", import.meta.url), "utf8");
   const tilePipelines = await readFile(new URL("../web/gpu/tile-pipelines.js", import.meta.url), "utf8");
   const tileRuntime = await readFile(new URL("../web/gpu/tile-runtime.js", import.meta.url), "utf8");
   const optimizer = await readFile(new URL("../web/gpu/optimizer-runtime.js", import.meta.url), "utf8");
   assert.match(renderer, /hasOwnProperty\.call\(WebGpuPreview\.prototype, name\)/);
   assert.match(renderer, /WebGpuPreview method collision/);
-  assert.match(tilePipelines, /installWebGpuPreviewMethods\(WebGpuTilePipelines\.prototype/);
-  assert.match(tileRuntime, /installWebGpuPreviewMethods\(WebGpuTileRuntime\.prototype/);
-  assert.match(optimizer, /installWebGpuPreviewMethods\(WebGpuOptimizerRuntime\.prototype/);
+  assert.match(renderer, /class WebGpuPreviewFeatureAdapter/);
+  assert.match(renderer, /descriptor\.value\.apply\(this\.owner, args\)/);
+  assert.match(renderer, /this\.webGpuFeatureAdapters = new Map/);
+  assert.match(tilePipelines, /registerWebGpuPreviewFeature\(WebGpuTilePipelines\.prototype/);
+  assert.match(tileRuntime, /registerWebGpuPreviewFeature\(WebGpuTileRuntime\.prototype/);
+  assert.match(optimizer, /registerWebGpuPreviewFeature\(WebGpuOptimizerRuntime\.prototype/);
+  assert.doesNotMatch(`${tilePipelines}\n${tileRuntime}\n${optimizer}`, /Object\.defineProperty\(\s*WebGpuPreview\.prototype/);
 });
