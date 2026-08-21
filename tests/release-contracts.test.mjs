@@ -23,6 +23,7 @@ test("every local app script is shipped and critical classic-script order is sta
   assert.ok(indexOf("gpu/shaders/training-pipelines.js") < indexOf("gpu/renderer.js"));
   assert.ok(indexOf("gpu/shaders/preview-pipelines.js") < indexOf("gpu/renderer.js"));
   assert.ok(indexOf("gpu/shaders/metric-pipelines.js") < indexOf("gpu/renderer.js"));
+  assert.ok(indexOf("gpu/shaders/density-pipelines.js") < indexOf("gpu/renderer.js"));
   assert.ok(indexOf("gpu/renderer.js") < indexOf("gpu/tile-pipelines.js"));
   assert.ok(indexOf("gpu/renderer.js") < indexOf("gpu/optimizer-runtime.js"));
   assert.ok(indexOf("app.js") < indexOf("ui/bootstrap.js"));
@@ -37,6 +38,15 @@ test("training WGSL declaration block remains byte-stable", async () => {
   assert.equal(block.length, 149625);
   const { createHash } = await import("node:crypto");
   assert.equal(createHash("sha256").update(block).digest("hex"), "055b4e1d21108a0a48b58aa3cfc5a39ef19b5f3d8a84d477367b093a2ee92019");
+});
+
+test("density WGSL literal remains byte-stable", async () => {
+  const source = await readFile(new URL("../web/gpu/shaders/density-pipelines.js", import.meta.url), "utf8");
+  const tick = String.fromCharCode(96);
+  const shader = source.slice(source.indexOf(`return ${tick}`) + 8, source.lastIndexOf(`${tick};`));
+  assert.equal(shader.length, 87070);
+  const { createHash } = await import("node:crypto");
+  assert.equal(createHash("sha256").update(shader).digest("hex"), "fce07bd4b31ef69d8639e58bf44fa885e058f38abc4dfab92fdefe1cfe04b08c");
 });
 
 test("Pages workflow uses tracked source, contract, build, and release gates", async () => {
