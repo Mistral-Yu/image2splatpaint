@@ -145,3 +145,30 @@ test("preview WGSL factories preserve generated source fingerprints", async () =
     "cb624d452f9cb10e95b80910f00dc6f22c973a25f20b8c6bd64b363a09cb54e1",
   );
 });
+
+test("metric WGSL factories preserve generated source fingerprints", async () => {
+  const context = vm.createContext({
+    BACKGROUND_EXPOSURE_EPSILON: 0.01,
+    DEFAULT_ALPHA_TARGET: 1,
+    METRIC_TILE_STRIDE: 2,
+    MIP_PIXEL_SIGMA: 0.5,
+    Object,
+    OVERLAP_METRIC_STRIDE: 4,
+    RENDER_SIGMA: 5,
+    TILE_SIZE: 16,
+    VIRTUAL_CAMERA_METRIC_TILE_STRIDE: 3,
+    VIRTUAL_TILT_WGSL: "VT",
+  });
+  context.globalThis = context;
+  vm.runInContext(await readFile(new URL("../web/gpu/shaders/metric-pipelines.js", import.meta.url), "utf8"), context);
+  const shaders = Object.keys(context.Image2SplatPaintMetricShaders).map((name) =>
+    name === "overlapMetrics"
+      ? context.Image2SplatPaintMetricShaders[name]({ hiddenRgbBinding: "HB", hiddenRgbShader: "HS" })
+      : context.Image2SplatPaintMetricShaders[name](),
+  );
+  assert.deepEqual(shaders.map((shader) => shader.length), [1862, 8933, 7701, 10818, 4788]);
+  assert.equal(
+    createHash("sha256").update(shaders.join("\u0000")).digest("hex"),
+    "96f3b98c1226ef0eab07d6ade90cffa57be4d8217f664f81e72b4a81747618ed",
+  );
+});
