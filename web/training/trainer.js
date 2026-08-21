@@ -11,28 +11,28 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   activateDetailTab("training");
   if (!state.webgpu.supported || !state.webgpu.renderer) {
     setStatus("error");
-    els.backendText.textContent = "webgpu required";
+    trainingUiAdapter.controls.backendText.textContent = "webgpu required";
     setTrainingMessage(`Training unavailable: ${state.webgpu.reason}`, "error");
     log(`WebGPU required; training not started: ${state.webgpu.reason}`);
     return;
   }
   const renderer = run.renderer;
   const performanceSelection = renderer.configureExperimentalPerformance();
-  document.documentElement.dataset.opacityAwareSupport = performanceSelection.opacityAwareSupportMode;
-  const requestedSteps = normalizeStepInteger(els.stepCount.value, {
+  trainingUiAdapter.setDataset("opacityAwareSupport", performanceSelection.opacityAwareSupportMode);
+  const requestedSteps = normalizeStepInteger(trainingUiAdapter.controls.stepCount.value, {
     min: LIMITS.stepsMin,
     max: LIMITS.stepsMax,
     fallback: DEFAULT_ITERATIONS,
   });
   if (requestedSteps > HIGH_ITERATION_CONFIRM) {
-    const ok = window.confirm(`Run ${requestedSteps.toLocaleString()} iterations? This may take a long time.`);
+    const ok = trainingUiAdapter.confirm(`Run ${requestedSteps.toLocaleString()} iterations? This may take a long time.`);
     if (!ok) {
       setStatus("idle");
       log(`training cancelled before start: ${requestedSteps} iterations`);
       return;
     }
   }
-  const resizedForTraining = await resizeLoadedImageToMaxSide(Number(els.trainSize.value));
+  const resizedForTraining = await resizeLoadedImageToMaxSide(Number(trainingUiAdapter.controls.trainSize.value));
   updateTrainingRunOwnership(run, { image: state.image });
   assertTrainingRun(run);
   if (resizedForTraining) {
@@ -43,8 +43,8 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   const preflight = updateMemoryRecommendation();
   const preflightFailure = safetyFailure(preflight, "start");
   const wantsHighCapacityProbe =
-    els.capacityMode.value === "auto-probe" &&
-    Number(preflight.effectiveFinalSplats || els.finalSplatCount.value) > CAPACITY_PROBE_FAST_PATH_MAX;
+    trainingUiAdapter.controls.capacityMode.value === "auto-probe" &&
+    Number(preflight.effectiveFinalSplats || trainingUiAdapter.controls.finalSplatCount.value) > CAPACITY_PROBE_FAST_PATH_MAX;
   if (preflightFailure && (!wantsHighCapacityProbe || preflightFailure.reason === "safety_stop_hard_limit")) {
     setSafetyStop(preflightFailure);
     setStatus("safety stopped");
@@ -52,7 +52,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
     updateDownloads(false);
     return;
   }
-  if (preflightFailure) log(`Auto probe will search below the rejected ${els.finalSplatCount.value} splat request.`);
+  if (preflightFailure) log(`Auto probe will search below the rejected ${trainingUiAdapter.controls.finalSplatCount.value} splat request.`);
   resetEvaluationStatusForNewTraining();
   state.running = true;
   state.previewGeneration += 1;
@@ -65,20 +65,20 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   clearSplatAdjustmentBaseline();
   updateDownloads(false);
   setStatus("running");
-  els.startButton.disabled = true;
-  els.stopButton.disabled = false;
+  trainingUiAdapter.controls.startButton.disabled = true;
+  trainingUiAdapter.controls.stopButton.disabled = false;
   setInputControlsDisabled(true);
   setPausedRuntimeControlsEnabled(false);
   setTrainingMessage("Training on WebGPU...");
 
   const baseInitialCount = normalizeUiSplatCount(
-    els.initialSplatCount.value,
+    trainingUiAdapter.controls.initialSplatCount.value,
     DEFAULT_INITIAL_SPLATS,
     CAPACITY_PROBE_FAST_PATH_MAX,
   );
   const baseFinalCount = Math.max(
     baseInitialCount,
-    normalizeUiSplatCount(els.finalSplatCount.value, DEFAULT_FINAL_SPLATS),
+    normalizeUiSplatCount(trainingUiAdapter.controls.finalSplatCount.value, DEFAULT_FINAL_SPLATS),
   );
   const steps = requestedSteps;
   let learningRates = selectedLearningRates();
@@ -182,7 +182,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
     : null;
   const gpuDensifyEnabled = true;
   const gpuRelocationEnabled = true;
-  const useAutoCapacityProbe = els.capacityMode.value === "auto-probe" && finalCount > CAPACITY_PROBE_FAST_PATH_MAX;
+  const useAutoCapacityProbe = trainingUiAdapter.controls.capacityMode.value === "auto-probe" && finalCount > CAPACITY_PROBE_FAST_PATH_MAX;
   state.capacityProbe = {
     status: useAutoCapacityProbe ? "ready" : finalCount <= CAPACITY_PROBE_FAST_PATH_MAX ? "fast" : "manual",
     requested: finalCount,
@@ -190,56 +190,56 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
     attempts: [],
     fastPath: finalCount <= CAPACITY_PROBE_FAST_PATH_MAX,
   };
-  els.initialSplatCount.value = String(baseInitialCount);
-  els.finalSplatCount.value = String(baseFinalCount);
-  els.stageGrowthP1.value = (runStageGrowthShares.p1 * 100).toFixed(2);
-  els.stageGrowthP2.value = (runStageGrowthShares.p2 * 100).toFixed(2);
-  els.stageGrowthP3.value = (runStageGrowthShares.p3 * 100).toFixed(2);
-  els.stepCount.value = String(steps);
-  els.previewRefresh.value = previewRefresh;
-  els.layerUpdateInterval.value = String(runLayerSettings.layerUpdateInterval);
-  els.rectangleOpacityGradientMin.value = String(runRectangleOpacityGradient.min);
-  els.rectangleOpacityGradientMax.value = String(runRectangleOpacityGradient.max);
-  els.rectangleCenterOpacityGradientMin.value = String(runRectangleCenterOpacityGradient.min);
-  els.rectangleCenterOpacityGradientMax.value = String(runRectangleCenterOpacityGradient.max);
-  els.rectangleLearnedOpacityMin.value = String(runRectangleLearnedOpacity.min);
-  els.rectangleLearnedOpacityMax.value = String(runRectangleLearnedOpacity.max);
-  els.layeredBrushOpacityGradientStart.value = String(runBrushDirectionalEffects.opacityStart);
-  els.layeredBrushOpacityGradientEnd.value = String(runBrushDirectionalEffects.opacityEnd);
-  els.layeredBrushCenterOpacityGradientMin.value = String(runBrushCenterOpacityGradient.min);
-  els.layeredBrushCenterOpacityGradientMax.value = String(runBrushCenterOpacityGradient.max);
-  els.layeredBrushLearnedOpacityMin.value = String(runBrushLearnedOpacity.min);
-  els.layeredBrushLearnedOpacityMax.value = String(runBrushLearnedOpacity.max);
-  els.layeredBrushWidthTaperStart.value = String(runBrushDirectionalEffects.widthStart);
-  els.layeredBrushWidthTaperEnd.value = String(runBrushDirectionalEffects.widthEnd);
-  els.layeredBrushMinAspectRatio.value = String(runBrushMinAspectRatio);
-  els.layeredBrushMaxAspectRatio.value = String(runBrushMaxAspectRatio);
-  els.colorFinishStart.value = String(runSharedColorWorkflow.colorFinishStartPercent);
-  els.rectangleTopRatio.value = String(runRectangleTopRatio);
-  els.rectangleTopRatioMax.value = String(runRectangleTopRatioMax);
-  els.rectangleMinAspectRatio.value = String(runRectangleMinAspectRatio);
-  els.rectangleMaxAspectRatio.value = String(runRectangleMaxAspectRatio);
-  els.rectangleOrientation.value = runRectangleOrientation;
-  els.rectanglePreserveArea.checked = runRectangleShape.preserveArea;
-  els.rectangleEdgeDirectedTaper.checked = runRectangleShape.edgeDirectedTaper;
-  els.rectangleStructureAwareRatio.checked = runRectangleShape.structureAwareRatio;
-  els.rectangleAsymmetricSoftness.checked = runRectangleShape.asymmetricSoftness;
-  els.scaleBiasedSurfaceLayerPrior.checked = runSurfaceLayerPrior.enabled;
-  els.scaleBiasedSurfaceLayerPriorLayers.value = String(runSurfaceLayerPrior.layers);
-  els.scaleBiasedSurfaceLayerPriorP1Interval.value = String(runSurfaceLayerPrior.p1Interval);
-  els.scaleBiasedSurfaceLayerPriorP2Interval.value = String(runSurfaceLayerPrior.p2Interval);
-  els.scaleBiasedSurfaceLayerPriorP3Interval.value = String(runSurfaceLayerPrior.p3Interval);
-  els.scaleBiasedSurfaceLayerPriorUntil.value = String(runSurfaceLayerPrior.untilFraction * 100);
-  els.positionLearningRate.value = String(learningRates.position);
-  els.colorLearningRate.value = String(learningRates.color);
-  els.opacityLearningRate.value = String(learningRates.opacity);
-  els.scaleLearningRate.value = String(learningRates.scaleParam);
-  els.rotationLearningRate.value = String(learningRates.rotation);
-  els.thetaAlignRate.value = String(learningRates.thetaAlign);
-  els.maxAnisotropy.value = String(runSharedMaxAnisotropy);
-  els.maxPlanarScale.value = String(learningRates.maxPlanarScale);
-  els.boundarySigma.value = String(learningRates.boundarySigma);
-  els.detailCoherence.value = String(learningRates.detailCoherence);
+  trainingUiAdapter.controls.initialSplatCount.value = String(baseInitialCount);
+  trainingUiAdapter.controls.finalSplatCount.value = String(baseFinalCount);
+  trainingUiAdapter.controls.stageGrowthP1.value = (runStageGrowthShares.p1 * 100).toFixed(2);
+  trainingUiAdapter.controls.stageGrowthP2.value = (runStageGrowthShares.p2 * 100).toFixed(2);
+  trainingUiAdapter.controls.stageGrowthP3.value = (runStageGrowthShares.p3 * 100).toFixed(2);
+  trainingUiAdapter.controls.stepCount.value = String(steps);
+  trainingUiAdapter.controls.previewRefresh.value = previewRefresh;
+  trainingUiAdapter.controls.layerUpdateInterval.value = String(runLayerSettings.layerUpdateInterval);
+  trainingUiAdapter.controls.rectangleOpacityGradientMin.value = String(runRectangleOpacityGradient.min);
+  trainingUiAdapter.controls.rectangleOpacityGradientMax.value = String(runRectangleOpacityGradient.max);
+  trainingUiAdapter.controls.rectangleCenterOpacityGradientMin.value = String(runRectangleCenterOpacityGradient.min);
+  trainingUiAdapter.controls.rectangleCenterOpacityGradientMax.value = String(runRectangleCenterOpacityGradient.max);
+  trainingUiAdapter.controls.rectangleLearnedOpacityMin.value = String(runRectangleLearnedOpacity.min);
+  trainingUiAdapter.controls.rectangleLearnedOpacityMax.value = String(runRectangleLearnedOpacity.max);
+  trainingUiAdapter.controls.layeredBrushOpacityGradientStart.value = String(runBrushDirectionalEffects.opacityStart);
+  trainingUiAdapter.controls.layeredBrushOpacityGradientEnd.value = String(runBrushDirectionalEffects.opacityEnd);
+  trainingUiAdapter.controls.layeredBrushCenterOpacityGradientMin.value = String(runBrushCenterOpacityGradient.min);
+  trainingUiAdapter.controls.layeredBrushCenterOpacityGradientMax.value = String(runBrushCenterOpacityGradient.max);
+  trainingUiAdapter.controls.layeredBrushLearnedOpacityMin.value = String(runBrushLearnedOpacity.min);
+  trainingUiAdapter.controls.layeredBrushLearnedOpacityMax.value = String(runBrushLearnedOpacity.max);
+  trainingUiAdapter.controls.layeredBrushWidthTaperStart.value = String(runBrushDirectionalEffects.widthStart);
+  trainingUiAdapter.controls.layeredBrushWidthTaperEnd.value = String(runBrushDirectionalEffects.widthEnd);
+  trainingUiAdapter.controls.layeredBrushMinAspectRatio.value = String(runBrushMinAspectRatio);
+  trainingUiAdapter.controls.layeredBrushMaxAspectRatio.value = String(runBrushMaxAspectRatio);
+  trainingUiAdapter.controls.colorFinishStart.value = String(runSharedColorWorkflow.colorFinishStartPercent);
+  trainingUiAdapter.controls.rectangleTopRatio.value = String(runRectangleTopRatio);
+  trainingUiAdapter.controls.rectangleTopRatioMax.value = String(runRectangleTopRatioMax);
+  trainingUiAdapter.controls.rectangleMinAspectRatio.value = String(runRectangleMinAspectRatio);
+  trainingUiAdapter.controls.rectangleMaxAspectRatio.value = String(runRectangleMaxAspectRatio);
+  trainingUiAdapter.controls.rectangleOrientation.value = runRectangleOrientation;
+  trainingUiAdapter.controls.rectanglePreserveArea.checked = runRectangleShape.preserveArea;
+  trainingUiAdapter.controls.rectangleEdgeDirectedTaper.checked = runRectangleShape.edgeDirectedTaper;
+  trainingUiAdapter.controls.rectangleStructureAwareRatio.checked = runRectangleShape.structureAwareRatio;
+  trainingUiAdapter.controls.rectangleAsymmetricSoftness.checked = runRectangleShape.asymmetricSoftness;
+  trainingUiAdapter.controls.scaleBiasedSurfaceLayerPrior.checked = runSurfaceLayerPrior.enabled;
+  trainingUiAdapter.controls.scaleBiasedSurfaceLayerPriorLayers.value = String(runSurfaceLayerPrior.layers);
+  trainingUiAdapter.controls.scaleBiasedSurfaceLayerPriorP1Interval.value = String(runSurfaceLayerPrior.p1Interval);
+  trainingUiAdapter.controls.scaleBiasedSurfaceLayerPriorP2Interval.value = String(runSurfaceLayerPrior.p2Interval);
+  trainingUiAdapter.controls.scaleBiasedSurfaceLayerPriorP3Interval.value = String(runSurfaceLayerPrior.p3Interval);
+  trainingUiAdapter.controls.scaleBiasedSurfaceLayerPriorUntil.value = String(runSurfaceLayerPrior.untilFraction * 100);
+  trainingUiAdapter.controls.positionLearningRate.value = String(learningRates.position);
+  trainingUiAdapter.controls.colorLearningRate.value = String(learningRates.color);
+  trainingUiAdapter.controls.opacityLearningRate.value = String(learningRates.opacity);
+  trainingUiAdapter.controls.scaleLearningRate.value = String(learningRates.scaleParam);
+  trainingUiAdapter.controls.rotationLearningRate.value = String(learningRates.rotation);
+  trainingUiAdapter.controls.thetaAlignRate.value = String(learningRates.thetaAlign);
+  trainingUiAdapter.controls.maxAnisotropy.value = String(runSharedMaxAnisotropy);
+  trainingUiAdapter.controls.maxPlanarScale.value = String(learningRates.maxPlanarScale);
+  trainingUiAdapter.controls.boundarySigma.value = String(learningRates.boundarySigma);
+  trainingUiAdapter.controls.detailCoherence.value = String(learningRates.detailCoherence);
   const budget = updateMemoryRecommendation();
   if (budget.overBudget) {
     log(`settings exceed safety budget ${budget.estimatedMB}MB > ${budget.budgetMB}MB; recommended ${budget.recommendedTrainSize}px ${budget.recommendedFinalSplats} splats`);
@@ -362,7 +362,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
     state.params.virtualDepth = new Float32Array(state.params.count);
   }
   state.virtualCameraByStep = new Map();
-  if (!els.trainLayerOrder.checked) state.params.depthOrder.fill(0);
+  if (!trainingUiAdapter.controls.trainLayerOrder.checked) state.params.depthOrder.fill(0);
   state.previewMode = previewRefresh === "final" ? "original" : "splats";
   fitCanvases(state.image.width, state.image.height);
   if (previewRefresh === "final") {
@@ -540,7 +540,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       boundarySigma: learningRates.boundarySigma,
       adaptiveDetail: learningRates.adaptiveDetail,
       detailCoherence: learningRates.detailCoherence,
-      trainLayerOrder: Boolean(els.trainLayerOrder.checked),
+      trainLayerOrder: Boolean(trainingUiAdapter.controls.trainLayerOrder.checked),
       layerUpdateInterval: runLayerSettings.layerUpdateInterval,
       layerAwareAccumulation: runDiscreteLayerSettings.accumulationEnabled,
       currentContributionCompaction: runCurrentContributionCompaction.enabled,
@@ -834,12 +834,12 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
     relocation_gpu_ms: 0,
     density_horizon: experimentalDensifySteps(steps),
     post_density_annealing: true,
-    tile_culling_enabled: Boolean(els.tileCullingToggle.checked),
+    tile_culling_enabled: Boolean(trainingUiAdapter.controls.tileCullingToggle.checked),
     tile_retry_steps: 0,
     tile_retry_events: [],
     tile_retry_parameter_hash: null,
     qa_tile_index_capacity: qaTileIndexCapacityOverride(),
-    train_layer_order: Boolean(els.trainLayerOrder.checked),
+    train_layer_order: Boolean(trainingUiAdapter.controls.trainLayerOrder.checked),
     discrete_layers: runDiscreteLayerSettings.enabled,
     discrete_layer_count: runDiscreteLayerSettings.count,
     layer_update_interval: runLayerSettings.layerUpdateInterval,
@@ -958,7 +958,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
     if (useAutoCapacityProbe) {
       allocationResult = await awaitTrainingRun(run, renderer.probeTrainingCapacity(trainingImage, state.params, finalCount));
       finalCount = allocationResult.capacity;
-      els.finalSplatCount.value = String(finalCount);
+      trainingUiAdapter.controls.finalSplatCount.value = String(finalCount);
       state.metrics.final_splats = finalCount;
       state.metrics.capacity_probe = {
         mode: "auto-probe",
@@ -975,7 +975,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         { verifyAllocation: finalCount > CAPACITY_PROBE_FAST_PATH_MAX },
       ));
       state.metrics.capacity_probe = {
-        mode: els.capacityMode.value,
+        mode: trainingUiAdapter.controls.capacityMode.value,
         requested: finalCount,
         selected: finalCount,
         fast_path: finalCount <= CAPACITY_PROBE_FAST_PATH_MAX,
@@ -1184,7 +1184,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       let growthStartCount = state.params.count;
       let densityGpuMs = 0;
       if (requestedTargetCount > state.params.count) {
-        const densifyFailure = safetyFailure(computeBudgetFor(Number(els.trainSize.value), requestedTargetCount, steps), "densify");
+        const densifyFailure = safetyFailure(computeBudgetFor(Number(trainingUiAdapter.controls.trainSize.value), requestedTargetCount, steps), "densify");
         if (densifyFailure) {
           state.metrics.stopped = true;
           state.metrics.safety_stop = {
@@ -1668,7 +1668,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       if (periodicReadOnlyReady) {
         const presentationStarted = performance.now();
         presentation = "metrics";
-        const metricsFailure = safetyFailure(computeBudgetFor(Number(els.trainSize.value), state.params.count, steps), "metrics");
+        const metricsFailure = safetyFailure(computeBudgetFor(Number(trainingUiAdapter.controls.trainSize.value), state.params.count, steps), "metrics");
         if (metricsFailure) {
           state.metrics.stopped = true;
           state.metrics.safety_stop = {
@@ -1712,7 +1712,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       } else if (step % 32 === 0) {
         const presentationStarted = performance.now();
         presentation = "status";
-        els.stepText.textContent = `${step} / ${state.metrics.steps_requested}`;
+        trainingUiAdapter.controls.stepText.textContent = `${step} / ${state.metrics.steps_requested}`;
         publishState();
         if (!performanceSelection.asyncPresentation) await awaitTrainingRun(run, nextFrame());
         stepPresentationMs = performance.now() - presentationStarted;
@@ -1858,10 +1858,10 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
     state.running = false;
     state.paused = false;
     if (state.previewMode === "splats" && state.params) showCanvas("gpu");
-    els.startButton.disabled = false;
-    els.pauseButton.disabled = true;
-    els.pauseButton.textContent = "Pause";
-    els.stopButton.disabled = true;
+    trainingUiAdapter.controls.startButton.disabled = false;
+    trainingUiAdapter.controls.pauseButton.disabled = true;
+    trainingUiAdapter.controls.pauseButton.textContent = "Pause";
+    trainingUiAdapter.controls.stopButton.disabled = true;
     setPausedRuntimeControlsEnabled(false);
     setInputControlsDisabled(false);
     const deviceLost = !state.webgpu.supported && String(state.webgpu.reason).startsWith("device lost:");

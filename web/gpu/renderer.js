@@ -81,6 +81,20 @@ class WebGpuPreview {
       requested: Boolean(profile.profileRequested),
       timestampQuery: Boolean(profile.timestampQuery),
     };
+    this.runtime = {
+      tileCullingEnabled: typeof profile.tileCullingEnabled === "function"
+        ? profile.tileCullingEnabled
+        : () => true,
+      trainLayerOrderEnabled: typeof profile.trainLayerOrderEnabled === "function"
+        ? profile.trainLayerOrderEnabled
+        : () => true,
+      outsidePreviewEnabled: typeof profile.outsidePreviewEnabled === "function"
+        ? profile.outsidePreviewEnabled
+        : () => false,
+      onPresentedState: typeof profile.onPresentedState === "function"
+        ? profile.onPresentedState
+        : () => {},
+    };
     this.resultRenderState = null;
   }
 
@@ -267,7 +281,7 @@ class WebGpuPreview {
       Number(limits.maxComputeWorkgroupStorageSize || 0) >= 16384;
     const cooperative =
       performanceVariants().tileCooperativeRenderer &&
-      Boolean(els.tileCullingToggle.checked) &&
+      this.runtime.tileCullingEnabled() &&
       supported;
     return {
       pipeline: cooperative ? this.tileCooperativeRenderPipeline : this.renderStatePipeline,
@@ -931,7 +945,7 @@ fn commit_layers(@builtin(global_invocation_id) id: vec3<u32>) {
       config.set([image.width, image.height, params.count, params.bg[0], params.bg[1], params.bg[2]], 0);
       config[17] = currentMaxAnisotropy();
       config[18] = experimentalDensifySteps(state.metrics?.steps_requested || 1);
-      config[19] = els.tileCullingToggle.checked ? 1 : 0;
+      config[19] = this.runtime.tileCullingEnabled() ? 1 : 0;
       config[26] = phase33Variants().ewa2x2 ? 1 : 0;
       config[47] = 0;
       config[45] = params.layerOrderEnabled ? 1 : 0;
@@ -1116,7 +1130,7 @@ fn commit_layers(@builtin(global_invocation_id) id: vec3<u32>) {
       ),
     );
     const copyTiles = Boolean(
-      els.tileCullingToggle.checked &&
+      this.runtime.tileCullingEnabled() &&
       this.trainState.tileReady &&
       this.trainState.pixelStateKind === "full" &&
       tileReferences > 0
@@ -1302,7 +1316,7 @@ fn commit_layers(@builtin(global_invocation_id) id: vec3<u32>) {
 
   async render(image, params, sourceBuffers = null, targetView = null, options = {}) {
     this.ensurePipeline(params.count);
-    const preview = previewPaddingSpec(image, params, options.outside ?? els.outsidePreviewToggle.checked);
+    const preview = previewPaddingSpec(image, params, options.outside ?? this.runtime.outsidePreviewEnabled());
     const presentingToCanvas = !targetView;
     const padded = preview.x > 0 || preview.y > 0;
     const maxStorageBinding = Math.max(
@@ -1321,7 +1335,7 @@ fn commit_layers(@builtin(global_invocation_id) id: vec3<u32>) {
       }
       paddedTileData = buildPreviewTileIndexData(image, params, {
         ...options,
-        outside: Boolean(options.outside ?? els.outsidePreviewToggle.checked),
+        outside: Boolean(options.outside ?? this.runtime.outsidePreviewEnabled()),
         maxTileReferences: Math.floor(maxStorageBinding / 4),
       });
     }
@@ -1348,7 +1362,7 @@ fn commit_layers(@builtin(global_invocation_id) id: vec3<u32>) {
     // preview-only small-first override.
     const useTileOrder = Boolean(paddedTileData) || (
       !useSplatPreviewOrder &&
-      els.tileCullingToggle.checked &&
+      this.runtime.tileCullingEnabled() &&
       sourceBuffers?.orderMode === "tiles" &&
       Boolean(sourceBuffers?.tileOffsetsBuffer)
     );
@@ -1837,9 +1851,11 @@ fn fs(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     const height = Math.max(1, Math.round(resolution[1]));
     if (this.canvas.width !== width) this.canvas.width = width;
     if (this.canvas.height !== height) this.canvas.height = height;
-    document.documentElement.dataset.previewBufferWidth = String(width);
-    document.documentElement.dataset.previewBufferHeight = String(height);
-    document.documentElement.dataset.previewBufferKind = this.trainState.pixelStateKind || "full";
+    this.runtime.onPresentedState({
+      width,
+      height,
+      kind: this.trainState.pixelStateKind || "full",
+    });
     this.device.queue.writeBuffer(this.trainState.presentConfigBuffer, 0, new Uint32Array([width, height, 0, 0]));
     const bindGroup = this.device.createBindGroup({
       layout: this.presentPipeline.getBindGroupLayout(0),
@@ -5102,7 +5118,7 @@ fn update_training_residual(@builtin(global_invocation_id) id: vec3<u32>) {
       throw new Error("Training residual map requires active WebGPU training state.");
     }
     await this.ensureTrainingResidualMapPipeline();
-    if (els.tileCullingToggle.checked) {
+    if (this.runtime.tileCullingEnabled()) {
       await this.prepareTileLists(image, params, { sync: false });
     }
     await this.refreshRenderState(image, params, { computeSsim: false });
@@ -6071,10 +6087,10 @@ fn alpha_loss(
         : DEFAULT_VIRTUAL_TILT_CAMERA_DISTANCE;
       const config = new Float32Array(TRAIN_CONFIG_FLOATS);
       config.set([image.width, image.height, params.count, params.bg[0], params.bg[1], params.bg[2]], 0);
-      config[19] = els.tileCullingToggle.checked ? 1 : 0;
+      config[19] = this.runtime.tileCullingEnabled() ? 1 : 0;
       config[26] = phase33Variants().ewa2x2 ? 1 : 0;
       config[31] = phase37Variants().ewaGaussLegendre ? 1 : 0;
-      config[45] = els.trainLayerOrder.checked ? 1 : 0;
+      config[45] = this.runtime.trainLayerOrderEnabled() ? 1 : 0;
       config[56] = enabled ? 1 : 0;
       config[57] = pitchDegrees * Math.PI / 180;
       config[58] = yawDegrees * Math.PI / 180;
@@ -6098,7 +6114,7 @@ fn alpha_loss(
         for (const scale of scales) {
         const { config, pitchDegrees, yawDegrees, cameraDistance } = await buildConfig(view, scale);
         this.device.queue.writeBuffer(this.trainState.configBuffer, 0, config);
-        if (els.tileCullingToggle.checked) {
+        if (this.runtime.tileCullingEnabled()) {
           await this.prepareTileLists(image, params, {
             sync: true,
             writeConfig: false,
@@ -6220,7 +6236,7 @@ fn alpha_loss(
       try {
         const { config } = await buildConfig({ pitchDegrees: 0, yawDegrees: 0 }, 1);
         this.device.queue.writeBuffer(this.trainState.configBuffer, 0, config);
-        if (els.tileCullingToggle.checked) {
+        if (this.runtime.tileCullingEnabled()) {
           await this.prepareTileLists(image, params, { sync: true, writeConfig: false });
         }
         await this.refreshRenderState(image, params);
@@ -6292,7 +6308,7 @@ fn alpha_loss(
     config.set([image.width, image.height, params.count, params.bg[0], params.bg[1], params.bg[2]], 0);
     config[17] = currentMaxAnisotropy();
     config[18] = experimentalDensifySteps(state.metrics?.steps_requested || 1);
-    config[19] = els.tileCullingToggle.checked ? 1 : 0;
+    config[19] = this.runtime.tileCullingEnabled() ? 1 : 0;
     config[20] = phase37Variants().structuralErrorMap ? 1 : 0;
     config[22] = variants.coverageTarget;
     config[26] = variants.ewa2x2 ? 1 : 0;
@@ -6318,7 +6334,7 @@ fn alpha_loss(
     config[84] = params.layerAwareAccumulationEnabled ? 1 : 0;
     configurePaintKernel(config, params);
     this.device.queue.writeBuffer(this.trainState.configBuffer, 0, config);
-    if (virtualView && els.tileCullingToggle.checked) {
+    if (virtualView && this.runtime.tileCullingEnabled()) {
       await this.prepareTileLists(image, params, {
         sync: true,
         writeConfig: false,
@@ -6434,7 +6450,7 @@ fn alpha_loss(
     let operationError = null;
     let report = null;
     try {
-      if (els.tileCullingToggle.checked) {
+      if (this.runtime.tileCullingEnabled()) {
         await this.prepareTileLists(image, params, { sync: true });
       }
       await this.refreshRenderState(image, params, {
@@ -6726,7 +6742,7 @@ fn alpha_loss(
         partial_count: partialCount,
         bytes: outputBytes,
         reduction: "tile-8x8-from-compact-render",
-        compact_tile_candidates: Boolean(els.tileCullingToggle.checked),
+        compact_tile_candidates: this.runtime.tileCullingEnabled(),
         reused_render: reusedRender,
       };
       return { loss, mse, psnr, alphaL1, alphaSsim, alphaObjective, alphaWeight, objectiveLoss, ssim, windowedSsim, regionalSsim, highFrequency, coverage, reusedRender };
@@ -6886,7 +6902,7 @@ fn alpha_loss(
     } finally {
       outputBuffer.destroy();
       readBuffer.destroy();
-      if (els.tileCullingToggle.checked) {
+      if (this.runtime.tileCullingEnabled()) {
         await this.prepareTileLists(image, params, { sync: true });
       }
       await this.refreshRenderState(image, params);

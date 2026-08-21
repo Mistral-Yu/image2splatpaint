@@ -15,20 +15,37 @@ const artifactFiles = Object.freeze([
   "web/app.js",
   "web/core/numeric-utils.js",
   "web/core/config.js",
+  "web/core/algorithms.js",
   "web/core/state.js",
   "web/export/canvas-blob.js",
   "web/export/ply-serializer.js",
   "web/export/ply-inspector.js",
+  "web/export/runtime.js",
+  "web/export/actions.js",
   "web/input/image-metadata.js",
   "web/input/image-loader.js",
   "web/gpu/metrics.js",
+  "web/gpu/memory.js",
+  "web/gpu/runtime.js",
   "web/gpu/device.js",
   "web/gpu/renderer.js",
   "web/gpu/tile-pipelines.js",
   "web/gpu/tile-runtime.js",
   "web/gpu/optimizer-runtime.js",
   "web/training/trainer.js",
+  "web/training/metrics.js",
+  "web/training/initialization.js",
+  "web/training/initialization-runtime.js",
+  "web/training/densification.js",
+  "web/training/runtime.js",
+  "web/ui/status.js",
+  "web/ui/preview.js",
+  "web/ui/tilt.js",
+  "web/ui/preview-runtime.js",
+  "web/ui/bootstrap.js",
   "web/ui/controls.js",
+  "web/ui/splat-controls.js",
+  "web/qa/runtime.js",
   "web/index.html",
   "web/sample-image-data.js",
   "web/styles.css",
@@ -132,10 +149,11 @@ export async function verifyArtifact(sitePath) {
 }
 
 export async function verifyRelease(sitePath) {
-  const [rootHtml, webHtml, app, styles, workflow, readme, readmeScreenshot] = await Promise.all([
+  const [rootHtml, webHtml, app, gpuRuntime, styles, workflow, readme, readmeScreenshot] = await Promise.all([
     readFile(resolve(root, "index.html"), "utf8"),
     readFile(resolve(root, "web/index.html"), "utf8"),
     readFile(resolve(root, "web/app.js"), "utf8"),
+    readFile(resolve(root, "web/gpu/runtime.js"), "utf8"),
     readFile(resolve(root, "web/styles.css"), "utf8"),
     readFile(resolve(root, ".github/workflows/pages.yml"), "utf8"),
     readFile(resolve(root, "README.md"), "utf8"),
@@ -177,8 +195,8 @@ export async function verifyRelease(sitePath) {
   check("app exposes exactly four public algorithms", JSON.stringify(algorithmValues) === JSON.stringify(expectedAlgorithms), failures);
   check(
     "export parity accounts for one alpha quantization step in premultiplied color",
-    app.includes("const premultipliedTolerance = alphaMaximum > 0 ? 2 : 1") &&
-      app.includes("alphaMaximum <= 1 && premultipliedMaximum <= premultipliedTolerance"),
+    gpuRuntime.includes("const premultipliedTolerance = alphaMaximum > 0 ? 2 : 1") &&
+      gpuRuntime.includes("alphaMaximum <= 1 && premultipliedMaximum <= premultipliedTolerance"),
     failures,
   );
   check("README uses the verified public UI screenshot", readme.includes('src="assets/readme-ui.png"') && screenshotIsPng, failures);

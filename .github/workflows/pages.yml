@@ -32,20 +32,37 @@ jobs:
             web/app.js \
             web/core/numeric-utils.js \
             web/core/config.js \
+            web/core/algorithms.js \
             web/core/state.js \
             web/export/canvas-blob.js \
             web/export/ply-serializer.js \
             web/export/ply-inspector.js \
+            web/export/runtime.js \
+            web/export/actions.js \
             web/input/image-metadata.js \
             web/input/image-loader.js \
             web/gpu/metrics.js \
+            web/gpu/memory.js \
+            web/gpu/runtime.js \
             web/gpu/device.js \
             web/gpu/renderer.js \
             web/gpu/tile-pipelines.js \
             web/gpu/tile-runtime.js \
             web/gpu/optimizer-runtime.js \
             web/training/trainer.js \
+            web/training/metrics.js \
+            web/training/initialization.js \
+            web/training/initialization-runtime.js \
+            web/training/densification.js \
+            web/training/runtime.js \
+            web/ui/status.js \
+            web/ui/preview.js \
+            web/ui/tilt.js \
+            web/ui/preview-runtime.js \
+            web/ui/bootstrap.js \
+            web/ui/splat-controls.js \
             web/ui/controls.js \
+            web/qa/runtime.js \
             web/sample-image-data.js \
             web/tilt-camera.mjs \
             web/tilt-browser-entry.mjs \
@@ -65,14 +82,16 @@ jobs:
           mkdir -p _site/web/gpu
           mkdir -p _site/web/training
           mkdir -p _site/web/ui
+          mkdir -p _site/web/qa
           cp -f .nojekyll LICENSE THIRD_PARTY_NOTICES.md index.html _site/
           cp -f web/index.html web/app.js web/styles.css web/sample-image-data.js web/tilt-viewer.bundle.js _site/web/
-          cp -f web/core/numeric-utils.js web/core/config.js web/core/state.js _site/web/core/
-          cp -f web/export/canvas-blob.js web/export/ply-serializer.js web/export/ply-inspector.js _site/web/export/
+          cp -f web/core/numeric-utils.js web/core/config.js web/core/algorithms.js web/core/state.js _site/web/core/
+          cp -f web/export/canvas-blob.js web/export/ply-serializer.js web/export/ply-inspector.js web/export/runtime.js web/export/actions.js _site/web/export/
           cp -f web/input/image-metadata.js web/input/image-loader.js _site/web/input/
-          cp -f web/gpu/metrics.js web/gpu/device.js web/gpu/renderer.js web/gpu/tile-pipelines.js web/gpu/tile-runtime.js web/gpu/optimizer-runtime.js _site/web/gpu/
-          cp -f web/training/trainer.js _site/web/training/
-          cp -f web/ui/controls.js _site/web/ui/
+          cp -f web/gpu/metrics.js web/gpu/memory.js web/gpu/runtime.js web/gpu/device.js web/gpu/renderer.js web/gpu/tile-pipelines.js web/gpu/tile-runtime.js web/gpu/optimizer-runtime.js _site/web/gpu/
+          cp -f web/training/trainer.js web/training/metrics.js web/training/initialization.js web/training/initialization-runtime.js web/training/densification.js web/training/runtime.js _site/web/training/
+          cp -f web/ui/status.js web/ui/preview.js web/ui/tilt.js web/ui/preview-runtime.js web/ui/bootstrap.js web/ui/splat-controls.js web/ui/controls.js _site/web/ui/
+          cp -f web/qa/runtime.js _site/web/qa/
           cp -f web/vendor/PLAYCANVAS-LICENSE.txt _site/web/vendor/
           cp -f assets/source-images/README.md assets/source-images/ramen-photo.jpg assets/source-images/generated-geometric-sample.jpg _site/assets/source-images/
       - name: Verify release gate
