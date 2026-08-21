@@ -20,10 +20,21 @@ test("every local app script is shipped and critical classic-script order is sta
   const indexOf = (suffix) => scripts.findIndex((path) => path.endsWith(suffix));
   assert.ok(indexOf("gpu/shaders/tile-pipeline.js") < indexOf("gpu/tile-pipelines.js"));
   assert.ok(indexOf("gpu/shaders/optimizer-reset.js") < indexOf("gpu/optimizer-runtime.js"));
+  assert.ok(indexOf("gpu/shaders/training-pipelines.js") < indexOf("gpu/renderer.js"));
   assert.ok(indexOf("gpu/renderer.js") < indexOf("gpu/tile-pipelines.js"));
   assert.ok(indexOf("gpu/renderer.js") < indexOf("gpu/optimizer-runtime.js"));
   assert.ok(indexOf("app.js") < indexOf("ui/bootstrap.js"));
   assert.ok(indexOf("app.js") < indexOf("ui/controls.js"));
+});
+
+test("training WGSL declaration block remains byte-stable", async () => {
+  const source = await readFile(new URL("../web/gpu/shaders/training-pipelines.js", import.meta.url), "utf8");
+  const begin = "    // BEGIN BYTE-STABLE TRAINING SHADER DECLARATIONS\n";
+  const end = "    // END BYTE-STABLE TRAINING SHADER DECLARATIONS";
+  const block = source.slice(source.indexOf(begin) + begin.length, source.indexOf(end));
+  assert.equal(block.length, 149625);
+  const { createHash } = await import("node:crypto");
+  assert.equal(createHash("sha256").update(block).digest("hex"), "055b4e1d21108a0a48b58aa3cfc5a39ef19b5f3d8a84d477367b093a2ee92019");
 });
 
 test("Pages workflow uses tracked source, contract, build, and release gates", async () => {

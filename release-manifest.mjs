@@ -22,6 +22,7 @@ export const releaseArtifactFiles = Object.freeze([
   "web/gpu/memory.js",
   "web/gpu/shaders/tile-pipeline.js",
   "web/gpu/shaders/optimizer-reset.js",
+  "web/gpu/shaders/training-pipelines.js",
   "web/gpu/runtime.js",
   "web/gpu/device.js",
   "web/gpu/renderer.js",
