@@ -26,6 +26,7 @@ export const releaseArtifactFiles = Object.freeze([
   "web/gpu/shaders/preview-pipelines.js",
   "web/gpu/shaders/metric-pipelines.js",
   "web/gpu/shaders/density-pipelines.js",
+  "web/gpu/shaders/compaction-pipelines.js",
   "web/gpu/runtime.js",
   "web/gpu/device.js",
   "web/gpu/renderer.js",

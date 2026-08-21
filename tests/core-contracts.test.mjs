@@ -172,3 +172,16 @@ test("metric WGSL factories preserve generated source fingerprints", async () =>
     "96f3b98c1226ef0eab07d6ade90cffa57be4d8217f664f81e72b4a81747618ed",
   );
 });
+
+test("compaction WGSL factories preserve generated source fingerprints", async () => {
+  const context = vm.createContext({ Object });
+  context.globalThis = context;
+  vm.runInContext(await readFile(new URL("../web/gpu/shaders/compaction-pipelines.js", import.meta.url), "utf8"), context);
+  const shaders = Object.keys(context.Image2SplatPaintCompactionShaders)
+    .map((name) => context.Image2SplatPaintCompactionShaders[name]());
+  assert.deepEqual(shaders.map((shader) => shader.length), [1162, 1093]);
+  assert.equal(
+    createHash("sha256").update(shaders.join("\u0000")).digest("hex"),
+    "a88c9daca1327bb375968105080619c0fbe177270f218ebeda52639c431e6e3b",
+  );
+});
