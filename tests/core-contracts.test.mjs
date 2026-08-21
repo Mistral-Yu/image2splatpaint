@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
@@ -82,4 +83,35 @@ test("GPU profile reducer preserves histogram percentile bins", async () => {
   assert.equal(summary.p50_bin, "1");
   assert.equal(summary.p90_bin, "2-3");
   assert.equal(summary.histogram["2-3"], 2);
+});
+
+test("WGSL factories preserve byte-stable tile and optimizer reset sources", async () => {
+  const context = vm.createContext({
+    ILLUSTRATIVE_OIL_WGSL: "IO",
+    MIP_PIXEL_SIGMA: 0.5,
+    Object,
+    RECTANGLE_TRAPEZOID_WGSL: "RT",
+    RENDER_SIGMA: 4,
+    TILE_SIZE: 16,
+    VIRTUAL_TILT_WGSL: "VT",
+  });
+  context.globalThis = context;
+  for (const path of ["web/gpu/shaders/tile-pipeline.js", "web/gpu/shaders/optimizer-reset.js"]) {
+    vm.runInContext(await readFile(new URL(`../${path}`, import.meta.url), "utf8"), context, { filename: path });
+  }
+  const tile = context.Image2SplatPaintTilePipelineShader.create({
+    opacitySupportDeclaration: "OD",
+    opacitySupportFunction: "OF",
+    paintSupportFunctions: "PF",
+    supportSigmaExpression: "SS",
+    exactTileIntersectionFunction: "EI",
+    opacitySupportEarlyExit: "OE",
+    exactTileIntersectionGuard: "EG",
+    sortTilesFunction: "ST",
+  });
+  const optimizerReset = context.Image2SplatPaintOptimizerResetShader.create();
+  assert.equal(tile.length, 6317);
+  assert.equal(createHash("sha256").update(tile).digest("hex"), "d3c6136fb57c6f0f005de5c2e110bdbbcfe8ce5a26f084c878db86d3d92e29ba");
+  assert.equal(optimizerReset.length, 1866);
+  assert.equal(createHash("sha256").update(optimizerReset).digest("hex"), "946e15a4b94356a399ddae7ea2b48da581472575ec70484f897d31d0672ca2d1");
 });

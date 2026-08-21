@@ -18,6 +18,8 @@ test("every local app script is shipped and critical classic-script order is sta
   for (const source of scripts) assert.ok(releaseArtifactFiles.includes(source), `${source} must be in the release manifest`);
 
   const indexOf = (suffix) => scripts.findIndex((path) => path.endsWith(suffix));
+  assert.ok(indexOf("gpu/shaders/tile-pipeline.js") < indexOf("gpu/tile-pipelines.js"));
+  assert.ok(indexOf("gpu/shaders/optimizer-reset.js") < indexOf("gpu/optimizer-runtime.js"));
   assert.ok(indexOf("gpu/renderer.js") < indexOf("gpu/tile-pipelines.js"));
   assert.ok(indexOf("gpu/renderer.js") < indexOf("gpu/optimizer-runtime.js"));
   assert.ok(indexOf("app.js") < indexOf("ui/bootstrap.js"));
