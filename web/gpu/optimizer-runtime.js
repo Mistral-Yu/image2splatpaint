@@ -1168,11 +1168,4 @@ fn reset_sources(@builtin(global_invocation_id) id: vec3u) {
 
 }
 
-for (const name of Object.getOwnPropertyNames(WebGpuOptimizerRuntime.prototype)) {
-  if (name === "constructor") continue;
-  Object.defineProperty(
-    WebGpuPreview.prototype,
-    name,
-    Object.getOwnPropertyDescriptor(WebGpuOptimizerRuntime.prototype, name),
-  );
-}
+installWebGpuPreviewMethods(WebGpuOptimizerRuntime.prototype, "WebGpuOptimizerRuntime");

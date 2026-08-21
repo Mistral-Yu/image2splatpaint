@@ -1,57 +1,11 @@
 import { lstat, readdir, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { relative, resolve, sep } from "node:path";
+import { releaseArtifactFiles } from "./release-manifest.mjs";
 
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)));
 
-const artifactFiles = Object.freeze([
-  ".nojekyll",
-  "LICENSE",
-  "THIRD_PARTY_NOTICES.md",
-  "index.html",
-  "assets/source-images/README.md",
-  "assets/source-images/generated-geometric-sample.jpg",
-  "assets/source-images/ramen-photo.jpg",
-  "web/app.js",
-  "web/core/numeric-utils.js",
-  "web/core/config.js",
-  "web/core/algorithms.js",
-  "web/core/state.js",
-  "web/export/canvas-blob.js",
-  "web/export/ply-serializer.js",
-  "web/export/ply-inspector.js",
-  "web/export/runtime.js",
-  "web/export/actions.js",
-  "web/input/image-metadata.js",
-  "web/input/image-loader.js",
-  "web/gpu/metrics.js",
-  "web/gpu/memory.js",
-  "web/gpu/runtime.js",
-  "web/gpu/device.js",
-  "web/gpu/renderer.js",
-  "web/gpu/tile-pipelines.js",
-  "web/gpu/tile-runtime.js",
-  "web/gpu/optimizer-runtime.js",
-  "web/training/trainer.js",
-  "web/training/metrics.js",
-  "web/training/initialization.js",
-  "web/training/initialization-runtime.js",
-  "web/training/densification.js",
-  "web/training/runtime.js",
-  "web/ui/status.js",
-  "web/ui/preview.js",
-  "web/ui/tilt.js",
-  "web/ui/preview-runtime.js",
-  "web/ui/bootstrap.js",
-  "web/ui/controls.js",
-  "web/ui/splat-controls.js",
-  "web/qa/runtime.js",
-  "web/index.html",
-  "web/sample-image-data.js",
-  "web/styles.css",
-  "web/tilt-viewer.bundle.js",
-  "web/vendor/PLAYCANVAS-LICENSE.txt",
-]);
+const artifactFiles = releaseArtifactFiles;
 
 function check(name, condition, failures) {
   if (!condition) failures.push(name);
@@ -210,7 +164,12 @@ export async function verifyRelease(sitePath) {
   check("build job has read-only contents permission", sameMap(permissionMap(build), { contents: "read" }), failures);
   check("deploy job has only Pages deployment permissions", sameMap(permissionMap(deploy), { pages: "write", "id-token": "write" }), failures);
   check("deploy job is excluded from pull requests", /^    if:\s*github\.event_name\s*!=\s*['"]pull_request['"]\s*$/m.test(deploy), failures);
-  check("workflow explicitly prepares the artifact before the release gate", workflow.indexOf("rm -rf _site") >= 0 && workflow.indexOf("rm -rf _site") < workflow.indexOf("node verify-release.mjs _site") && workflow.includes("mkdir -p _site/web _site/web/vendor _site/assets/source-images"), failures);
+  check(
+    "workflow builds the artifact with the tracked manifest before the release gate",
+    workflow.indexOf("node build-release.mjs _site") >= 0 &&
+      workflow.indexOf("node build-release.mjs _site") < workflow.indexOf("node verify-release.mjs _site"),
+    failures,
+  );
 
   if (failures.length) throw new Error(`Release verification failed:\n- ${failures.join("\n- ")}`);
 

@@ -184,11 +184,4 @@ class WebGpuTileRuntime {
 
 }
 
-for (const name of Object.getOwnPropertyNames(WebGpuTileRuntime.prototype)) {
-  if (name === "constructor") continue;
-  Object.defineProperty(
-    WebGpuPreview.prototype,
-    name,
-    Object.getOwnPropertyDescriptor(WebGpuTileRuntime.prototype, name),
-  );
-}
+installWebGpuPreviewMethods(WebGpuTileRuntime.prototype, "WebGpuTileRuntime");

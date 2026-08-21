@@ -1,3 +1,17 @@
+function installWebGpuPreviewMethods(sourcePrototype, sourceName) {
+  for (const name of Object.getOwnPropertyNames(sourcePrototype)) {
+    if (name === "constructor") continue;
+    if (Object.prototype.hasOwnProperty.call(WebGpuPreview.prototype, name)) {
+      throw new Error(`WebGpuPreview method collision: ${sourceName}.${name}`);
+    }
+    Object.defineProperty(
+      WebGpuPreview.prototype,
+      name,
+      Object.getOwnPropertyDescriptor(sourcePrototype, name),
+    );
+  }
+}
+
 class WebGpuPreview {
   constructor(device, canvas, profile = {}) {
     this.device = device;

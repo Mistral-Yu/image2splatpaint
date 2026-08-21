@@ -355,11 +355,4 @@ ${sortTilesFunction}`;
 
 }
 
-for (const name of Object.getOwnPropertyNames(WebGpuTilePipelines.prototype)) {
-  if (name === "constructor") continue;
-  Object.defineProperty(
-    WebGpuPreview.prototype,
-    name,
-    Object.getOwnPropertyDescriptor(WebGpuTilePipelines.prototype, name),
-  );
-}
+installWebGpuPreviewMethods(WebGpuTilePipelines.prototype, "WebGpuTilePipelines");
