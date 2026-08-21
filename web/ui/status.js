@@ -1,58 +1,38 @@
 function beginTrainingRun() {
-  const run = {
+  const run = new Image2SplatPaintTrainingSession({
     generation: ++state.trainingGeneration,
     renderer: state.webgpu.renderer,
     image: state.image,
-    params: null,
-    metrics: null,
-    cancelled: false,
-  };
+  });
   state.trainingRun = run;
   return run;
 }
 
 function updateTrainingRunOwnership(run, { image, params, metrics } = {}) {
   if (!run || state.trainingRun !== run) return;
-  if (image !== undefined) run.image = image;
-  if (params !== undefined) run.params = params;
-  if (metrics !== undefined) run.metrics = metrics;
+  run.updateOwnership({ image, params, metrics });
 }
 
 function ownsTrainingRun(run) {
-  return Boolean(
-    run &&
-    !run.cancelled &&
-    state.trainingRun === run &&
-    state.trainingGeneration === run.generation &&
-    state.webgpu.renderer === run.renderer &&
-    state.image === run.image &&
-    (!run.params || state.params === run.params) &&
-    (!run.metrics || state.metrics === run.metrics) &&
-    !run.renderer?.deviceLost,
-  );
+  return Boolean(run?.owns(state));
 }
 
 function trainingRunCancelledError() {
-  const error = new Error("Training run was cancelled because its WebGPU lifecycle changed.");
-  error.trainingRunCancelled = true;
-  return error;
+  return Image2SplatPaintTrainingSession.cancelledError();
 }
 
 function assertTrainingRun(run) {
-  if (run && !ownsTrainingRun(run)) throw trainingRunCancelledError();
+  if (run) run.assertCurrent(state);
 }
 
 async function awaitTrainingRun(run, promise) {
-  assertTrainingRun(run);
-  const value = await promise;
-  assertTrainingRun(run);
-  return value;
+  return run ? run.awaitCurrent(state, promise) : promise;
 }
 
 function invalidateTrainingRun(reason = "lifecycle change") {
   const run = state.trainingRun;
   if (!run) return false;
-  run.cancelled = true;
+  run.cancel();
   state.trainingRun = null;
   state.trainingGeneration += 1;
   state.startPending = false;
@@ -789,4 +769,3 @@ function publishState() {
   }
   updateExportPanel();
 }
-

@@ -27,6 +27,7 @@ export const releaseArtifactFiles = Object.freeze([
   "web/gpu/tile-runtime.js",
   "web/gpu/optimizer-runtime.js",
   "web/training/trainer.js",
+  "web/training/session.js",
   "web/training/metrics.js",
   "web/training/initialization.js",
   "web/training/initialization-runtime.js",
