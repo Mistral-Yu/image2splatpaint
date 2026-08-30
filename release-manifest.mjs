@@ -6,6 +6,7 @@ export const releaseArtifactFiles = Object.freeze([
   "assets/source-images/README.md",
   "assets/source-images/generated-geometric-sample.jpg",
   "assets/source-images/ramen-photo.jpg",
+  "assets/source-images/waterlily-photo.jpg",
   "web/app.js",
   "web/core/numeric-utils.js",
   "web/core/config.js",

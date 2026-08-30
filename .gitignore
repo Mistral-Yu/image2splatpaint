@@ -22,6 +22,7 @@ AGENTS.md
 assets/source-images/*
 !assets/source-images/README.md
 !assets/source-images/ramen-photo.jpg
+!assets/source-images/waterlily-photo.jpg
 !assets/source-images/generated-geometric-sample.jpg
 
 # Local test, benchmark, profiling, and development scripts are not published.
