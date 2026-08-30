@@ -130,6 +130,7 @@ els.flowSplatUnderpainting.addEventListener("change", () => {
 els.flowSplatUnderpaintPercent.addEventListener("input", publishState);
 els.flowSplatFusionStrokeOptimization.addEventListener("change", publishState);
 els.flowSplatFusionStrokeTexture.addEventListener("change", publishState);
+els.flowSplatFusionInitialization.addEventListener("change", publishState);
 els.flowSplatFusionPaintCurriculum.addEventListener("change", () => {
   syncAlgorithmRequirements();
   publishState();

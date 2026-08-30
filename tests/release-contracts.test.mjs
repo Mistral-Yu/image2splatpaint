@@ -268,7 +268,7 @@ test("Flow Brush Fusion is the third public Algorithm and legacy Brush is a Rect
   assert.match(integration, /createFlowGeometryAnchorParams/);
   assert.match(integration, /detailGeometryAnchorParams/);
   assert.match(integration, /FLOW_PROGRESSIVE_GROWTH_INTERVAL = 100/);
-  assert.match(integration, /FLOW_GROWTH_OPTIMIZER_STEPS = 20/);
+  assert.match(integration, /FLOW_ITERATION_STRIDE = 10/);
   assert.match(integration, /FLOW_PROGRESSIVE_GROWTH_APPLY_UNTIL = 0\.90/);
   assert.match(integration, /FLOW_SPLIT_APPLY_UNTIL = 0\.75/);
   assert.match(integration, /splitFraction: 0\.04/);

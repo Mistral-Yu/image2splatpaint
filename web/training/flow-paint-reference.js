@@ -980,8 +980,8 @@
     const probeColor = [0, 0, 0];
     let x = seed.x;
     let y = seed.y;
-    let previousX = 0;
-    let previousY = 0;
+    let previousX = (seed.directionX || 0) * sign;
+    let previousY = (seed.directionY || 0) * sign;
     const stepLength = distance / Math.max(1, steps);
     for (let step = 0; step < steps; step += 1) {
       let [dx, dy] = fieldAt(analysis, width, height, x, y, previousX, previousY);
@@ -1017,7 +1017,9 @@
   }
 
   function makeStroke(image, analysis, width, height, seed, layer, layerIndex, shortSide) {
-    const distance = Math.max(2, shortSide * layer.length * (0.82 + seed.random * 0.36));
+    const distance = Math.max(2, Number.isFinite(seed.halfLength)
+      ? seed.halfLength * 2
+      : shortSide * layer.length * (0.82 + seed.random * 0.36));
     const steps = Math.max(4, Math.min(14, Math.round(distance / 1.6)));
     const backward = traceHalf(image, analysis, width, height, seed, -1, distance * 0.5, layer.colorLimit, steps);
     const forward = traceHalf(image, analysis, width, height, seed, 1, distance * 0.5, layer.colorLimit, steps);
@@ -1060,7 +1062,9 @@
     }
     return {
       points,
-      halfWidth: Math.max(0.7, shortSide * layer.halfWidth * (0.82 + seed.random * 0.36)),
+      halfWidth: Math.max(0.7, Number.isFinite(seed.halfWidth)
+        ? seed.halfWidth
+        : shortSide * layer.halfWidth * (0.82 + seed.random * 0.36)),
       opacity: layer.opacity,
       random: seed.random,
       layerIndex,
@@ -1355,7 +1359,10 @@
       const layer = layers[layerIndex];
       const requested = layerCounts[layerIndex];
       const minimumDistance = Math.max(0.8, Math.sqrt(opaquePixels / Math.max(1, requested)) * 0.46);
-      const seeds = placeSeeds(
+      const regionSeeds = typeof options.regionSeedInitializer === "function";
+      const seeds = regionSeeds
+        ? options.regionSeedInitializer(image, requested, layerIndex, seed)
+        : placeSeeds(
         image,
         analysis,
         width,
@@ -1368,7 +1375,19 @@
       let layerLength = 0;
       let layerLong = 0;
       for (const placed of seeds) {
+        // Only placement/size come from Rectangle regions. Keep the normal
+        // flow-field trace and cubic handles: do not force straight strokes
+        // or force a decorative bend in regions whose flow is actually straight.
         const stroke = makeStroke(image, analysis, width, height, placed, layer, layerIndex, shortSide);
+        if (regionSeeds) {
+          sampleLinearRgb(analysis, width, height, placed.x, placed.y, stroke.color);
+          const guideIndex = Math.max(0, Math.min(height - 1, Math.round(placed.y))) * width
+            + Math.max(0, Math.min(width - 1, Math.round(placed.x)));
+          placed.textureScore = analysis.textureGuide?.score[guideIndex] ?? 1;
+          placed.edgeScore = analysis.textureGuide?.edgeScore?.[guideIndex] ?? placed.textureScore;
+          placed.darkFlatScore = analysis.textureGuide?.darkFlat[guideIndex] ?? 0;
+          placed.dabVisibility = analysis.textureGuide?.dabVisibility[guideIndex] ?? 1;
+        }
         stroke.cubicRibbon = Boolean(layer.cubicRibbon);
         if (stroke.cubicRibbon) {
           const capped = capCubicArcLength(
@@ -1389,7 +1408,7 @@
           : rasterStroke(outputLinear, width, height, stroke);
         if (strokePlan) {
           const controls = stroke.cubicControls || cubicControlsForPath(stroke.points);
-          const paintColor = strokePaintColor(stroke);
+          const paintColor = regionSeeds ? stroke.color : strokePaintColor(stroke);
           const first = controls[0];
           const last = controls[3];
           strokePlan.push({

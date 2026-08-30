@@ -302,6 +302,7 @@ const els = {
   flowSplatFusionPanelSummary: document.querySelector("#flowSplatFusionPanelSummary"),
   flowSplatFusionPanelNote: document.querySelector("#flowSplatFusionPanelNote"),
   flowSplatFusionStrokeTexture: document.querySelector("#flowSplatFusionStrokeTexture"),
+  flowSplatFusionInitialization: document.querySelector("#flowSplatFusionInitialization"),
   flowSplatFusionStrokeOptimization: document.querySelector("#flowSplatFusionStrokeOptimization"),
   flowSplatFusionPaintCurriculum: document.querySelector("#flowSplatFusionPaintCurriculum"),
   flowSplatFusionFixedOpacity: document.querySelector("#flowSplatFusionFixedOpacity"),

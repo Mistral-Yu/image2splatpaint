@@ -170,6 +170,13 @@
                 <div class="lr-body">
                   <p id="flowSplatFusionPanelNote" class="local-flow-paint-note">Layered paint Algorithm. The Baseline uses eight compact Brush Splats per curved stroke, with an opaque interior and a feathered contour. Textured regions receive more bundles, while two thin-long bristles follow a Linear-sRGB Flow-XDoG contour guide. Classic Gaussian preserves the previous four-Splat mode for comparison. The fixed compact backcoat closes gaps without changing standard alpha. Training grows, moves, splits, and merges strokes from broad shapes toward shorter detail.</p>
                   <div class="training-grid">
+                    <label class="field-wide" title="Source-guided keeps the current Baseline. Rectangle-seeded curves uses Rectangle's image-importance regions for placement and size, keeps Flow's local curve tracing and fused Brush dabs, and permits stronger early gradient movement. Both use the same Flow optimizer, count budget and fixed opacity; this is not the Planar optimizer.">
+                      Initialization
+                      <select id="flowSplatFusionInitialization" data-testid="flow-splat-fusion-initialization">
+                        <option value="source-guided" selected>Source-guided curves (current)</option>
+                        <option value="rectangle-seeds">Rectangle-seeded curves (experimental)</option>
+                      </select>
+                    </label>
                     <label title="Flow Brush is the eight-Splat compact Baseline: two Flow-XDoG-guided thin bristles and three middle Brush Splats over three moderate paint-body Splats. Classic Gaussian preserves the previous four-Gaussian mode. Fine bristles keeps Gaussian footprints and splits only the front layer into narrow strands. Max splats remains the final physical-Splat budget.">
                       Stroke texture
                       <select id="flowSplatFusionStrokeTexture" data-testid="flow-splat-fusion-stroke-texture">
@@ -230,7 +237,7 @@
                       Color anchor
                       <input id="flowSplatFusionColorAnchor" data-testid="flow-splat-fusion-color-anchor" type="number" min="0" max="0.05" step="0.0005" value="0.0035" />
                     </label>
-                    <label title="Initial parent-width ceiling after the per-layer range is applied; it does not multiply every stroke. Training may still widen an accepted stroke up to 9% of the image short side. 300% preserves selected broad front strokes while the physical Splat family keeps middle marks and thin bristles distinct.">
+                    <label title="Initial parent-width ceiling after the per-layer range is applied; it does not multiply every stroke. During training P1 allows 1.5-3x each nominal stroke width, P2 allows 1-2x, and P3 restores the normal half-width limit of 9% of the image short side. Physical Brush-dab families keep middle marks and thin bristles distinct.">
                       Stroke width (%)
                       <input id="flowSplatFusionWidthPercent" data-testid="flow-splat-fusion-width-percent" type="number" min="25" max="300" step="5" value="300" />
                     </label>
@@ -801,10 +808,10 @@
     <script src="./gpu/tile-pipelines.js?v=app-refactor-v1"></script>
     <script src="./gpu/tile-runtime.js?v=app-refactor-v1"></script>
     <script src="./gpu/optimizer-runtime.js?v=app-refactor-v1"></script>
-    <script src="./training/flow-paint-reference.js?v=balanced-stroke-distribution-v1"></script>
-    <script src="./training/flow-ribbon-trainer.js?v=flow-xdog-width-v1"></script>
+    <script src="./training/flow-paint-reference.js?v=rectangle-curves-v2"></script>
+    <script src="./training/flow-ribbon-trainer.js?v=flow-width-limits-v2"></script>
     <script src="./training/flow-stroke-topology.js?v=seeded-placement-v1"></script>
-    <script src="./training/flow-splat-fusion.js?v=flow-compact-growth-v2"></script>
+    <script src="./training/flow-splat-fusion.js?v=rectangle-curves-v2"></script>
     <script src="./training/trainer.js?v=rectangle-orientation-degrees-v1"></script>
     <script src="./training/metrics.js?v=app-refactor-v1"></script>
     <script src="./training/initialization.js?v=rectangle-orientation-tolerance-v1"></script>
@@ -812,7 +819,7 @@
     <script src="./training/densification.js?v=rectangle-orientation-tolerance-v1"></script>
     <script src="./training/runtime.js?v=app-refactor-v1"></script>
     <script src="./core/algorithms.js?v=rectangle-orientation-degrees-v1"></script>
-    <script src="./ui/training-controls.js?v=flow-compact-growth-v1"></script>
+    <script src="./ui/training-controls.js?v=rectangle-seeds-v1"></script>
     <script src="./export/runtime.js?v=brush-rectangle-flow-surface-v1"></script>
     <script src="./export/actions.js?v=app-refactor-v1"></script>
     <script src="./ui/status.js?v=rectangle-orientation-degrees-v1"></script>
@@ -820,9 +827,9 @@
     <script src="./ui/tilt.js?v=app-refactor-v1"></script>
     <script src="./ui/preview-runtime.js?v=app-refactor-v1"></script>
     <script src="./ui/splat-controls.js?v=app-refactor-v1"></script>
-    <script src="./app.js?v=rectangle-orientation-tolerance-v1"></script>
+    <script src="./app.js?v=rectangle-seeds-v1"></script>
     <script src="./ui/bootstrap.js?v=brush-rectangle-flow-surface-v1"></script>
     <script src="./qa/runtime.js?v=unified-flow-chain-v1"></script>
-    <script src="./ui/controls.js?v=rectangle-orientation-degrees-v1"></script>
+    <script src="./ui/controls.js?v=rectangle-seeds-v1"></script>
   </body>
 </html>

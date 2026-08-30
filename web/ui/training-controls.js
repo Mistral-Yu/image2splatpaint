@@ -104,6 +104,7 @@ function setInputControlsDisabled(disabled) {
     els.sampleButton,
     els.pathButton,
     els.flowSplatFusionStrokeTexture,
+    els.flowSplatFusionInitialization,
     els.flowSplatFusionStrokeOptimization,
     els.flowSplatFusionPaintCurriculum,
     els.flowSplatFusionFixedOpacity,
@@ -156,7 +157,6 @@ function syncAlgorithmRequirements() {
     }
   }
   document.documentElement.dataset.flowSplatFusion = String(flowSelected);
-  if (flowSelected) els.flowSplatFusionPanel.open = true;
   els.flowSplatFusionPanelSummary.textContent = "Flow Brush Fusion settings";
   els.flowSplatFusionPanelNote.textContent =
     "Layered paint Algorithm. The Baseline uses eight compact Brush Splats per curved stroke, with an opaque interior and a feathered contour. Textured regions receive more bundles, while two thin-long bristles follow a Linear-sRGB Flow-XDoG contour guide. Classic Gaussian preserves the previous four-Splat mode for comparison. The fixed compact backcoat closes gaps without changing standard alpha. Training grows, moves, splits, and merges strokes from broad shapes toward shorter detail.";
@@ -174,10 +174,11 @@ function syncAlgorithmRequirements() {
   els.stepCount.removeAttribute("max");
   els.stepCount.step = "100";
   els.stepCount.closest("label").title = flowSelected
-    ? "Requested iteration limit. Flow preserves growth stages but caps each growth-stage optimization at 20 steps, then keeps the final 10% for full-count settling. A 3000 limit normally runs 840 actual steps; the status shows actual steps."
+    ? "Requested schedule limit. Flow runs one real optimizer update per 10 requested steps, including settling, while preserving growth stages. A 3000 limit normally runs 300 actual steps; the status shows actual steps."
     : "Number of training optimizer iterations.";
   els.flowSplatFusionColorAnchor.disabled = state.running || !flowSelected;
   els.flowSplatFusionStrokeTexture.disabled = state.running || !flowSelected;
+  els.flowSplatFusionInitialization.disabled = state.running || !flowSelected;
   els.flowSplatFusionStrokeOptimization.disabled = state.running || !flowSelected;
   els.flowSplatFusionPaintCurriculum.disabled = state.running || !flowSelected;
   els.flowSplatFusionFixedOpacity.disabled = state.running || !flowSelected;

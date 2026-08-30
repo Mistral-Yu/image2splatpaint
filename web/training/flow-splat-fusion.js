@@ -1,6 +1,6 @@
 const FLOW_PROGRESSIVE_GROWTH_INTERVAL = 100;
 const FLOW_PROGRESSIVE_GROWTH_APPLY_UNTIL = 0.90;
-const FLOW_GROWTH_OPTIMIZER_STEPS = 20;
+const FLOW_ITERATION_STRIDE = 10;
 const FLOW_SPLIT_APPLY_UNTIL = 0.75;
 
 function buildFlowProgressiveGrowthSchedule(iterations, broadParentCount, fullParentCount) {
@@ -8,19 +8,20 @@ function buildFlowProgressiveGrowthSchedule(iterations, broadParentCount, fullPa
   const safeFullCount = Math.max(1, Math.round(fullParentCount));
   const safeBroadCount = Math.max(1, Math.min(safeFullCount, Math.round(broadParentCount)));
   if (safeIterations < 3 || safeBroadCount >= safeFullCount) {
+    const plannedIterations = Math.max(1, Math.ceil(safeIterations / FLOW_ITERATION_STRIDE));
     return {
       parentCounts: [safeFullCount],
-      iterationCounts: [safeIterations],
+      iterationCounts: [plannedIterations],
       growthIterationBudget: 0,
-      settleIterations: safeIterations,
-      plannedIterations: safeIterations,
-      skippedIterations: 0,
+      settleIterations: plannedIterations,
+      plannedIterations,
+      skippedIterations: safeIterations - plannedIterations,
     };
   }
 
-  // Keep the established count/topology stages and full-budget settle window.
-  // The requested limit defines this logical schedule; compact only the repeated
-  // optimizer work between growth events, never Adam's iteration counter.
+  // Preserve the count/topology stages, but execute one real optimizer update
+  // per ten requested schedule steps, including the final settle. Each stage
+  // still gets at least one update. Adam's own iteration counter stays consecutive.
   const settleIterations = Math.max(1, Math.round(
     safeIterations * (1 - FLOW_PROGRESSIVE_GROWTH_APPLY_UNTIL),
   ));
@@ -51,15 +52,16 @@ function buildFlowProgressiveGrowthSchedule(iterations, broadParentCount, fullPa
   }
   parentCounts.push(safeFullCount);
   iterationCounts.push(settleIterations);
-  for (let stage = 0; stage < iterationCounts.length - 1; stage += 1) {
-    iterationCounts[stage] = Math.min(FLOW_GROWTH_OPTIMIZER_STEPS, iterationCounts[stage]);
+  for (let stage = 0; stage < iterationCounts.length; stage += 1) {
+    iterationCounts[stage] = Math.max(1, Math.ceil(iterationCounts[stage] / FLOW_ITERATION_STRIDE));
   }
   const plannedIterations = iterationCounts.reduce((sum, count) => sum + count, 0);
+  const actualSettleIterations = iterationCounts.at(-1);
   return {
     parentCounts,
     iterationCounts,
-    growthIterationBudget: plannedIterations - settleIterations,
-    settleIterations,
+    growthIterationBudget: plannedIterations - actualSettleIterations,
+    settleIterations: actualSettleIterations,
     plannedIterations,
     skippedIterations: safeIterations - plannedIterations,
   };
@@ -106,6 +108,31 @@ function createFlowGeometryAnchorParams(strokePlan) {
   return params;
 }
 
+// Reuse Rectangle's source-importance BSP and local tensor, not its UI state
+// or optimizer. NDC directions are converted back to image-pixel directions.
+function flowRectangleSeedCandidates(image, count, layerIndex, seed) {
+  if (count < 1) return [];
+  const { grid, regions } = adaptiveBspRegions(image, count);
+  return Array.from({ length: count }, (_, index) => {
+    const region = regions[index % regions.length];
+    const x = region.meanX / grid.width * (image.width - 1);
+    const y = region.meanY / grid.height * (image.height - 1);
+    const random = ((Math.imul(index + 1, 2654435761) ^ Math.imul(layerIndex + 1, 2246822519) ^ seed) >>> 0) / 4294967296;
+    const structure = strokeStructureAt(image,
+      2 * x / Math.max(1, image.width - 1) - 1,
+      2 * y / Math.max(1, image.height - 1) - 1, random * Math.PI);
+    const dx = Math.cos(structure.theta) * Math.max(1, image.width - 1);
+    const dy = Math.sin(structure.theta) * Math.max(1, image.height - 1);
+    const length = Math.max(1e-6, Math.hypot(dx, dy));
+    const area = (region.x1 - region.x0) * image.width / grid.width
+      * (region.y1 - region.y0) * image.height / grid.height;
+    const areaScale = Math.sqrt(Math.max(1, area)) * 0.28;
+    const stretch = Math.sqrt(1.35 + 2.65 * structure.coherence);
+    return { x, y, random, directionX: dx / length, directionY: dy / length,
+      halfWidth: Math.max(0.65, areaScale / stretch), halfLength: areaScale * stretch * 2 };
+  });
+}
+
 async function trainFlowSplatFusion(run) {
   const algorithm = selectedAlgorithm();
   const compatibilityCurveAlias = algorithm.id === CURVE_SPLAT_CHAIN_ALGORITHM_ID;
@@ -114,6 +141,10 @@ async function trainFlowSplatFusion(run) {
   }
   assertTrainingRun(run);
   const sourceImage = state.image;
+  const rectangleSeeds = trainingUiAdapter.controls.flowSplatFusionInitialization.value === "rectangle-seeds";
+  const flowInitialization = rectangleSeeds ? "rectangle-seeds" : "source-guided";
+  trainingUiAdapter.controls.flowSplatFusionInitialization.value = flowInitialization;
+  document.documentElement.dataset.flowInitialization = flowInitialization;
   const flowQaParams = new URLSearchParams(location.search);
   const allowedFlowStrokeTextures = ["baseline", "fine-bristles", "brush-dabs"];
   const requestedFlowStrokeTexture = allowedFlowStrokeTextures.includes(
@@ -280,6 +311,7 @@ async function trainFlowSplatFusion(run) {
     planOnly: true,
     maximumRibbonArcFraction: maximumRibbonArcPercent / 100,
     textureGuidedAllocation: flowTextureGuidedDabs,
+    regionSeedInitializer: rectangleSeeds ? flowRectangleSeedCandidates : undefined,
   });
   // Stroke width is a global ceiling for topology-level parent widths. It must
   // not multiply every generated stroke before the per-layer width range is
@@ -407,7 +439,7 @@ async function trainFlowSplatFusion(run) {
     algorithm: algorithm.id,
     algorithm_label: algorithm.label,
     backend: algorithm.backend,
-    initialization: "three-layer flow-field Gaussian Splat chains",
+    initialization: rectangleSeeds ? "rectangle-bsp-flow-curves" : "three-layer flow-field Gaussian Splat chains",
     steps_requested: iterations,
     steps_done: 0,
     num_gaussians: initialDisplayedSplatCount,
@@ -579,6 +611,12 @@ async function trainFlowSplatFusion(run) {
       lastProgressElapsedMs = elapsedMs;
       state.metrics.steps_done = globalIteration;
       state.metrics.num_gaussians = stageSplatCount;
+      state.metrics.flow_width_training_phase = progress.widthTraining.phase;
+      document.documentElement.dataset.flowWidthTrainingPhase = String(progress.widthTraining.phase);
+      document.documentElement.dataset.flowWidthAnchor = String(progress.widthTraining.widthAnchor);
+      document.documentElement.dataset.flowWidthLearningRate = String(progress.widthTraining.widthLearningRate);
+      document.documentElement.dataset.flowWidthMinimumFactor = String(progress.widthTraining.minimumWidthFactor);
+      document.documentElement.dataset.flowWidthMaximumFactor = String(progress.widthTraining.maximumWidthMultiplier);
       recordTrainingTiming(globalIteration, elapsedDelta);
       trainingUiAdapter.controls.stepText.textContent = `${globalIteration} / ${iterations}`;
       trainingUiAdapter.controls.splatText.textContent =
@@ -628,6 +666,7 @@ async function trainFlowSplatFusion(run) {
     textureGuidedDabs: flowTextureGuidedDabs,
     splatSizeVariation: splatSizeVariationPercent / 100,
     widthAnchor: 0.0008,
+    widthTrainingPhases: true,
     fixedOpacity: fixedStrokeOpacity,
     frontWidthLearningScale,
     representation,
@@ -643,6 +682,8 @@ async function trainFlowSplatFusion(run) {
     let completedIterations = 0;
     let elapsedMs = 0;
     let completedStages = 0;
+    const optimizerTrace = [];
+    document.documentElement.dataset.flowOptimizerTrace = "[]";
     let finalDetailPlan = flowTopologyState.plan;
     let finalUnderpaint = Image2SplatPaintFlowPaintReference.createSplatUnderpaintPlan(
       trainingImage,
@@ -657,7 +698,7 @@ async function trainFlowSplatFusion(run) {
       if (stage > 0) {
         flowTopologyState = Image2SplatPaintFlowStrokeTopology.evolve(
           flowTopologyState,
-          previousStage?.trainingState.params,
+          previousStage?.trainingState.topologyParams,
           trainingImage,
           previousStage?.trainingState.renderedLinearRgba,
           detailParentCount,
@@ -698,15 +739,20 @@ async function trainFlowSplatFusion(run) {
       const currentCurriculum = flowTopologyState.events.at(-1) || {
         curriculum_mean_half_width_px: flowTopologyState.initialCurriculum.meanHalfWidthPx,
       };
+      const widthTraining = Image2SplatPaintFlowRibbonTrainer.widthTrainingSettings(0, {
+        ...trainerOptions,
+        globalIterationOffset: completedIterations,
+        globalIterations: iterations,
+      });
       setTrainingMessage(
-        `Training ${algorithm.label}: growth ${stage + 1} / ${progressiveParentCounts.length}, ` +
+        `Training ${algorithm.label}: width P${widthTraining.phase}, growth ${stage + 1} / ${progressiveParentCounts.length}, ` +
         `${stagePhysicalSplatCount.toLocaleString()} Splats` +
         `, split ${flowTopologyState.totals.splits} / merge ${flowTopologyState.totals.merges}` +
         ` / move ${flowTopologyState.totals.residualMoves}, ` +
         `width ${(currentCurriculum.curriculum_mean_half_width_px * 2).toFixed(1)}px...`,
       );
       const stagePositionLearningRate = flowPositionLearningRate * (
-        1 + 0.5 * (1 - curriculumProgress) ** 0.8
+        1 + (rectangleSeeds ? 3 : 0.5) * (1 - curriculumProgress) ** 0.8
       );
       const stageMovementLimit = flowMaxPositionDelta > 0
         ? Math.min(flowMaxPositionDelta, Math.max(0.5, residualMovePerStagePx * 2))
@@ -740,6 +786,15 @@ async function trainFlowSplatFusion(run) {
       completedIterations += stageResult.metadata.iterations;
       elapsedMs += stageResult.metadata.elapsed_ms;
       completedStages += 1;
+      optimizerTrace.push({
+        step: completedIterations,
+        position_lr: stagePositionLearningRate,
+        geometry_rms_px: stageResult.metadata.control_point_rms_drift_px,
+        width_drift_px: stageResult.metadata.mean_width_drift_px,
+        rgb_l1: stageResult.metadata.rgb_l1_signal,
+        psnr: stageResult.metadata.psnr_signal_db,
+      });
+      document.documentElement.dataset.flowOptimizerTrace = JSON.stringify(optimizerTrace);
       assertTrainingRun(run);
       if (stageResult.metadata.stopped) break;
     }
@@ -772,7 +827,12 @@ async function trainFlowSplatFusion(run) {
     result.metadata.progressive_splat_growth = progressiveParentCounts.length > 1;
     result.metadata.flow_requested_iteration_limit = requestedIterationLimit;
     result.metadata.flow_skipped_iterations = growthSchedule.skippedIterations;
-    result.metadata.progressive_growth_interval = FLOW_GROWTH_OPTIMIZER_STEPS;
+    result.metadata.flow_iteration_stride = FLOW_ITERATION_STRIDE;
+    result.metadata.flow_initialization = flowInitialization;
+    result.metadata.flow_optimizer_trace = optimizerTrace;
+    result.metadata.flow_width_training_phases = true;
+    result.metadata.flow_width_training_phase = state.metrics.flow_width_training_phase;
+    result.metadata.progressive_growth_interval = FLOW_PROGRESSIVE_GROWTH_INTERVAL / FLOW_ITERATION_STRIDE;
     result.metadata.progressive_growth_apply_until = growthSchedule.growthIterationBudget / iterations;
     result.metadata.progressive_growth_stage_count = progressiveParentCounts.length;
     result.metadata.progressive_growth_iteration_budget = growthSchedule.growthIterationBudget;
@@ -964,7 +1024,7 @@ async function trainFlowSplatFusion(run) {
     setTrainingMessage(
       result.metadata.stopped
         ? `${algorithm.label} stopped after ${result.metadata.iterations} / ${result.metadata.requested_iterations} iterations.`
-        : `${algorithm.label} finished: ${result.metadata.splat_count.toLocaleString()} ${primitiveLabel}; ${iterations} optimizer steps (${growthSchedule.skippedIterations} growth-wait steps skipped).`,
+        : `${algorithm.label} finished: ${result.metadata.splat_count.toLocaleString()} ${primitiveLabel}; ${iterations} optimizer steps (${growthSchedule.skippedIterations} schedule steps skipped).`,
       "success",
     );
     eventLog(

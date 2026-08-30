@@ -24,7 +24,7 @@
   const GUIDE_LEVEL_BASE = 4;
   const TEXTURE_GUIDE_LEVELS = 63;
   const EDGE_GUIDE_LEVELS = GUIDE_LEVEL_BASE - 1;
-  const CONFIG_BYTES = 144;
+  const CONFIG_BYTES = 160;
   const CANVAS_LINEAR = Object.freeze([0.91, 0.885, 0.82]);
 
   function resolveStrokeTextureMode(options = {}) {
@@ -611,6 +611,20 @@
       }
     }
 
+    // Keep unscaled width anchors. Phase broadening is temporary, not a new
+    // topology target that would be multiplied again at the next growth event.
+    const widthPhaseLifts = new Float32Array(strokeCount);
+    if (options.widthTrainingPhases === true) {
+      for (let index = 0; index < strokeCount; index += 1) {
+        const base = index * PARAM_STRIDE;
+        if (params[base + 14] > 2.5) continue;
+        const bounds = widthTrainingBounds(anchors[base + 8], width, height, 0, options);
+        const before = params[base + 8];
+        params[base + 8] = Math.max(bounds.minimum, Math.min(bounds.maximum, before));
+        widthPhaseLifts[index] = params[base + 8] - before;
+      }
+    }
+
     const target = new Float32Array(width * height * 4);
     for (let pixel = 0; pixel < width * height; pixel += 1) {
       target[pixel * 4] = signalSrgbToLinear(image.rgb[pixel * 3]);
@@ -622,6 +636,22 @@
 
     const tileCols = Math.ceil(width / TILE_SIZE);
     const tileRows = Math.ceil(height / TILE_SIZE);
+    // Adam starts with zero moments in each stage. Cauchy-Schwarz bounds each
+    // normalized update even for arbitrary gradients; use that reachable width
+    // rather than inflating every candidate to the global three-times ceiling.
+    let widthTravel = 0;
+    if (options.widthTrainingPhases === true) {
+      for (let step = 0; step < Math.max(1, Number(options.iterations) || 1); step += 1) {
+        const t = step + 1;
+        const ratio = 0.9 ** 2 / 0.999;
+        const momentBound = Math.sqrt(
+          (1 - 0.9) ** 2 / (1 - 0.999)
+          * (1 - 0.999 ** t) / (1 - 0.9 ** t) ** 2
+          * (1 - ratio ** t) / (1 - ratio),
+        );
+        widthTravel += Math.abs(widthTrainingSettings(step, options).widthLearningRate) * momentBound;
+      }
+    }
     const tileLists = Array.from({ length: tileCols * tileRows }, () => []);
     const curveSplatChain = options.representation === "curve-splat-chain";
     const addCandidateToTiles = (candidate, minimumX, minimumY, maximumX, maximumY) => {
@@ -671,6 +701,18 @@
       if (curveSplatChain) {
         const widthPx = Math.max(0.55, params[base + 8]);
         const spacing = unpackChainSpacing(params[base + 15], textureGuidedDabs);
+        // Static candidates must cover any width allowed during this stage,
+        // including a phase boundary in a short/fixed-count run. The control
+        // hull plus movement limit also covers tangent rotation after Adam.
+        const phasedBounds = options.widthTrainingPhases === true;
+        const stageEnd = Math.max(0, (Number(options.iterations) || 1) - 1);
+        const permittedWidth = phasedBounds ? Math.max(widthPx,
+          widthTrainingBounds(anchors[base + 8], width, height, 0, options).maximum,
+          widthTrainingBounds(anchors[base + 8], width, height, stageEnd, options).maximum,
+        ) : widthPx;
+        const widthLearningScale = params[base + 14] > 1.5 && params[base + 14] < 2.5
+          ? Math.max(1, Math.min(8, Number(options.frontWidthLearningScale) || 1)) : 1;
+        const widthCeiling = Math.min(permittedWidth, widthPx + widthTravel * widthLearningScale + 1e-3);
         for (let sample = 0; sample < sampleCount; sample += 1) {
           const profile = chainSampleProfile(
             strokeTextureMode,
@@ -683,6 +725,22 @@
             splatSizeVariation,
           );
           const t = profile.t;
+          if (phasedBounds) {
+            const sigmaLong = Math.max(0.55,
+              Math.max(spacing * 0.72, widthCeiling * 0.85) * profile.lengthFactor);
+            const sigmaShort = Math.max(0.38, widthCeiling * profile.widthFactor);
+            const support = strokeTextureMode === STROKE_TEXTURE_BRUSH_DABS
+              ? 1.16 ** 0.25 : 4;
+            const radius = support * Math.hypot(sigmaLong, sigmaShort)
+              + Math.abs(profile.normalOffsetFactor) * widthCeiling
+              + Math.max(0, Number(options.maxPositionDelta ?? 6)) + 2;
+            const xs = [0, 2, 4, 6].map((c) => anchors[base + c]);
+            const ys = [1, 3, 5, 7].map((c) => anchors[base + c]);
+            addCandidateToTiles(index * sampleCount + sample,
+              Math.min(...xs) - radius, Math.min(...ys) - radius,
+              Math.max(...xs) + radius, Math.max(...ys) + radius);
+            continue;
+          }
           let [pointX, pointY] = cubicPointFromParams(params, base, t);
           const [tangentX, tangentY] = cubicTangentFromParams(params, base, t);
           const normalX = -tangentY;
@@ -716,7 +774,11 @@
         maximumX = Math.max(maximumX, params[base + control * 2]);
         maximumY = Math.max(maximumY, params[base + control * 2 + 1]);
       }
-      const padding = params[base + 8] * 2.6 + 2;
+      const padding = options.widthTrainingPhases === true
+        ? (params[base + 8] + widthTravel * Math.max(1, Math.min(8,
+          Number(options.frontWidthLearningScale) || 1))) * 2.6
+          + Math.max(0, Number(options.maxPositionDelta ?? 6)) + 2
+        : params[base + 8] * 2.6 + 2;
       addCandidateToTiles(
         index,
         minimumX - padding,
@@ -791,6 +853,7 @@
       strokeCount,
       params,
       anchors,
+      widthPhaseLifts,
       target,
       canvasLinear,
       tileCols,
@@ -857,6 +920,8 @@ struct Config {
   front_width_learning_scale: f32,
   texture_guided_dabs: f32,
   splat_size_variation: f32,
+  width_minimum_factor: f32,
+  width_maximum_factor: f32,
 }
 
 struct StrokeEval {
@@ -1923,6 +1988,8 @@ struct Config {
   front_width_learning_scale: f32,
   texture_guided_dabs: f32,
   splat_size_variation: f32,
+  width_minimum_factor: f32,
+  width_maximum_factor: f32,
 }
 
 fn update_cubic_point(base: u32, t: f32) -> vec2<f32> {
@@ -2010,7 +2077,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
       );
     } else if (component == 8u) {
       let underpaint = params[base + 14u] > 2.5;
-      next = clamp(next, 0.55, config.max_width * select(1.0, 4.0, underpaint));
+      var maximum = config.max_width * select(1.0, 4.0, underpaint);
+      if (config.width_maximum_factor > 0.0 && !underpaint) {
+        maximum = min(maximum, anchor * config.width_maximum_factor);
+      }
+      let minimum = min(maximum, max(0.55, anchor * config.width_minimum_factor));
+      next = clamp(next, minimum, maximum);
     } else if (component == 9u) {
       next = clamp(next, -5.5, 5.5);
     } else if (component <= 12u) {
@@ -2051,6 +2123,45 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 `;
 
+  // Training-time phases, not the three paint-depth layers. Use the complete
+  // run's real update index so growth-stage Adam restarts do not restart P1.
+  function widthTrainingSettings(iteration, options = {}) {
+    const total = Math.max(1, Math.floor(Number(options.globalIterations ?? options.iterations) || 1));
+    const step = Math.max(0, (Number(options.globalIterationOffset) || 0) + (Number(iteration) || 0));
+    const progress = total === 1 ? 1 : clamp01(step / (total - 1));
+    const enabled = options.widthTrainingPhases === true;
+    const phase = !enabled || progress >= 2 / 3 ? 3 : progress < 1 / 3 ? 1 : 2;
+    const freedom = enabled ? 1 - smoothstepRange(1 / 3, 2 / 3, progress) : 0;
+    return {
+      phase,
+      progress,
+      widthAnchor: (options.widthAnchor ?? 0.0008) * (1 - 0.75 * freedom),
+      widthLearningRate: (options.widthLearningRate ?? 0.010) * (1 + 0.5 * freedom),
+      minimumWidthFactor: phase === 1 ? 1.5 : phase === 2 ? 1 : 0,
+      maximumWidthFactor: phase === 1 ? 3 : phase === 2 ? 2 : 0,
+      maximumWidthMultiplier: phase === 1 ? 3 : phase === 2 ? 2 : 1,
+    };
+  }
+
+  function widthTrainingBounds(nominalHalfWidth, width, height, iteration, options) {
+    const settings = widthTrainingSettings(iteration, options);
+    const cap = Math.max(2, Math.min(width, height) * 0.09) * settings.maximumWidthMultiplier;
+    const maximum = settings.maximumWidthFactor > 0
+      ? Math.min(cap, nominalHalfWidth * settings.maximumWidthFactor) : cap;
+    return {
+      minimum: Math.min(maximum, Math.max(0.55, nominalHalfWidth * settings.minimumWidthFactor)),
+      maximum,
+    };
+  }
+
+  function paramsWithoutPhaseLift(params, lifts) {
+    const next = params.slice();
+    for (let index = 0; index < lifts.length; index += 1) {
+      next[index * PARAM_STRIDE + 8] = Math.max(0.55, next[index * PARAM_STRIDE + 8] - lifts[index]);
+    }
+    return next;
+  }
+
   function configBytes(data, iteration, options, forceFullFrame = false) {
     const buffer = new ArrayBuffer(CONFIG_BYTES);
     const view = new DataView(buffer);
@@ -2066,17 +2177,18 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     u32(28, iteration);
     f32(32, options.colorAnchor ?? 0.0035);
     f32(36, options.geometryAnchor ?? 0.00035);
-    f32(40, options.widthAnchor ?? 0.0008);
+    const widthTraining = widthTrainingSettings(iteration, options);
+    f32(40, widthTraining.widthAnchor);
     f32(44, options.opacityAnchor ?? 0.0008);
     f32(48, options.positionLearningRate ?? 0.015);
-    f32(52, options.widthLearningRate ?? 0.010);
+    f32(52, widthTraining.widthLearningRate);
     f32(56, options.opacityLearningRate ?? 0.006);
     f32(60, options.colorLearningRate ?? 0.020);
     f32(64, 0.9);
     f32(68, 0.999);
     f32(72, 1e-8);
     f32(76, 1);
-    f32(80, Math.max(2, Math.min(data.width, data.height) * 0.09));
+    f32(80, Math.max(2, Math.min(data.width, data.height) * 0.09) * widthTraining.maximumWidthMultiplier);
     f32(84, options.maxPositionDelta ?? 6);
     f32(88, options.representation === "curve-splat-chain" ? 1 : 0);
     u32(
@@ -2099,6 +2211,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     f32(128, Math.max(1, Math.min(8, Number(options.frontWidthLearningScale) || 1)));
     f32(132, data.textureGuidedDabs ? 1 : 0);
     f32(136, Math.max(0, Math.min(1, Number(options.splatSizeVariation) || 0)));
+    f32(140, widthTraining.minimumWidthFactor);
+    f32(144, widthTraining.maximumWidthFactor);
     return new Uint8Array(buffer);
   }
 
@@ -2507,6 +2621,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (options.returnTrainingState) {
       result.trainingState = {
         params: finalParams.slice(),
+        topologyParams: paramsWithoutPhaseLift(finalParams, data.widthPhaseLifts),
         renderedLinearRgba: rendered.slice(),
       };
     }
@@ -2611,6 +2726,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
             iteration: iteration + 1,
             iterations,
             elapsed_ms: performance.now() - startedAt,
+            widthTraining: widthTrainingSettings(iteration, options),
           });
           if (options.shouldStop?.()) {
             stopped = true;
@@ -2663,6 +2779,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
   global.Image2SplatPaintFlowRibbonTrainer = Object.freeze({
     prepareTrainingData,
+    widthTrainingSettings,
     train,
     constants: Object.freeze({
       PARAM_STRIDE,
