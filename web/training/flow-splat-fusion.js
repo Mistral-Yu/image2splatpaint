@@ -1,5 +1,6 @@
 const FLOW_PROGRESSIVE_GROWTH_INTERVAL = 100;
 const FLOW_PROGRESSIVE_GROWTH_APPLY_UNTIL = 0.90;
+const FLOW_GROWTH_OPTIMIZER_STEPS = 20;
 const FLOW_SPLIT_APPLY_UNTIL = 0.75;
 
 function buildFlowProgressiveGrowthSchedule(iterations, broadParentCount, fullParentCount) {
@@ -12,11 +13,14 @@ function buildFlowProgressiveGrowthSchedule(iterations, broadParentCount, fullPa
       iterationCounts: [safeIterations],
       growthIterationBudget: 0,
       settleIterations: safeIterations,
+      plannedIterations: safeIterations,
+      skippedIterations: 0,
     };
   }
 
-  // Grow a little at a time through the first 90% of training. The final 10%
-  // starts at the complete Splat budget and is reserved for fixed-count settle.
+  // Keep the established count/topology stages and full-budget settle window.
+  // The requested limit defines this logical schedule; compact only the repeated
+  // optimizer work between growth events, never Adam's iteration counter.
   const settleIterations = Math.max(1, Math.round(
     safeIterations * (1 - FLOW_PROGRESSIVE_GROWTH_APPLY_UNTIL),
   ));
@@ -47,7 +51,18 @@ function buildFlowProgressiveGrowthSchedule(iterations, broadParentCount, fullPa
   }
   parentCounts.push(safeFullCount);
   iterationCounts.push(settleIterations);
-  return { parentCounts, iterationCounts, growthIterationBudget, settleIterations };
+  for (let stage = 0; stage < iterationCounts.length - 1; stage += 1) {
+    iterationCounts[stage] = Math.min(FLOW_GROWTH_OPTIMIZER_STEPS, iterationCounts[stage]);
+  }
+  const plannedIterations = iterationCounts.reduce((sum, count) => sum + count, 0);
+  return {
+    parentCounts,
+    iterationCounts,
+    growthIterationBudget: plannedIterations - settleIterations,
+    settleIterations,
+    plannedIterations,
+    skippedIterations: safeIterations - plannedIterations,
+  };
 }
 
 function measureFlowControlPointDrift(strokePlan, params, detailOffset = 0) {
@@ -140,7 +155,7 @@ async function trainFlowSplatFusion(run) {
   const requestedSplatBudget = Math.max(256, Math.min(14000, Math.round(
     Number(trainingUiAdapter.controls.finalSplatCount.value) || DEFAULT_FINAL_SPLATS,
   )));
-  const iterations = Math.max(1, Math.min(10000, Math.round(
+  const requestedIterationLimit = Math.max(1, Math.min(10000, Math.round(
     Number(trainingUiAdapter.controls.stepCount.value) || DEFAULT_ITERATIONS,
   )));
   const previewRefresh = ["frame", "10", "final"].includes(trainingUiAdapter.controls.previewRefresh.value)
@@ -230,7 +245,7 @@ async function trainFlowSplatFusion(run) {
     : 10));
   trainingUiAdapter.controls.trainSize.value = String(maxSide);
   trainingUiAdapter.controls.finalSplatCount.value = String(requestedSplatBudget);
-  trainingUiAdapter.controls.stepCount.value = String(iterations);
+  trainingUiAdapter.controls.stepCount.value = String(requestedIterationLimit);
   trainingUiAdapter.controls.flowSplatFusionColorAnchor.value = String(colorAnchor);
   trainingUiAdapter.controls.flowSplatFusionWidthPercent.value = String(strokeWidthPercent);
   trainingUiAdapter.controls.flowSplatFusionSplatSizeVariation.value = String(
@@ -337,10 +352,11 @@ async function trainFlowSplatFusion(run) {
   }
   const broadParentCount = cumulativeLayerParents[0] || reference.strokePlan.length;
   const growthSchedule = buildFlowProgressiveGrowthSchedule(
-    iterations,
+    requestedIterationLimit,
     broadParentCount,
     reference.strokePlan.length,
   );
+  const iterations = growthSchedule.plannedIterations;
   const progressiveParentCounts = growthSchedule.parentCounts;
   const growthIterations = growthSchedule.iterationCounts;
   const flowTopologyOptions = {
@@ -467,7 +483,9 @@ async function trainFlowSplatFusion(run) {
     flow_tile_list_update: "growth-boundary-only",
     progressive_splat_growth: progressiveParentCounts.length > 1,
     progressive_growth_interval: FLOW_PROGRESSIVE_GROWTH_INTERVAL,
-    progressive_growth_apply_until: FLOW_PROGRESSIVE_GROWTH_APPLY_UNTIL,
+    flow_requested_iteration_limit: requestedIterationLimit,
+    flow_skipped_iterations: growthSchedule.skippedIterations,
+    progressive_growth_apply_until: growthSchedule.growthIterationBudget / iterations,
     progressive_growth_stage_count: progressiveParentCounts.length,
     progressive_growth_iteration_budget: growthSchedule.growthIterationBudget,
     progressive_settle_iterations: growthSchedule.settleIterations,
@@ -532,7 +550,7 @@ async function trainFlowSplatFusion(run) {
   trainingUiAdapter.controls.stopButton.disabled = false;
   setInputControlsDisabled(true);
   setPausedRuntimeControlsEnabled(false);
-  setTrainingMessage(`Training ${algorithm.label} on WebGPU...`);
+  setTrainingMessage(`Training ${algorithm.label} on WebGPU: ${iterations} optimizer steps (${requestedIterationLimit} requested limit).`);
   trainingUiAdapter.controls.stepText.textContent = `0 / ${iterations}`;
   trainingUiAdapter.controls.splatText.textContent =
     `${initialDisplayedSplatCount.toLocaleString()} / ${displayedSplatCount.toLocaleString()}`;
@@ -752,8 +770,10 @@ async function trainFlowSplatFusion(run) {
       || "disabled";
     result.metadata.residual_render_used = finalUnderpaint.metadata.residual_render_used;
     result.metadata.progressive_splat_growth = progressiveParentCounts.length > 1;
-    result.metadata.progressive_growth_interval = FLOW_PROGRESSIVE_GROWTH_INTERVAL;
-    result.metadata.progressive_growth_apply_until = FLOW_PROGRESSIVE_GROWTH_APPLY_UNTIL;
+    result.metadata.flow_requested_iteration_limit = requestedIterationLimit;
+    result.metadata.flow_skipped_iterations = growthSchedule.skippedIterations;
+    result.metadata.progressive_growth_interval = FLOW_GROWTH_OPTIMIZER_STEPS;
+    result.metadata.progressive_growth_apply_until = growthSchedule.growthIterationBudget / iterations;
     result.metadata.progressive_growth_stage_count = progressiveParentCounts.length;
     result.metadata.progressive_growth_iteration_budget = growthSchedule.growthIterationBudget;
     result.metadata.progressive_settle_iterations = growthSchedule.settleIterations;
@@ -800,6 +820,12 @@ async function trainFlowSplatFusion(run) {
     result.metadata.flow_topology_merge_count = flowTopologyState?.totals.merges || 0;
     result.metadata.flow_topology_source_added_count = flowTopologyState?.totals.sourceAdded || 0;
     result.metadata.flow_topology_residual_move_count = flowTopologyState?.totals.residualMoves || 0;
+    const acceptedMoveDistance = flowTopologyState.events.reduce(
+      (sum, event) => sum + event.residual_move_count * event.residual_move_mean_px, 0,
+    );
+    result.metadata.flow_residual_move_mean_px = acceptedMoveDistance
+      / Math.max(1, result.metadata.flow_topology_residual_move_count);
+    result.metadata.flow_placement_proposals = "seeded-multidirection-pigment-residual-gain";
     result.metadata.flow_topology_initial_distribution = flowTopologyState?.initialDistribution || null;
     result.metadata.flow_topology_events = flowTopologyState?.events.slice() || [];
     result.metadata.flow_topology_final_distribution = flowTopologyState?.events.at(-1)?.distribution
@@ -818,6 +844,10 @@ async function trainFlowSplatFusion(run) {
       finalStageControlPointRmsDrift,
     );
     document.documentElement.dataset.flowTrainingElapsedMs = String(result.metadata.elapsed_ms);
+    document.documentElement.dataset.flowRequestedIterationLimit = String(requestedIterationLimit);
+    document.documentElement.dataset.flowPlannedIterations = String(iterations);
+    document.documentElement.dataset.flowSkippedIterations = String(growthSchedule.skippedIterations);
+    document.documentElement.dataset.flowGrowthIterationBudget = String(growthSchedule.growthIterationBudget);
     document.documentElement.dataset.flowOverallElapsedMs = String(
       result.metadata.flow_overall_elapsed_ms,
     );
@@ -829,6 +859,9 @@ async function trainFlowSplatFusion(run) {
     );
     document.documentElement.dataset.flowTopologyResidualMoveCount = String(
       flowTopologyState?.totals.residualMoves || 0,
+    );
+    document.documentElement.dataset.flowResidualMoveMeanPx = String(
+      result.metadata.flow_residual_move_mean_px,
     );
     document.documentElement.dataset.flowTopologyInitialDistribution = JSON.stringify(
       result.metadata.flow_topology_initial_distribution,
@@ -931,7 +964,7 @@ async function trainFlowSplatFusion(run) {
     setTrainingMessage(
       result.metadata.stopped
         ? `${algorithm.label} stopped after ${result.metadata.iterations} / ${result.metadata.requested_iterations} iterations.`
-        : `${algorithm.label} finished: ${result.metadata.splat_count.toLocaleString()} ${primitiveLabel}.`,
+        : `${algorithm.label} finished: ${result.metadata.splat_count.toLocaleString()} ${primitiveLabel}; ${iterations} optimizer steps (${growthSchedule.skippedIterations} growth-wait steps skipped).`,
       "success",
     );
     eventLog(

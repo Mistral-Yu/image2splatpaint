@@ -173,6 +173,9 @@ function syncAlgorithmRequirements() {
   els.finalSplatCount.step = "4";
   els.stepCount.removeAttribute("max");
   els.stepCount.step = "100";
+  els.stepCount.closest("label").title = flowSelected
+    ? "Requested iteration limit. Flow preserves growth stages but caps each growth-stage optimization at 20 steps, then keeps the final 10% for full-count settling. A 3000 limit normally runs 840 actual steps; the status shows actual steps."
+    : "Number of training optimizer iterations.";
   els.flowSplatFusionColorAnchor.disabled = state.running || !flowSelected;
   els.flowSplatFusionStrokeTexture.disabled = state.running || !flowSelected;
   els.flowSplatFusionStrokeOptimization.disabled = state.running || !flowSelected;

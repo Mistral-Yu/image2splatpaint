@@ -156,7 +156,7 @@ test("Flow Brush Fusion is the third public Algorithm and legacy Brush is a Rect
   assert.doesNotMatch(html, /id="flowSplatFusionDepthLayerOpacity"/);
   assert.match(html, /id="flowSplatFusionStartingWidthDivisor"[^>]*value="32"/);
   assert.match(html, /id="flowSplatFusionStartingLengthPercent"[^>]*value="160"/);
-  assert.match(html, /id="flowSplatFusionResidualMovePx"[^>]*value="1\.5"/);
+  assert.match(html, /id="flowSplatFusionResidualMovePx"[^>]*value="6"/);
   assert.match(html, /id="flowSplatFusionScaleMatchedResidualRepaint"/);
   assert.doesNotMatch(html, /id="flowSplatFusionScaleMatchedResidualRepaint"[^>]*\bchecked\b/);
   assert.match(html, /id="flowSplatFusionInitialWidthMin"[^>]*value="55"/);
@@ -268,6 +268,7 @@ test("Flow Brush Fusion is the third public Algorithm and legacy Brush is a Rect
   assert.match(integration, /createFlowGeometryAnchorParams/);
   assert.match(integration, /detailGeometryAnchorParams/);
   assert.match(integration, /FLOW_PROGRESSIVE_GROWTH_INTERVAL = 100/);
+  assert.match(integration, /FLOW_GROWTH_OPTIMIZER_STEPS = 20/);
   assert.match(integration, /FLOW_PROGRESSIVE_GROWTH_APPLY_UNTIL = 0\.90/);
   assert.match(integration, /FLOW_SPLIT_APPLY_UNTIL = 0\.75/);
   assert.match(integration, /splitFraction: 0\.04/);

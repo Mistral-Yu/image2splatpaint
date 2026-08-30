@@ -15,8 +15,8 @@
     paintCurriculumEnabled: true,
     startingWidthDivisor: 32,
     startingLengthPercent: 160,
-    residualMovePerEventPx: 1.5,
-    residualMoveFraction: 0.02,
+    residualMovePerEventPx: 6,
+    residualMoveFraction: 0.08,
     maximumMovesPerEvent: 48,
     minimumMoveGain: 0.0025,
     maximumTotalMovementPx: 12,
@@ -403,20 +403,21 @@
         + Math.abs(target[1] - renderedLinearRgba[renderBase + 1])
         + Math.abs(target[2] - renderedLinearRgba[renderBase + 2])
       ) / 3 + clamp01(renderedLinearRgba[renderBase + 3]) * 0.18);
-      const pigmentDistanceSquared = (
-        (pigment[0] - target[0]) ** 2
-        + (pigment[1] - target[1]) ** 2
-        + (pigment[2] - target[2]) ** 2
+      // A high residual alone is not a useful destination: the existing pigment
+      // must be able to reduce it. This is a sampled placement proxy, not a claim
+      // that the full alpha-composited loss has already improved.
+      const pigmentError = (
+        Math.abs(pigment[0] - target[0])
+        + Math.abs(pigment[1] - target[1])
+        + Math.abs(pigment[2] - target[2])
       ) / 3;
-      const colorCompatibility = Math.exp(-8 * pigmentDistanceSquared);
-      total += residual * (0.18 + 0.82 * colorCompatibility);
+      total += Math.max(0, residual - pigmentError);
     }
     const residualScore = total / sampleTs.length;
     if (!options?.textureGuidedAllocation) return residualScore;
     const guide = strokeGuideStats(stroke, options.textureGuide);
     return residualScore * (0.30 + guide.texture * 0.70)
-      + guide.texture * 0.012
-      - guide.darkFlat * 0.004;
+      * (1 - guide.darkFlat * 0.25);
   }
 
   function movementBoundedTranslation(stroke, deltaX, deltaY, options) {
@@ -461,6 +462,7 @@
     progress,
     options,
     residualEvidence = null,
+    eventIndex = 0,
   ) {
     const baseStep = Math.max(0, Number(options.residualMovePerEventPx) || 0);
     if (!(baseStep > 0)
@@ -479,7 +481,7 @@
     const halfStep = step * 0.5;
     const diagonal = step / Math.sqrt(2);
     const halfDiagonal = halfStep / Math.sqrt(2);
-    const offsets = [
+    const localOffsets = [
       [step, 0], [-step, 0], [0, step], [0, -step],
       [diagonal, diagonal], [diagonal, -diagonal],
       [-diagonal, diagonal], [-diagonal, -diagonal],
@@ -500,11 +502,26 @@
         options,
         residualEvidence,
       );
+      // Reproducible exploration of a disk, resampled only at topology events.
+      // Keep the original local candidates as well; never perturb displayed
+      // geometry unless a proposal passes the pigment/residual gain gate.
+      const seed = (Number(stroke.random) || 0) + index * 0.754877666 + eventIndex * 1.324717957;
+      const phase = hash01(seed) * Math.PI * 2;
+      const offsets = [...localOffsets];
+      for (let sample = 0; sample < 8; sample += 1) {
+        const angle = phase + sample * 2.39996323;
+        const radius = step * (0.35 + 0.65 * hash01(seed + sample * 0.618033989 + 0.5));
+        offsets.push([Math.cos(angle) * radius, Math.sin(angle) * radius]);
+      }
       let best = null;
       for (const offset of offsets) {
         const bounded = movementBoundedTranslation(stroke, offset[0], offset[1], options);
         if (Math.hypot(bounded[0], bounded[1]) < 1e-4) continue;
         const candidate = translateStroke(stroke, bounded[0], bounded[1]);
+        if ([0.1, 0.3, 0.5, 0.7, 0.9].some((t) => {
+          const [x, y] = cubicPoint(candidate, t);
+          return x < 0 || y < 0 || x >= image.width || y >= image.height;
+        })) continue;
         const score = samplePlacementScore(
           candidate,
           image,
@@ -1180,6 +1197,7 @@
       normalized.curriculumProgress,
       normalized,
       residualEvidence,
+      state.eventIndex + 1,
     );
     const curriculum = applyPaintCurriculum(
       placement.plan.map((stroke) => annotateTextureGuide(stroke, normalized.textureGuide)),

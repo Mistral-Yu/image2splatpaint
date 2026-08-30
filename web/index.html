@@ -178,7 +178,7 @@
                         <option value="fine-bristles">Fine bristles (Gaussian)</option>
                       </select>
                     </label>
-                    <label class="inline-option" title="Experimental topology-only repaint. At each 100-iteration growth boundary, early stages compare a broad Linear-sRGB residual and later stages reduce that radius to full resolution. Accepted proposals move a complete curved stroke, while the WebGPU optimizer, Splat layout, alpha, budget, and final target remain unchanged.">
+                    <label class="inline-option" title="Experimental topology-only repaint. At each compact growth boundary, early stages compare a broad Linear-sRGB residual and later stages reduce that radius to full resolution. Accepted proposals move a complete curved stroke, while the WebGPU optimizer, Splat layout, alpha, budget, and final target remain unchanged.">
                       <input id="flowSplatFusionScaleMatchedResidualRepaint" data-testid="flow-splat-fusion-scale-matched-residual-repaint" type="checkbox" />
                       Scale-matched repaint
                     </label>
@@ -190,7 +190,7 @@
                         <option value="free">Free motion</option>
                       </select>
                     </label>
-                    <label class="inline-option field-wide" title="Starts with broad, longer marks, then approaches the generated target width and length through the first 90% of training. Split, merge, and residual-guided movement remain part of the Baseline even when this visual curriculum is disabled.">
+                    <label class="inline-option field-wide" title="Starts with broad, longer marks, then approaches the generated target width and length through the compact growth stages. Split, merge, and residual-guided movement remain part of the Baseline even when this visual curriculum is disabled.">
                       <input id="flowSplatFusionPaintCurriculum" data-testid="flow-splat-fusion-paint-curriculum" type="checkbox" checked />
                       Coarse-to-fine paint curriculum
                     </label>
@@ -206,9 +206,9 @@
                       Starting length (%)
                       <input id="flowSplatFusionStartingLengthPercent" data-testid="flow-splat-fusion-starting-length-percent" type="number" min="100" max="300" step="5" value="160" />
                     </label>
-                    <label title="Maximum local residual-guided translation proposed at each 100-iteration growth boundary. A move is accepted only when nearby target color and residual improve; the step decays toward the end.">
+                    <label title="Maximum seeded multi-direction placement proposal at each compact growth boundary. Up to 8% of strokes (at most 48) move only when sampled pigment/residual gain improves. The radius decays toward the end; Movement limit still bounds total displacement.">
                       Residual move / stage (px)
-                      <input id="flowSplatFusionResidualMovePx" data-testid="flow-splat-fusion-residual-move-px" type="number" min="0" max="8" step="0.25" value="1.5" />
+                      <input id="flowSplatFusionResidualMovePx" data-testid="flow-splat-fusion-residual-move-px" type="number" min="0" max="8" step="0.25" value="6" />
                     </label>
                     <label title="Minimum deterministic multiplier applied to initialized detail-stroke target width in the Baseline.">
                       Initial width min (%)
@@ -803,8 +803,8 @@
     <script src="./gpu/optimizer-runtime.js?v=app-refactor-v1"></script>
     <script src="./training/flow-paint-reference.js?v=balanced-stroke-distribution-v1"></script>
     <script src="./training/flow-ribbon-trainer.js?v=flow-xdog-width-v1"></script>
-    <script src="./training/flow-stroke-topology.js?v=balanced-stroke-distribution-v1"></script>
-    <script src="./training/flow-splat-fusion.js?v=flow-brush-fusion-baseline-v1"></script>
+    <script src="./training/flow-stroke-topology.js?v=seeded-placement-v1"></script>
+    <script src="./training/flow-splat-fusion.js?v=flow-compact-growth-v2"></script>
     <script src="./training/trainer.js?v=rectangle-orientation-degrees-v1"></script>
     <script src="./training/metrics.js?v=app-refactor-v1"></script>
     <script src="./training/initialization.js?v=rectangle-orientation-tolerance-v1"></script>
@@ -812,7 +812,7 @@
     <script src="./training/densification.js?v=rectangle-orientation-tolerance-v1"></script>
     <script src="./training/runtime.js?v=app-refactor-v1"></script>
     <script src="./core/algorithms.js?v=rectangle-orientation-degrees-v1"></script>
-    <script src="./ui/training-controls.js?v=rectangle-orientation-tolerance-v1"></script>
+    <script src="./ui/training-controls.js?v=flow-compact-growth-v1"></script>
     <script src="./export/runtime.js?v=brush-rectangle-flow-surface-v1"></script>
     <script src="./export/actions.js?v=app-refactor-v1"></script>
     <script src="./ui/status.js?v=rectangle-orientation-degrees-v1"></script>
