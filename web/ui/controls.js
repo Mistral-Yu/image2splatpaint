@@ -128,6 +128,7 @@ els.flowSplatUnderpainting.addEventListener("change", () => {
   publishState();
 });
 els.flowSplatUnderpaintPercent.addEventListener("input", publishState);
+els.flowSplatBackcoatFromP1.addEventListener("change", publishState);
 els.flowSplatFusionStrokeOptimization.addEventListener("change", publishState);
 els.flowSplatFusionStrokeTexture.addEventListener("change", publishState);
 els.flowSplatFusionInitialization.addEventListener("change", publishState);
@@ -150,6 +151,8 @@ for (const control of [
 els.flowSplatFusionScaleMatchedResidualRepaint.addEventListener("change", publishState);
 els.flowSplatFusionWidthPercent.addEventListener("input", publishState);
 els.flowSplatFusionSplatSizeVariation.addEventListener("input", publishState);
+els.flowSplatFusionEdgeAccents.addEventListener("change", publishState);
+els.flowSplatFusionVariableLinks.addEventListener("change", publishState);
 els.flowSplatFusionMovementLimit.addEventListener("input", publishState);
 els.currentContributionCompaction.addEventListener("change", () => {
   syncAlgorithmRequirements();

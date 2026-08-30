@@ -14,6 +14,43 @@
   // in front of three broad body Splats. Standard keeps the accepted four-
   // Splat Baseline.
   const BRUSH_DAB_SAMPLES = 8;
+  const VARIABLE_BRUSH_DAB_SAMPLES = 9;
+  // Always keep the three curve-body marks. Additional slots add middle
+  // paint before fine accents. Tile lists contain only active physical dabs.
+  const BRUSH_DAB_SAMPLE_PRIORITY = [5, 6, 7, 4, 1, 3, 8, 0, 2];
+
+  function brushDabSampleMask(count) {
+    const bounded = Math.max(3, Math.min(9, Math.round(Number(count) || 6)));
+    return BRUSH_DAB_SAMPLE_PRIORITY.slice(0, bounded)
+      .reduce((mask, sample) => mask | (1 << sample), 0);
+  }
+
+  function allocateBrushDabCounts(strokePlan, physicalBudget, fillBudget = false) {
+    const budget = Math.max(0, Math.floor(Number(physicalBudget) || 0));
+    if (strokePlan.length * 3 > budget) throw new Error("Brush chain budget needs at least three dabs per curve.");
+    const plan = strokePlan.map((stroke) => ({
+      ...stroke,
+      brush_dab_count: Math.max(3, Math.min(9, Math.round(Number(stroke.brush_dab_count)
+        || (3 + Math.min(6, Math.floor(clamp01(stroke.random) * 7)))))),
+    }));
+    let total = plan.reduce((sum, stroke) => sum + stroke.brush_dab_count, 0);
+    // Seed-stable ordering, no per-update randomness. Existing counts survive
+    // growth except when the final physical budget requires reconciliation.
+    const order = plan.map((stroke, index) => ({ index, random: Number(stroke.random) || 0 }))
+      .sort((a, b) => a.random - b.random || a.index - b.index);
+    const target = fillBudget ? Math.min(budget, plan.length * 9) : Math.min(total, budget);
+    while (total !== target) {
+      for (const { index } of order) {
+        if (total === target) break;
+        const delta = total < target ? 1 : -1;
+        const next = plan[index].brush_dab_count + delta;
+        if (next < 3 || next > 9) continue;
+        plan[index].brush_dab_count = next;
+        total += delta;
+      }
+    }
+    return { plan, physicalSplatCount: total };
+  }
   const STROKE_TEXTURE_STANDARD = 0;
   const STROKE_TEXTURE_FINE_BRISTLES = 1;
   const STROKE_TEXTURE_BRUSH_DABS = 2;
@@ -49,11 +86,11 @@
     if (variation <= 0) return { width: 1, length: 1 };
     if (mode === STROKE_TEXTURE_BRUSH_DABS) {
       // Stroke width is a parent-level ceiling. Preserve painterly breadth
-      // without making every physical Splat broad by keeping two hairline
-      // bristles, three middle marks, and three broad paint bodies.
-      const widthTargets = [0.06, 0.38, 0.10, 0.50, 0.28, 0.85, 1.15, 1.00];
-      const lengthTargets = [2.05, 1.34, 1.88, 1.24, 1.58, 0.84, 0.72, 0.94];
-      const index = Math.max(0, Math.min(BRUSH_DAB_SAMPLES - 1, Number(sample) || 0));
+      // without multiplying the middle marks down into a second hairline
+      // family. Keep two edge accents, three mid-width marks and three bodies.
+      const widthTargets = [0.40, 0.80, 0.60, 0.95, 0.88, 0.85, 1.15, 1.00, 0.95];
+      const lengthTargets = [2.05, 1.34, 1.88, 1.24, 1.58, 0.84, 0.72, 0.94, 0.90];
+      const index = Math.max(0, Math.min(VARIABLE_BRUSH_DAB_SAMPLES - 1, Number(sample) || 0));
       const widthJitter = 1 + 0.08 * Math.sin(
         (Number(random) || 0) * 211.1 + index * 47.3 + Number(layer) * 13.7,
       );
@@ -97,7 +134,7 @@
       const thinLongBristle = mode === STROKE_TEXTURE_BRUSH_DABS
         && (sample === 0 || sample === 2);
       const variationGuide = thinLongBristle
-        ? smoothstepRange(0.12, 0.68, edgeScore)
+        ? smoothstepRange(0.30, 0.95, edgeScore)
         : 1;
       const variation = physicalSplatScaleVariation(
         random,
@@ -133,6 +170,7 @@
         0.12 + 0.03 * load,
         0.48 + 0.04 * load,
         0.84 + 0.05 * load,
+        0.32 + 0.06 * load,
       ][sample] ?? 0.5;
       const layerSpread = 0.04 * Math.min(2, layer);
       const normalOffsets = [
@@ -144,9 +182,10 @@
         -0.06,
         0.04,
         -0.02,
+        -0.28,
       ];
       const texture = smoothstepRange(0.12, 0.65, textureScore);
-      const edge = smoothstepRange(0.12, 0.68, edgeScore);
+      const edge = smoothstepRange(0.30, 0.95, edgeScore);
       const body = sample >= 5;
       const thinLongBristle = sample === 0 || sample === 2;
       const shapeGuide = thinLongBristle ? edge : texture;
@@ -157,8 +196,8 @@
         // bristle tips. Keep their ordering but draw them into the stroke body.
         t = 0.5 + (t - 0.5) * (0.72 + shapeGuide * 0.28);
       }
-      const baseWidthFactors = [0.18, 0.17, 0.16, 0.18, 0.20, 0.78, 0.92, 0.74];
-      const baseLengthFactors = [1.05, 0.95, 1.02, 0.92, 1.18, 0.72, 0.82, 0.70];
+      const baseWidthFactors = [0.18, 0.34, 0.16, 0.44, 0.52, 0.78, 0.92, 0.74, 0.66];
+      const baseLengthFactors = [1.05, 0.95, 1.02, 0.92, 1.18, 0.72, 0.82, 0.70, 0.80];
       const flatNormalOffsets = [0.16, 0.08, -0.16, -0.08, 0];
       const widthFactor = body
         ? 0.88 + (baseWidthFactors[sample] - 0.88) * texture
@@ -367,6 +406,7 @@
         data.textureGuidedDabs,
       );
       for (let sample = 0; sample < data.sampleCount; sample += 1) {
+        if (data.sampleMasks && !(data.sampleMasks[index] & (1 << sample))) continue;
         const profile = chainSampleProfile(
           data.strokeTextureMode,
           layer,
@@ -393,6 +433,15 @@
     return {
       physical_splat_count: halfShort.length,
       variation_percent: data.splatSizeVariation * 100,
+      // Nominal full short-axis widths, before occlusion; excludes backcoat.
+      full_short_width_bins_px: {
+        below_2: halfShort.filter((value) => value * 2 < 2).length,
+        from_2_to_4: halfShort.filter((value) => value * 2 >= 2 && value * 2 < 4).length,
+        from_4_to_8: halfShort.filter((value) => value * 2 >= 4 && value * 2 < 8).length,
+        from_8_to_16: halfShort.filter((value) => value * 2 >= 8 && value * 2 < 16).length,
+        at_least_16: halfShort.filter((value) => value * 2 >= 16).length,
+        at_minimum: halfShort.filter((value) => value <= 0.380001).length,
+      },
       half_short_px: summarizeScaleValues(halfShort),
       half_long_px: summarizeScaleValues(halfLong),
       aspect_ratio: summarizeScaleValues(aspect),
@@ -521,9 +570,11 @@
     const fixedOpacity = Number.isFinite(Number(options.fixedOpacity))
       ? Math.max(0.05, Math.min(0.995, Number(options.fixedOpacity)))
       : null;
+    const variableBrushDabs = brushDabs && options.variableBrushDabs === true;
     const sampleCount = brushDabs
-      ? BRUSH_DAB_SAMPLES
+      ? variableBrushDabs ? VARIABLE_BRUSH_DAB_SAMPLES : BRUSH_DAB_SAMPLES
       : bristleBundle ? BRISTLE_BUNDLE_SAMPLES : CURVE_SAMPLES;
+    const sampleMasks = new Uint16Array(strokeCount);
     const params = new Float32Array(strokeCount * PARAM_STRIDE);
     const flowUnderpaintFlags = new Uint8Array(strokeCount);
     const chainUnderpaintFlags = new Uint8Array(strokeCount);
@@ -532,6 +583,8 @@
       const base = index * PARAM_STRIDE;
       flowUnderpaintFlags[index] = stroke.underpaint_splat === true ? 1 : 0;
       chainUnderpaintFlags[index] = stroke.underpaint_chain === true ? 1 : 0;
+      sampleMasks[index] = flowUnderpaintFlags[index] || chainUnderpaintFlags[index] ? 1
+        : variableBrushDabs ? brushDabSampleMask(stroke.brush_dab_count) : (1 << sampleCount) - 1;
       params[base] = Number(stroke.start_x);
       params[base + 1] = Number(stroke.start_y);
       params[base + 2] = Number(stroke.control_1_x);
@@ -714,6 +767,7 @@
           ? Math.max(1, Math.min(8, Number(options.frontWidthLearningScale) || 1)) : 1;
         const widthCeiling = Math.min(permittedWidth, widthPx + widthTravel * widthLearningScale + 1e-3);
         for (let sample = 0; sample < sampleCount; sample += 1) {
+          if (!(sampleMasks[index] & (1 << sample))) continue;
           const profile = chainSampleProfile(
             strokeTextureMode,
             params[base + 14],
@@ -836,12 +890,18 @@
     const detailParentCount = strokeCount - underpaintParentCount;
     const underpaintSplatCount = underpaintParentCount;
     const physicalSplatCount = curveSplatChain
-      ? underpaintSplatCount + detailParentCount * sampleCount
+      ? variableBrushDabs
+        ? sampleMasks.reduce((sum, mask) => {
+            for (let active = mask; active; active &= active - 1) sum += 1;
+            return sum;
+          }, 0)
+        : underpaintSplatCount + detailParentCount * sampleCount
       : strokeCount;
     const initialPhysicalSplatScaleStats = curveSplatChain
       ? physicalSplatScaleStats(params, {
           strokeCount,
           sampleCount,
+          sampleMasks,
           strokeTextureMode,
           textureGuidedDabs,
           splatSizeVariation,
@@ -872,6 +932,8 @@
       pixelCandidatePairs,
       physicalSplatCount,
       sampleCount,
+      sampleMasks,
+      variableBrushDabs,
       bristleBundle,
       brushDabs,
       textureGuidedDabs,
@@ -1012,16 +1074,17 @@ fn chain_splat_width_variation(stroke: u32, sample: u32) -> f32 {
   let noise = sin(random * 211.1 + f32(sample) * 47.3 + layer * 13.7);
   if (chain_uses_brush_dabs()) {
     if (config.texture_guided_dabs > 0.5 && (sample == 0u || sample == 2u)) {
-      amount *= smoothstep(0.12, 0.68, chain_edge_score(stroke));
+      amount *= smoothstep(0.30, 0.95, chain_edge_score(stroke));
     }
     var family_scale = 1.00;
-    if (sample == 0u) { family_scale = 0.06; }
-    else if (sample == 1u) { family_scale = 0.38; }
-    else if (sample == 2u) { family_scale = 0.10; }
-    else if (sample == 3u) { family_scale = 0.50; }
-    else if (sample == 4u) { family_scale = 0.28; }
+    if (sample == 0u) { family_scale = 0.40; }
+    else if (sample == 1u) { family_scale = 0.80; }
+    else if (sample == 2u) { family_scale = 0.60; }
+    else if (sample == 3u) { family_scale = 0.95; }
+    else if (sample == 4u) { family_scale = 0.88; }
     else if (sample == 5u) { family_scale = 0.85; }
     else if (sample == 6u) { family_scale = 1.15; }
+    else if (sample == 8u) { family_scale = 0.95; }
     let jitter = 1.0 + 0.08 * noise;
     return max(0.05, mix(1.0, family_scale * jitter, amount));
   }
@@ -1035,7 +1098,7 @@ fn chain_splat_length_variation(stroke: u32, sample: u32) -> f32 {
   let noise = sin(random * 173.9 + f32(sample) * 29.7 + layer * 7.9 + 1.7);
   if (chain_uses_brush_dabs()) {
     if (config.texture_guided_dabs > 0.5 && (sample == 0u || sample == 2u)) {
-      amount *= smoothstep(0.12, 0.68, chain_edge_score(stroke));
+      amount *= smoothstep(0.30, 0.95, chain_edge_score(stroke));
     }
     var family_scale = 0.94;
     if (sample == 0u) { family_scale = 2.05; }
@@ -1045,6 +1108,7 @@ fn chain_splat_length_variation(stroke: u32, sample: u32) -> f32 {
     else if (sample == 4u) { family_scale = 1.58; }
     else if (sample == 5u) { family_scale = 0.84; }
     else if (sample == 6u) { family_scale = 0.72; }
+    else if (sample == 8u) { family_scale = 0.90; }
     let jitter = 1.0 + 0.06 * noise;
     return max(0.35, mix(1.0, family_scale * jitter, amount));
   }
@@ -1067,9 +1131,10 @@ fn chain_sample_t(stroke: u32, sample: u32) -> f32 {
     else if (sample == 4u) { dab_t = 0.47 + 0.06 * load; }
     else if (sample == 5u) { dab_t = 0.12 + 0.03 * load; }
     else if (sample == 6u) { dab_t = 0.48 + 0.04 * load; }
+    else if (sample == 8u) { dab_t = 0.32 + 0.06 * load; }
     if (config.texture_guided_dabs > 0.5) {
       let texture = smoothstep(0.12, 0.65, chain_texture_score(stroke));
-      let edge = smoothstep(0.12, 0.68, chain_edge_score(stroke));
+      let edge = smoothstep(0.30, 0.95, chain_edge_score(stroke));
       let shape_guide = select(texture, edge, sample == 0u || sample == 2u);
       if (sample < 5u) {
         dab_t = 0.5 + (dab_t - 0.5) * (0.72 + shape_guide * 0.28);
@@ -1098,9 +1163,10 @@ fn chain_normal_offset_factor(stroke: u32, sample: u32) -> f32 {
   else if (sample == 4u) { factor = 0.03; }
   else if (sample == 5u) { factor = -0.06; }
   else if (sample == 6u) { factor = 0.04; }
+  else if (sample == 8u) { factor = -0.28; }
   if (sample < 5u && config.texture_guided_dabs > 0.5) {
     let texture = smoothstep(0.12, 0.65, chain_texture_score(stroke));
-    let edge = smoothstep(0.12, 0.68, chain_edge_score(stroke));
+    let edge = smoothstep(0.30, 0.95, chain_edge_score(stroke));
     let shape_guide = select(texture, edge, sample == 0u || sample == 2u);
     var flat_factor = 0.0;
     if (sample == 0u) { flat_factor = 0.16; }
@@ -1119,16 +1185,17 @@ fn chain_width_factor(stroke: u32, sample: u32) -> f32 {
   } else if (chain_uses_brush_dabs()) {
     factor = 0.74;
     if (sample == 0u) { factor = 0.18; }
-    else if (sample == 1u) { factor = 0.17; }
+    else if (sample == 1u) { factor = 0.34; }
     else if (sample == 2u) { factor = 0.16; }
-    else if (sample == 3u) { factor = 0.18; }
-    else if (sample == 4u) { factor = 0.20; }
+    else if (sample == 3u) { factor = 0.44; }
+    else if (sample == 4u) { factor = 0.52; }
     else if (sample == 5u) { factor = 0.78; }
     else if (sample == 6u) { factor = 0.92; }
+    else if (sample == 8u) { factor = 0.66; }
   }
   if (chain_uses_brush_dabs() && config.texture_guided_dabs > 0.5) {
     let texture = smoothstep(0.12, 0.65, chain_texture_score(stroke));
-    let edge = smoothstep(0.12, 0.68, chain_edge_score(stroke));
+    let edge = smoothstep(0.30, 0.95, chain_edge_score(stroke));
     let shape_guide = select(texture, edge, sample == 0u || sample == 2u);
     if (sample < 5u) {
       factor = mix(0.62, factor, shape_guide);
@@ -1150,10 +1217,11 @@ fn chain_length_factor(stroke: u32, sample: u32) -> f32 {
     else if (sample == 4u) { factor = 1.18; }
     else if (sample == 5u) { factor = 0.72; }
     else if (sample == 6u) { factor = 0.82; }
+    else if (sample == 8u) { factor = 0.80; }
   }
   if (chain_uses_brush_dabs() && config.texture_guided_dabs > 0.5) {
     let texture = smoothstep(0.12, 0.65, chain_texture_score(stroke));
-    let edge = smoothstep(0.12, 0.68, chain_edge_score(stroke));
+    let edge = smoothstep(0.30, 0.95, chain_edge_score(stroke));
     let shape_guide = select(texture, edge, sample == 0u || sample == 2u);
     if (sample < 5u) {
       factor = mix(1.15, factor, shape_guide);
@@ -2532,7 +2600,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         coverage_backcoat_geometry_trainable: false,
         coverage_backcoat_pigment_trainable: false,
         representation: curveSplatChain ? "curve-splat-chain" : "fused-ribbon",
-        micro_splats_per_chain: curveSplatChain ? data.sampleCount : 0,
+        micro_splats_per_chain: curveSplatChain ? data.variableBrushDabs ? null : data.sampleCount : 0,
+        variable_brush_dabs: data.variableBrushDabs,
+        maximum_chain_slots: data.sampleCount,
         bristle_bundle: curveSplatChain && data.bristleBundle,
         brush_dabs: curveSplatChain && data.brushDabs,
         texture_guided_dabs: curveSplatChain && data.textureGuidedDabs,
@@ -2779,6 +2849,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
   global.Image2SplatPaintFlowRibbonTrainer = Object.freeze({
     prepareTrainingData,
+    allocateBrushDabCounts,
     widthTrainingSettings,
     train,
     constants: Object.freeze({
@@ -2787,6 +2858,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
       CURVE_SAMPLES,
       BRISTLE_BUNDLE_SAMPLES,
       BRUSH_DAB_SAMPLES,
+      VARIABLE_BRUSH_DAB_SAMPLES,
       STROKE_TEXTURE_STANDARD,
       STROKE_TEXTURE_FINE_BRISTLES,
       STROKE_TEXTURE_BRUSH_DABS,

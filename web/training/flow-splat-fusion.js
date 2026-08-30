@@ -163,6 +163,10 @@ async function trainFlowSplatFusion(run) {
   const flowBrushDabs = flowStrokeTexture === "brush-dabs";
   const flowTextureGuidedDabs = flowBrushDabs
     && flowQaParams.get("flow-texture-guided-dabs") !== "0";
+  const flowEdgeGuidedAccents = trainingUiAdapter.controls.flowSplatFusionEdgeAccents.checked;
+  const variableBrushDabs = flowBrushDabs
+    && trainingUiAdapter.controls.flowSplatFusionVariableLinks.checked;
+  document.documentElement.dataset.flowEdgeGuidedAccents = String(flowEdgeGuidedAccents);
   trainingUiAdapter.controls.flowSplatFusionStrokeTexture.value = flowStrokeTexture;
   // Adaptive split/merge is the product Baseline. The retired fixed-plan path
   // is preserved only in the local archive, not as a runtime mode.
@@ -256,6 +260,8 @@ async function trainFlowSplatFusion(run) {
     ? flowQaParams.get("flow-coverage-backcoat") !== "0"
     : trainingUiAdapter.controls.flowSplatUnderpainting.checked;
   trainingUiAdapter.controls.flowSplatUnderpainting.checked = splatUnderpainting;
+  const backcoatFromP1 = splatUnderpainting
+    && trainingUiAdapter.controls.flowSplatBackcoatFromP1.checked;
   const defaultUnderpaintPercent = 10;
   const rawUnderpaintPercent = Number(trainingUiAdapter.controls.flowSplatUnderpaintPercent.value);
   const underpaintPercent = Math.max(0, Math.min(50, Number.isFinite(rawUnderpaintPercent)
@@ -267,7 +273,7 @@ async function trainFlowSplatFusion(run) {
       )))
     : 0;
   const detailSplatBudget = Math.max(1, requestedSplatBudget - underpaintSplatBudget);
-  const detailParentBudget = Math.max(1, Math.floor(detailSplatBudget / splatsPerChain));
+  const detailParentBudget = Math.max(1, Math.floor(detailSplatBudget / (variableBrushDabs ? 6 : splatsPerChain)));
   const rawMaximumRibbonArcPercent = Number(
     trainingUiAdapter.controls.flowSplatFusionMaxArcPercent.value,
   );
@@ -311,6 +317,7 @@ async function trainFlowSplatFusion(run) {
     planOnly: true,
     maximumRibbonArcFraction: maximumRibbonArcPercent / 100,
     textureGuidedAllocation: flowTextureGuidedDabs,
+    edgeGuidedAccents: flowEdgeGuidedAccents,
     regionSeedInitializer: rectangleSeeds ? flowRectangleSeedCandidates : undefined,
   });
   // Stroke width is a global ceiling for topology-level parent widths. It must
@@ -319,12 +326,20 @@ async function trainFlowSplatFusion(run) {
   // front parents before their physical Brush-dab profiles were evaluated.
   const strokeWidthMaximumFactor = strokeWidthPercent / 100;
   const reference = unscaledReference;
+  if (variableBrushDabs) {
+    reference.strokePlan = Image2SplatPaintFlowRibbonTrainer.allocateBrushDabCounts(
+      reference.strokePlan, detailSplatBudget, true,
+    ).plan;
+  }
   // Standard and Fine use anisotropic Gaussian Splats. Brush dabs keeps the
   // same curve/topology optimizer but uses compact opaque-interior Brush
   // Splats in both forward and backward. The old continuous-ribbon path
   // remains dormant for checkpoint reproduction, not as a selectable mode.
   const representation = "curve-splat-chain";
-  const detailPhysicalSplatCount = reference.strokePlan.length * splatsPerChain;
+  const countDetailSplats = (plan) => variableBrushDabs
+    ? plan.reduce((sum, stroke) => sum + stroke.brush_dab_count, 0)
+    : plan.length * splatsPerChain;
+  const detailPhysicalSplatCount = countDetailSplats(reference.strokePlan);
   const displayedSplatCount = underpaintSplatBudget + detailPhysicalSplatCount;
   const primitiveLabel = "splats";
   const chainQuadBackward = flowQaParams.get("chain-quad-backward") !== "0";
@@ -426,8 +441,8 @@ async function trainFlowSplatFusion(run) {
     progressiveParentCounts[0],
     flowTopologyOptions,
   );
-  const initialDisplayedSplatCount = progressiveParentCounts[0] * splatsPerChain
-    + (progressiveParentCounts.length === 1 ? underpaintSplatBudget : 0);
+  const initialDisplayedSplatCount = countDetailSplats(flowTopologyState.plan)
+    + (backcoatFromP1 || progressiveParentCounts.length === 1 ? underpaintSplatBudget : 0);
 
   state.running = true;
   state.paused = false;
@@ -451,6 +466,7 @@ async function trainFlowSplatFusion(run) {
     splat_underpainting: splatUnderpainting,
     splat_underpainting_percent: underpaintPercent,
     coverage_backcoat: splatUnderpainting,
+    coverage_backcoat_from_p1: backcoatFromP1,
     coverage_backcoat_percent: underpaintPercent,
     coverage_backcoat_kernel: splatUnderpainting
       ? "compact-quartic-flat-interior-v1"
@@ -459,7 +475,9 @@ async function trainFlowSplatFusion(run) {
     coverage_backcoat_pigment_trainable: false,
     preview_refresh: previewRefresh,
     fused_micro_splats_per_ribbon: 0,
-    micro_splats_per_chain: splatsPerChain,
+    micro_splats_per_chain: variableBrushDabs ? null : splatsPerChain,
+    flow_variable_brush_links: variableBrushDabs,
+    flow_brush_links_range: variableBrushDabs ? [3, 9] : [splatsPerChain, splatsPerChain],
     representation,
     flow_layer_count: splatUnderpainting ? 4 : 3,
     underpaint_mode: splatUnderpainting
@@ -475,7 +493,7 @@ async function trainFlowSplatFusion(run) {
     flow_stroke_width_percent: strokeWidthPercent,
     flow_stroke_width_mode: "global-parent-width-ceiling",
     flow_splat_size_variation_percent: splatSizeVariationPercent,
-    flow_splat_size_variation_mode: "flow-xdog-thin-bristle-moderate-body-scale-families",
+    flow_splat_size_variation_mode: "balanced-physical-brush-width-families",
     flow_position_learning_rate: flowPositionLearningRate,
     flow_max_position_delta_px: flowMaxPositionDelta,
     flow_stroke_motion_coherence: flowStrokeMotionCoherence,
@@ -533,6 +551,8 @@ async function trainFlowSplatFusion(run) {
   document.documentElement.dataset.flowStrokeTexture = flowStrokeTexture;
   document.documentElement.dataset.flowBristleBundle = String(flowBristleBundle);
   document.documentElement.dataset.flowBrushDabs = String(flowBrushDabs);
+  document.documentElement.dataset.flowVariableBrushLinks = String(variableBrushDabs);
+  document.documentElement.dataset.flowBackcoatFromP1 = String(backcoatFromP1);
   document.documentElement.dataset.flowTextureGuidedDabs = String(flowTextureGuidedDabs);
   document.documentElement.dataset.flowTextureGuideSummary = JSON.stringify(
     reference.metadata.texture_guide || null,
@@ -663,6 +683,7 @@ async function trainFlowSplatFusion(run) {
     strokeMotionCoherence: flowStrokeMotionCoherence,
     bristleBundle: flowBristleBundle,
     brushDabs: flowBrushDabs,
+    variableBrushDabs,
     textureGuidedDabs: flowTextureGuidedDabs,
     splatSizeVariation: splatSizeVariationPercent / 100,
     widthAnchor: 0.0008,
@@ -685,9 +706,12 @@ async function trainFlowSplatFusion(run) {
     const optimizerTrace = [];
     document.documentElement.dataset.flowOptimizerTrace = "[]";
     let finalDetailPlan = flowTopologyState.plan;
+    // P1 underpainting covers the canvas without inflating every curve.
+    // It participates in the loss; keep final-stage-only as an OFF comparison
+    // for the quality tradeoff. P1 coverage is the user's preferred default.
     let finalUnderpaint = Image2SplatPaintFlowPaintReference.createSplatUnderpaintPlan(
       trainingImage,
-      { count: 0, representation, seed: 240825 },
+      { count: backcoatFromP1 ? underpaintSplatBudget : 0, representation, seed: 240825 },
     );
     for (let stage = 0; stage < progressiveParentCounts.length; stage += 1) {
       const finalStage = stage === progressiveParentCounts.length - 1;
@@ -698,7 +722,9 @@ async function trainFlowSplatFusion(run) {
       if (stage > 0) {
         flowTopologyState = Image2SplatPaintFlowStrokeTopology.evolve(
           flowTopologyState,
-          previousStage?.trainingState.topologyParams,
+          previousStage?.trainingState.topologyParams.subarray(
+            previousStage.metadata.underpaint_parent_count * Image2SplatPaintFlowRibbonTrainer.constants.PARAM_STRIDE,
+          ),
           trainingImage,
           previousStage?.trainingState.renderedLinearRgba,
           detailParentCount,
@@ -720,22 +746,24 @@ async function trainFlowSplatFusion(run) {
           flowTopologyState.totals.residualMoves,
         );
       }
+      if (variableBrushDabs) {
+        flowTopologyState.plan = Image2SplatPaintFlowRibbonTrainer.allocateBrushDabCounts(
+          flowTopologyState.plan, detailSplatBudget, finalStage,
+        ).plan;
+      }
       const detailPlan = flowTopologyState.plan;
       finalDetailPlan = detailPlan;
-      if (finalStage && splatUnderpainting) {
+      if (finalStage && splatUnderpainting && !backcoatFromP1) {
         finalUnderpaint = Image2SplatPaintFlowPaintReference.createSplatUnderpaintPlan(
-          trainingImage,
-          {
-            count: underpaintSplatBudget,
-            representation,
-            seed: 240825,
+          trainingImage, {
+            count: underpaintSplatBudget, representation, seed: 240825,
             residualRender: previousStage?.trainingState.renderedLinearRgba,
           },
         );
       }
-      const rearPlan = finalStage ? finalUnderpaint.strokePlan : [];
+      const rearPlan = finalUnderpaint.strokePlan;
       const trainingStrokePlan = [...rearPlan, ...detailPlan];
-      const stagePhysicalSplatCount = rearPlan.length + detailParentCount * splatsPerChain;
+      const stagePhysicalSplatCount = rearPlan.length + countDetailSplats(detailPlan);
       const currentCurriculum = flowTopologyState.events.at(-1) || {
         curriculum_mean_half_width_px: flowTopologyState.initialCurriculum.meanHalfWidthPx,
       };
@@ -793,6 +821,8 @@ async function trainFlowSplatFusion(run) {
         width_drift_px: stageResult.metadata.mean_width_drift_px,
         rgb_l1: stageResult.metadata.rgb_l1_signal,
         psnr: stageResult.metadata.psnr_signal_db,
+        background_exposure: stageResult.metadata.coverage_stats.background_exposure_count,
+        splat_count: stagePhysicalSplatCount,
       });
       document.documentElement.dataset.flowOptimizerTrace = JSON.stringify(optimizerTrace);
       assertTrainingRun(run);
@@ -829,6 +859,15 @@ async function trainFlowSplatFusion(run) {
     result.metadata.flow_skipped_iterations = growthSchedule.skippedIterations;
     result.metadata.flow_iteration_stride = FLOW_ITERATION_STRIDE;
     result.metadata.flow_initialization = flowInitialization;
+    result.metadata.flow_edge_guided_accents = flowEdgeGuidedAccents;
+    result.metadata.coverage_backcoat_from_p1 = backcoatFromP1;
+    result.metadata.flow_variable_brush_links = variableBrushDabs;
+    result.metadata.flow_brush_links_histogram = variableBrushDabs
+      ? Array.from({ length: 7 }, (_, index) => ({
+          dabs: index + 3,
+          curves: finalDetailPlan.filter((stroke) => stroke.brush_dab_count === index + 3).length,
+        })) : [{ dabs: splatsPerChain, curves: finalDetailPlan.length }];
+    document.documentElement.dataset.flowBrushLinksHistogram = JSON.stringify(result.metadata.flow_brush_links_histogram);
     result.metadata.flow_optimizer_trace = optimizerTrace;
     result.metadata.flow_width_training_phases = true;
     result.metadata.flow_width_training_phase = state.metrics.flow_width_training_phase;
@@ -852,7 +891,7 @@ async function trainFlowSplatFusion(run) {
     result.metadata.flow_brush_dabs = flowBrushDabs;
     result.metadata.flow_splat_size_variation_percent = splatSizeVariationPercent;
     result.metadata.flow_splat_size_variation_mode =
-      "flow-xdog-thin-bristle-moderate-body-scale-families";
+      "balanced-physical-brush-width-families";
     result.metadata.flow_texture_guided_dabs = flowTextureGuidedDabs;
     result.metadata.flow_texture_guide_summary = reference.metadata.texture_guide;
     result.metadata.flow_initial_mean_parent_texture_score =
@@ -982,6 +1021,9 @@ async function trainFlowSplatFusion(run) {
     );
     document.documentElement.dataset.flowFinalParameterHash = String(
       result.metadata.final_parameter_hash_fnv1a32,
+    );
+    document.documentElement.dataset.flowPhysicalScaleStats = JSON.stringify(
+      result.metadata.final_physical_splat_scale_stats,
     );
     document.documentElement.dataset.flowControlPointRmsDriftPx = String(
       result.metadata.control_point_rms_drift_px,

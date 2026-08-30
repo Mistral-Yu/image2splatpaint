@@ -388,6 +388,7 @@
     height,
     fieldX = null,
     fieldY = null,
+    edgeGuidedAccents = true,
   ) {
     const count = width * height;
     const luminanceSquared = new Float32Array(count);
@@ -460,9 +461,9 @@
     const edgeLow = sampledQuantile(edgeRaw, 0.60);
     const edgeHigh = sampledQuantile(edgeRaw, 0.95);
     const edgeRange = edgeHigh - edgeLow;
-    const flowXdog = buildFlowXdogGuide(
+    const flowXdog = edgeGuidedAccents ? buildFlowXdogGuide(
       luminance, fieldX, fieldY, edgeCoherence, width, height,
-    );
+    ) : null;
     const score = new Float32Array(count);
     const edgeScore = new Float32Array(count);
     const dabVisibility = new Float32Array(count);
@@ -483,10 +484,10 @@
       // Preserve every established coherent colour edge, then add connected
       // Flow-XDoG evidence only in the remaining score range. Texture energy
       // never activates the two thin bristles by itself.
-      edgeScore[index] = clamp01(
+      edgeScore[index] = edgeGuidedAccents ? clamp01(
         coherentEdgeScore
         + (1 - coherentEdgeScore) * flowXdog.score[index] * 0.78,
-      );
+      ) : 0;
       darkFlat[index] = flatDarkness;
       // Darkness alone never removes a dab. It only strengthens suppression
       // when the same source area is also locally flat.
@@ -511,8 +512,8 @@
         edge_raw_p60: edgeLow,
         edge_raw_p95: edgeHigh,
         mean_edge_score: edgeScoreTotal / Math.max(1, count),
-        edge_score_mode: "coherent-colour-plus-flow-xdog-78",
-        flow_xdog: flowXdog.summary,
+        edge_score_mode: edgeGuidedAccents ? "coherent-colour-plus-flow-xdog-78" : "disabled",
+        flow_xdog: flowXdog?.summary || null,
         dark_flat_pixel_fraction: darkFlatPixels / Math.max(1, count),
       },
     };
@@ -595,6 +596,7 @@
           height,
           fieldX,
           fieldY,
+          options.edgeGuidedAccents !== false,
         )
       : null;
     return { linearRgb, luminance, fieldX, fieldY, confidence, edgeStrength, textureGuide };
@@ -1314,6 +1316,7 @@
     const textureGuidedAllocation = options.textureGuidedAllocation === true;
     const analysis = makeAnalysis(image, width, height, {
       textureGuide: textureGuidedAllocation,
+      edgeGuidedAccents: options.edgeGuidedAccents !== false,
     });
     const outputLinear = planOnly
       ? null

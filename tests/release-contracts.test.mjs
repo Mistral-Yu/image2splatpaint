@@ -164,11 +164,11 @@ test("Flow Brush Fusion is the third public Algorithm and legacy Brush is a Rect
   assert.match(html, /id="flowSplatFusionFrontWidthMax"[^>]*value="300"/);
   assert.match(html, /id="flowSplatFusionFrontWidthLearning"[^>]*value="400"/);
   assert.doesNotMatch(html, /flowSplatFusionInitialOpacity(?:Min|Max)/);
-  assert.match(html, /value="brush-dabs" selected>Flow Brush \(8-Splat Baseline\)/);
+  assert.match(html, /value="brush-dabs" selected>Flow Brush<\/option>/);
   assert.match(html, /value="baseline">Classic Gaussian \(4-Splat\)/);
   assert.match(html, /value="fine-bristles">Fine bristles \(Gaussian\)/);
-  assert.match(controls, /The Baseline uses eight compact Brush Splats per curved stroke/);
-  assert.match(controls, /opaque interior and a feathered contour/);
+  assert.match(controls, /Use eight dabs per curve or try variable 3–9 links/);
+  assert.match(controls, /opaque interior and feathered edges/);
   assert.match(html, /value="balanced" selected>Balanced motion/);
   assert.match(html, /id="flowSplatFusionWidthPercent"[^>]*value="300"/);
   assert.match(html, /id="flowSplatFusionSplatSizeVariation"[^>]*value="40"/);
@@ -182,7 +182,7 @@ test("Flow Brush Fusion is the third public Algorithm and legacy Brush is a Rect
   assert.doesNotMatch(controls, /syncAlgorithmTrainingPreset|>Ribbons</);
   assert.match(controls, /finalSplatCountLabel\.textContent = "Max splats"/);
   assert.match(controls, /Physical Splat budget\. Detail uses complete stroke chains/);
-  assert.match(controls, /fixed compact backcoat closes gaps without changing standard alpha/);
+  assert.match(controls, /Backcoat from P1 is on by default to fill the canvas early, but can reduce final detail quality/);
   assert.match(controls, /trainSize\.max = flowSelected \? "512"/);
   assert.match(integration, /trainFlowSplatFusion/);
   assert.match(integration, /: "brush-dabs";/);
@@ -209,7 +209,7 @@ test("Flow Brush Fusion is the third public Algorithm and legacy Brush is a Rect
   assert.match(integration, /const strokeWidthMaximumFactor = strokeWidthPercent \/ 100/);
   assert.match(integration, /frontWidthMaximumFactor: Math\.min\(/);
   assert.match(integration, /flow_stroke_width_mode: "global-parent-width-ceiling"/);
-  assert.match(integration, /flow-xdog-thin-bristle-moderate-body-scale-families/);
+  assert.match(integration, /balanced-physical-brush-width-families/);
   assert.doesNotMatch(integration, /half_width_px: Math\.max\(0\.25, Number\(stroke\.half_width_px\) \* strokeWidthScale\)/);
   assert.match(integration, /frontWidthLearningScale,/);
   assert.match(integration, /"adaptive-brush-dab-texture-guided"/);
@@ -239,7 +239,7 @@ test("Flow Brush Fusion is the third public Algorithm and legacy Brush is a Rect
   assert.match(ribbonTrainer, /let feather = 0\.16/);
   assert.match(ribbonTrainer, /if \(chain_uses_brush_dabs\(\)\) \{ return 1\.0; \}/);
   assert.match(ribbonTrainer, /smoothstepRange\(0\.12, 0\.65, textureScore\)/);
-  assert.match(ribbonTrainer, /smoothstepRange\(0\.12, 0\.68, edgeScore\)/);
+  assert.match(ribbonTrainer, /smoothstepRange\(0\.30, 0\.95, edgeScore\)/);
   assert.match(ribbonTrainer, /0\.72 \+ shapeGuide \* 0\.28/);
   assert.match(ribbonTrainer, /flatNormalOffsets = \[0\.16, 0\.08, -0\.16, -0\.08, 0\]/);
   assert.match(ribbonTrainer, /mix\(0\.62, factor, shape_guide\)/);
@@ -252,14 +252,14 @@ test("Flow Brush Fusion is the third public Algorithm and legacy Brush is a Rect
   assert.match(ribbonTrainer, /fn chain_width_factor/);
   assert.match(flowReference, /function buildFlowXdogGuide/);
   assert.match(flowReference, /algorithm: "linear-srgb-flow-xdog-guide"/);
-  assert.match(flowReference, /edge_score_mode: "coherent-colour-plus-flow-xdog-78"/);
+  assert.match(flowReference, /edge_score_mode: edgeGuidedAccents \? "coherent-colour-plus-flow-xdog-78" : "disabled"/);
   assert.match(flowReference, /normalDog\[index\] = Math\.abs/);
   assert.match(flowReference, /coherentEdgeScore[^]*\+ \(1 - coherentEdgeScore\) \* flowXdog\.score\[index\] \* 0\.78/);
   assert.match(ribbonTrainer, /splat_size_variation: f32/);
   assert.match(ribbonTrainer, /fn chain_splat_width_variation/);
   assert.match(ribbonTrainer, /fn chain_splat_length_variation/);
   assert.match(ribbonTrainer, /sample == 0u \|\| sample == 2u/);
-  assert.match(ribbonTrainer, /sample == 0u\) \{ family_scale = 0\.06/);
+  assert.match(ribbonTrainer, /sample == 0u\) \{ family_scale = 0\.40/);
   assert.match(ribbonTrainer, /sample == 2u\) \{ family_scale = 1\.88/);
   assert.match(ribbonTrainer, /f32\(136, Math\.max\(0, Math\.min\(1, Number\(options\.splatSizeVariation\)/);
   assert.match(ribbonTrainer, /fn chain_pigment_scale/);

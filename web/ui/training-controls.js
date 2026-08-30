@@ -119,8 +119,11 @@ function setInputControlsDisabled(disabled) {
     els.flowSplatFusionColorAnchor,
     els.flowSplatFusionWidthPercent,
     els.flowSplatFusionSplatSizeVariation,
+    els.flowSplatFusionEdgeAccents,
+    els.flowSplatFusionVariableLinks,
     els.flowSplatFusionMovementLimit,
     els.flowSplatUnderpainting,
+    els.flowSplatBackcoatFromP1,
     els.flowSplatUnderpaintPercent,
     els.flowSplatFusionMaxArcPercent,
   ]) {
@@ -159,7 +162,7 @@ function syncAlgorithmRequirements() {
   document.documentElement.dataset.flowSplatFusion = String(flowSelected);
   els.flowSplatFusionPanelSummary.textContent = "Flow Brush Fusion settings";
   els.flowSplatFusionPanelNote.textContent =
-    "Layered paint Algorithm. The Baseline uses eight compact Brush Splats per curved stroke, with an opaque interior and a feathered contour. Textured regions receive more bundles, while two thin-long bristles follow a Linear-sRGB Flow-XDoG contour guide. Classic Gaussian preserves the previous four-Splat mode for comparison. The fixed compact backcoat closes gaps without changing standard alpha. Training grows, moves, splits, and merges strokes from broad shapes toward shorter detail.";
+    "Layered curved Brush Splats with an opaque interior and feathered edges. Edge-guided fine strokes are off by default. Use eight dabs per curve or try variable 3–9 links. Training grows, moves, splits, and merges strokes. Backcoat from P1 is on by default to fill the canvas early, but can reduce final detail quality.";
   els.initialSplatCount.closest("label").classList.toggle("flow-hidden", flowSelected);
   els.initialSplatCountLabel.textContent = "Initial splats";
   els.finalSplatCountLabel.textContent = "Max splats";
@@ -193,8 +196,11 @@ function syncAlgorithmRequirements() {
   els.flowSplatFusionFrontWidthLearning.disabled = state.running || !flowSelected;
   els.flowSplatFusionWidthPercent.disabled = state.running || !flowSelected;
   els.flowSplatFusionSplatSizeVariation.disabled = state.running || !flowSelected;
+  els.flowSplatFusionEdgeAccents.disabled = state.running || !flowSelected;
+  els.flowSplatFusionVariableLinks.disabled = state.running || !flowSelected;
   els.flowSplatFusionMovementLimit.disabled = state.running || !flowSelected;
   els.flowSplatUnderpainting.disabled = state.running || !flowSelected;
+  els.flowSplatBackcoatFromP1.disabled = state.running || !flowSelected || !els.flowSplatUnderpainting.checked;
   els.flowSplatUnderpaintPercent.disabled =
     state.running || !flowSelected || !els.flowSplatUnderpainting.checked;
   els.flowSplatFusionMaxArcLabel.hidden = false;
