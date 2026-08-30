@@ -263,6 +263,8 @@ async function trainFlowSplatFusion(run) {
   const backcoatFromP1 = splatUnderpainting
     && trainingUiAdapter.controls.flowSplatBackcoatFromP1.checked;
   const defaultUnderpaintPercent = 10;
+  const backcoatSizeVariation = Math.max(0, Math.min(75,
+    Number(trainingUiAdapter.controls.flowSplatBackcoatSizeVariation.value) || 0)) / 100;
   const rawUnderpaintPercent = Number(trainingUiAdapter.controls.flowSplatUnderpaintPercent.value);
   const underpaintPercent = Math.max(0, Math.min(50, Number.isFinite(rawUnderpaintPercent)
     ? rawUnderpaintPercent
@@ -676,6 +678,9 @@ async function trainFlowSplatFusion(run) {
     },
   });
   const trainerOptions = {
+    alternateShapeColor: flowQaParams.has("flow-alternate-shape-color")
+      ? flowQaParams.get("flow-alternate-shape-color") === "1"
+      : strokeOptimization !== "stable",
     colorAnchor,
     geometryAnchor: flowGeometryAnchor,
     positionLearningRate: flowPositionLearningRate,
@@ -705,13 +710,15 @@ async function trainFlowSplatFusion(run) {
     let completedStages = 0;
     const optimizerTrace = [];
     document.documentElement.dataset.flowOptimizerTrace = "[]";
+    let previousDetailPlan = null;
     let finalDetailPlan = flowTopologyState.plan;
     // P1 underpainting covers the canvas without inflating every curve.
     // It participates in the loss; keep final-stage-only as an OFF comparison
     // for the quality tradeoff. P1 coverage is the user's preferred default.
     let finalUnderpaint = Image2SplatPaintFlowPaintReference.createSplatUnderpaintPlan(
       trainingImage,
-      { count: backcoatFromP1 ? underpaintSplatBudget : 0, representation, seed: 240825 },
+      { count: backcoatFromP1 ? underpaintSplatBudget : 0, representation, seed: 240825,
+        sizeVariation: backcoatSizeVariation },
     );
     for (let stage = 0; stage < progressiveParentCounts.length; stage += 1) {
       const finalStage = stage === progressiveParentCounts.length - 1;
@@ -752,11 +759,18 @@ async function trainFlowSplatFusion(run) {
         ).plan;
       }
       const detailPlan = flowTopologyState.plan;
+      const survivorRows = previousStage && previousDetailPlan
+        ? Image2SplatPaintFlowStrokeTopology.mapSurvivingStrokeRows(
+          previousDetailPlan,
+          detailPlan,
+        )
+        : null;
       finalDetailPlan = detailPlan;
       if (finalStage && splatUnderpainting && !backcoatFromP1) {
         finalUnderpaint = Image2SplatPaintFlowPaintReference.createSplatUnderpaintPlan(
           trainingImage, {
             count: underpaintSplatBudget, representation, seed: 240825,
+            sizeVariation: backcoatSizeVariation,
             residualRender: previousStage?.trainingState.renderedLinearRgba,
           },
         );
@@ -801,6 +815,11 @@ async function trainFlowSplatFusion(run) {
           detailGeometryAnchorParams: createFlowGeometryAnchorParams(detailPlan),
           residualPriorityTileSampling: flowResidualPriorityTileSampling && stage > 0,
           residualRender: previousStage?.trainingState.renderedLinearRgba,
+          continuousState: previousStage && survivorRows ? {
+            previousTrainingState: previousStage.trainingState,
+            previousDetailOffset: previousStage.metadata.underpaint_parent_count,
+            survivorRows,
+          } : undefined,
           returnTrainingState: true,
           ...callbacksForStage(
             completedIterations,
@@ -811,17 +830,24 @@ async function trainFlowSplatFusion(run) {
       );
       result = stageResult;
       previousStage = stageResult;
+      previousDetailPlan = detailPlan;
       completedIterations += stageResult.metadata.iterations;
       elapsedMs += stageResult.metadata.elapsed_ms;
       completedStages += 1;
       optimizerTrace.push({
         step: completedIterations,
         position_lr: stagePositionLearningRate,
+        shape_drift_scope: "stage-anchor",
         geometry_rms_px: stageResult.metadata.control_point_rms_drift_px,
         width_drift_px: stageResult.metadata.mean_width_drift_px,
+        state_retained_detail_rows:
+          stageResult.metadata.optimizer_state.retained_detail_rows,
+        state_reset_detail_rows:
+          stageResult.metadata.optimizer_state.reset_detail_rows,
         rgb_l1: stageResult.metadata.rgb_l1_signal,
         psnr: stageResult.metadata.psnr_signal_db,
         background_exposure: stageResult.metadata.coverage_stats.background_exposure_count,
+        zero_transmittance_pixels: stageResult.metadata.coverage_stats.zero_transmittance_count,
         splat_count: stagePhysicalSplatCount,
       });
       document.documentElement.dataset.flowOptimizerTrace = JSON.stringify(optimizerTrace);
@@ -861,6 +887,7 @@ async function trainFlowSplatFusion(run) {
     result.metadata.flow_initialization = flowInitialization;
     result.metadata.flow_edge_guided_accents = flowEdgeGuidedAccents;
     result.metadata.coverage_backcoat_from_p1 = backcoatFromP1;
+    result.metadata.coverage_backcoat_size_variation = backcoatSizeVariation;
     result.metadata.flow_variable_brush_links = variableBrushDabs;
     result.metadata.flow_brush_links_histogram = variableBrushDabs
       ? Array.from({ length: 7 }, (_, index) => ({
@@ -869,6 +896,9 @@ async function trainFlowSplatFusion(run) {
         })) : [{ dabs: splatsPerChain, curves: finalDetailPlan.length }];
     document.documentElement.dataset.flowBrushLinksHistogram = JSON.stringify(result.metadata.flow_brush_links_histogram);
     result.metadata.flow_optimizer_trace = optimizerTrace;
+    result.metadata.flow_alternate_shape_color = trainerOptions.alternateShapeColor;
+    document.documentElement.dataset.flowAlternateShapeColor = String(trainerOptions.alternateShapeColor);
+    document.documentElement.dataset.flowBackcoatSizeVariation = String(backcoatSizeVariation);
     result.metadata.flow_width_training_phases = true;
     result.metadata.flow_width_training_phase = state.metrics.flow_width_training_phase;
     result.metadata.progressive_growth_interval = FLOW_PROGRESSIVE_GROWTH_INTERVAL / FLOW_ITERATION_STRIDE;

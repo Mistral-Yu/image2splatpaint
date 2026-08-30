@@ -128,6 +128,7 @@ els.flowSplatUnderpainting.addEventListener("change", () => {
   publishState();
 });
 els.flowSplatUnderpaintPercent.addEventListener("input", publishState);
+els.flowSplatBackcoatSizeVariation.addEventListener("input", publishState);
 els.flowSplatBackcoatFromP1.addEventListener("change", publishState);
 els.flowSplatFusionStrokeOptimization.addEventListener("change", publishState);
 els.flowSplatFusionStrokeTexture.addEventListener("change", publishState);

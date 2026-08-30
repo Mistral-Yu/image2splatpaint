@@ -125,6 +125,7 @@ function setInputControlsDisabled(disabled) {
     els.flowSplatUnderpainting,
     els.flowSplatBackcoatFromP1,
     els.flowSplatUnderpaintPercent,
+    els.flowSplatBackcoatSizeVariation,
     els.flowSplatFusionMaxArcPercent,
   ]) {
     element.disabled = disabled;
@@ -201,6 +202,7 @@ function syncAlgorithmRequirements() {
   els.flowSplatFusionMovementLimit.disabled = state.running || !flowSelected;
   els.flowSplatUnderpainting.disabled = state.running || !flowSelected;
   els.flowSplatBackcoatFromP1.disabled = state.running || !flowSelected || !els.flowSplatUnderpainting.checked;
+  els.flowSplatBackcoatSizeVariation.disabled = state.running || !flowSelected || !els.flowSplatUnderpainting.checked;
   els.flowSplatUnderpaintPercent.disabled =
     state.running || !flowSelected || !els.flowSplatUnderpainting.checked;
   els.flowSplatFusionMaxArcLabel.hidden = false;

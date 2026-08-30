@@ -324,6 +324,7 @@ const els = {
   flowSplatBackcoatFromP1: document.querySelector("#flowSplatBackcoatFromP1"),
   flowSplatUnderpaintPercentLabel: document.querySelector("#flowSplatUnderpaintPercentLabel"),
   flowSplatUnderpaintPercent: document.querySelector("#flowSplatUnderpaintPercent"),
+  flowSplatBackcoatSizeVariation: document.querySelector("#flowSplatBackcoatSizeVariation"),
   flowSplatFusionMaxArcLabel: document.querySelector("#flowSplatFusionMaxArcLabel"),
   flowSplatFusionMaxArcPercent: document.querySelector("#flowSplatFusionMaxArcPercent"),
   savePngButton: document.querySelector("#savePngButton"),

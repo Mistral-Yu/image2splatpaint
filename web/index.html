@@ -189,7 +189,7 @@
                       <input id="flowSplatFusionScaleMatchedResidualRepaint" data-testid="flow-splat-fusion-scale-matched-residual-repaint" type="checkbox" />
                       Scale-matched repaint
                     </label>
-                    <label class="field-wide" title="Controls differentiable movement of each complete curved stroke. Balanced prioritizes coherent translation while retaining limited curve deformation. Stable reproduces the previous near-fixed geometry; Free allows stronger movement but may soften the brush structure.">
+                    <label class="field-wide" title="Controls differentiable movement of each complete curved stroke. Balanced and Free alternate four shape updates with one color update, retaining Adam history across growth. Stable uses joint updates with a stronger geometry anchor. Free permits stronger movement and deformation.">
                       Stroke optimization
                       <select id="flowSplatFusionStrokeOptimization" data-testid="flow-splat-fusion-stroke-optimization">
                         <option value="stable">Stable (legacy)</option>
@@ -268,6 +268,10 @@
                     <label id="flowSplatUnderpaintPercentLabel" title="Share of the physical Splat budget reserved for the compact Brush backcoat. More cells preserve finer source-color variation; the default leaves 90% for detail strokes.">
                       Backcoat budget (%)
                       <input id="flowSplatUnderpaintPercent" data-testid="flow-splat-underpaint-percent" type="number" min="0" max="50" step="0.25" value="10" />
+                    </label>
+                    <label title="Requires retraining. Varies the sizes of source-colored backcoat cells while keeping complete opaque coverage. 0% restores the uniform grid; 40% gives moderate size variation. Backcoat geometry remains fixed during training.">
+                      Backcoat size variation (%)
+                      <input id="flowSplatBackcoatSizeVariation" data-testid="flow-splat-backcoat-size-variation" type="number" min="0" max="75" step="5" value="40" />
                     </label>
                     <label id="flowSplatFusionMaxArcLabel" title="Maximum cubic ribbon arc length as a percentage of the training image short side. 0 disables the limit.">
                       Maximum ribbon length (%)
@@ -820,10 +824,10 @@
     <script src="./gpu/tile-pipelines.js?v=app-refactor-v1"></script>
     <script src="./gpu/tile-runtime.js?v=app-refactor-v1"></script>
     <script src="./gpu/optimizer-runtime.js?v=app-refactor-v1"></script>
-    <script src="./training/flow-paint-reference.js?v=balanced-brush-links-v2"></script>
-    <script src="./training/flow-ribbon-trainer.js?v=balanced-brush-links-v2"></script>
-    <script src="./training/flow-stroke-topology.js?v=seeded-placement-v1"></script>
-    <script src="./training/flow-splat-fusion.js?v=balanced-brush-links-v2"></script>
+    <script src="./training/flow-paint-reference.js?v=continuous-flow-shape-v1"></script>
+    <script src="./training/flow-ribbon-trainer.js?v=continuous-flow-shape-v1"></script>
+    <script src="./training/flow-stroke-topology.js?v=continuous-flow-shape-v1"></script>
+    <script src="./training/flow-splat-fusion.js?v=continuous-flow-shape-v1"></script>
     <script src="./training/trainer.js?v=rectangle-orientation-degrees-v1"></script>
     <script src="./training/metrics.js?v=app-refactor-v1"></script>
     <script src="./training/initialization.js?v=rectangle-orientation-tolerance-v1"></script>
@@ -831,7 +835,7 @@
     <script src="./training/densification.js?v=rectangle-orientation-tolerance-v1"></script>
     <script src="./training/runtime.js?v=app-refactor-v1"></script>
     <script src="./core/algorithms.js?v=rectangle-orientation-degrees-v1"></script>
-    <script src="./ui/training-controls.js?v=balanced-brush-links-v2"></script>
+    <script src="./ui/training-controls.js?v=continuous-flow-shape-v1"></script>
     <script src="./export/runtime.js?v=brush-rectangle-flow-surface-v1"></script>
     <script src="./export/actions.js?v=app-refactor-v1"></script>
     <script src="./ui/status.js?v=rectangle-orientation-degrees-v1"></script>
@@ -839,9 +843,9 @@
     <script src="./ui/tilt.js?v=app-refactor-v1"></script>
     <script src="./ui/preview-runtime.js?v=app-refactor-v1"></script>
     <script src="./ui/splat-controls.js?v=app-refactor-v1"></script>
-    <script src="./app.js?v=balanced-brush-links-v2"></script>
+    <script src="./app.js?v=continuous-flow-shape-v1"></script>
     <script src="./ui/bootstrap.js?v=brush-rectangle-flow-surface-v1"></script>
     <script src="./qa/runtime.js?v=unified-flow-chain-v1"></script>
-    <script src="./ui/controls.js?v=balanced-brush-links-v2"></script>
+    <script src="./ui/controls.js?v=continuous-flow-shape-v1"></script>
   </body>
 </html>

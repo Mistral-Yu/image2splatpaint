@@ -132,6 +132,34 @@
     };
   }
 
+  function topologyStateId(stroke) {
+    const value = stroke?.topology_state_id;
+    return typeof value === "string" && value.length > 0 ? value : null;
+  }
+
+  // Topology rows can move as merge/split/growth rebuilds the plan. Only an
+  // unchanged stable identity is allowed to retain optimizer state; ambiguous
+  // or newly-created rows intentionally return -1 and start fresh.
+  function mapSurvivingStrokeRows(previousPlan, nextPlan) {
+    const rows = new Int32Array(Array.isArray(nextPlan) ? nextPlan.length : 0);
+    rows.fill(-1);
+    if (!Array.isArray(previousPlan) || !Array.isArray(nextPlan)) return rows;
+    const previousById = new Map();
+    const duplicateIds = new Set();
+    for (let index = 0; index < previousPlan.length; index += 1) {
+      const id = topologyStateId(previousPlan[index]);
+      if (!id) continue;
+      if (previousById.has(id)) duplicateIds.add(id);
+      else previousById.set(id, index);
+    }
+    for (const id of duplicateIds) previousById.delete(id);
+    for (let index = 0; index < nextPlan.length; index += 1) {
+      const prior = previousById.get(topologyStateId(nextPlan[index]));
+      if (Number.isInteger(prior)) rows[index] = prior;
+    }
+    return rows;
+  }
+
   function validTextureGuide(guide) {
     const width = Math.max(1, Math.round(Number(guide?.width) || 0));
     const height = Math.max(1, Math.round(Number(guide?.height) || 0));
@@ -248,6 +276,7 @@
       topology_source_index: sourceIndex,
       topology_generation: 0,
       topology_kind: "source",
+      topology_state_id: `source:${sourceIndex}`,
     });
     return withTopologyOrigin({
       ...varied,
@@ -647,8 +676,10 @@
     const previousProgress = clamp01(target.topology_curriculum_progress ?? 1);
     const scheduledWidth = scheduledHalfWidth(previousTargetWidth, previousProgress, options);
     const learnedWidthDelta = Number(target.half_width_px) - scheduledWidth;
-    const frontLayer = Math.round(Number(target.layer) || 0) === 2;
-    const nextTargetWidth = frontLayer
+    const detailLayer = Math.round(Number(target.layer) || 0) < 3
+      && target.underpaint_splat !== true
+      && target.underpaint_chain !== true;
+    const nextTargetWidth = detailLayer
       ? clamp(previousTargetWidth + learnedWidthDelta, 0.55, options.maximumWidthPx)
       : previousTargetWidth;
     const currentLengthScale = Math.max(
@@ -741,6 +772,12 @@
         Number(b.topology_target_half_width_px) || Number(b.half_width_px),
       ) * 1.25,
     );
+    const generation = Math.max(
+      Number(a.topology_generation) || 0,
+      Number(b.topology_generation) || 0,
+    ) + 1;
+    const firstStateId = topologyStateId(a) || `left:${a.topology_source_index}`;
+    const secondStateId = topologyStateId(b) || `right:${b.topology_source_index}`;
     const merged = withDerivedGeometry({
       ...a,
       start_x: start[0],
@@ -760,11 +797,9 @@
       paint_linear_g: firstColor[1] * firstWeight + secondColor[1] * secondWeight,
       paint_linear_b: firstColor[2] * firstWeight + secondColor[2] * secondWeight,
       random: fract((Number(a.random) || 0) * 0.618 + (Number(b.random) || 0) * 0.382 + 0.13),
-      topology_generation: Math.max(
-        Number(a.topology_generation) || 0,
-        Number(b.topology_generation) || 0,
-      ) + 1,
+      topology_generation: generation,
       topology_kind: "merge",
+      topology_state_id: `merge:${firstStateId}|${secondStateId}:g${generation}`,
       topology_merged_source_indices: [a.topology_source_index, b.topology_source_index],
       topology_target_half_width_px: targetWidth,
       topology_curriculum_length_scale: 1,
@@ -817,6 +852,7 @@
       ],
     ];
     const generation = (Number(stroke.topology_generation) || 0) + 1;
+    const parentStateId = topologyStateId(stroke) || `source:${stroke.topology_source_index}`;
     const createChild = (geometry, child) => {
       const targetWidth = Math.max(0.55, Math.min(
         options.maximumWidthPx,
@@ -845,6 +881,7 @@
         topology_generation: generation,
         topology_kind: "split-fork",
         topology_split_child: child,
+        topology_state_id: `${parentStateId}/split:${generation}:${child}`,
         topology_target_half_width_px: targetWidth,
         topology_curriculum_length_scale: 1,
       });
@@ -1251,6 +1288,7 @@
     strokeFromParams,
     summarizeDistribution,
     applyPaintCurriculum,
+    mapSurvivingStrokeRows,
     constants: Object.freeze({
       PARAM_STRIDE,
       ...DEFAULT_OPTIONS,

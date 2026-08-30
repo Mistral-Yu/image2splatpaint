@@ -668,6 +668,22 @@
     return target;
   }
 
+  // Unequal positive cells still partition the complete image. Varying the
+  // partition (rather than shrinking individual marks) preserves closure.
+  function backcoatPartition(extent, count, variation, seed) {
+    const weights = Array.from({ length: count }, (_, i) =>
+      1 + variation * (2 * hash01(seed + (i + 1) * 104729) - 1));
+    const total = weights.reduce((sum, weight) => sum + weight, 0);
+    const boundaries = [0];
+    let accumulated = 0;
+    for (const weight of weights) {
+      accumulated += weight;
+      boundaries.push(extent * accumulated / total);
+    }
+    boundaries[count] = extent;
+    return boundaries;
+  }
+
   function createSplatUnderpaintPlan(image, options = {}) {
     const { width, height } = validateImage(image);
     const requested = Math.max(0, Math.round(Number(options.count) || 0));
@@ -696,6 +712,10 @@
     const rows = Math.max(1, Math.min(requested, Math.round(Math.sqrt(requested / aspect))));
     const columnsFloor = Math.floor(requested / rows);
     const rowsWithExtraColumn = requested - columnsFloor * rows;
+    const sizeVariation = Math.max(0, Math.min(0.75, Number(options.sizeVariation) || 0));
+    const partitionSeed = Math.round(Number(options.seed) || 240825);
+    const rowBounds = sizeVariation > 0
+      ? backcoatPartition(height, rows, sizeVariation, partitionSeed + 7919) : null;
     const strokePlan = [];
     const color = [0, 0, 0];
     let generated = 0;
@@ -705,15 +725,16 @@
       if (columns < 1) continue;
       const cellWidth = width / columns;
       const cellHeight = height / rows;
+      const columnBounds = sizeVariation > 0
+        ? backcoatPartition(width, columns, sizeVariation, partitionSeed + (row + 1) * 65537) : null;
       for (let column = 0; column < columns && generated < requested; column += 1) {
         const random = hash01((generated + 1) * 65537 + Math.round(Number(options.seed) || 240825));
-        const minimumX = Math.max(0, Math.floor(column * cellWidth));
-        const maximumX = Math.min(width - 1, Math.ceil((column + 1) * cellWidth) - 1);
-        const minimumY = Math.max(0, Math.floor(row * cellHeight));
-        const maximumY = Math.min(height - 1, Math.ceil((row + 1) * cellHeight) - 1);
-        // Geometry stays at the exact grid-cell center. Pigment may be sampled
-        // from the highest residual inside the cell, but moving the Splat to
-        // that pixel would reopen gaps between neighboring backcoat cells.
+        const minimumX = Math.max(0, Math.floor(columnBounds?.[column] ?? column * cellWidth));
+        const maximumX = Math.min(width - 1, Math.ceil(columnBounds?.[column + 1] ?? (column + 1) * cellWidth) - 1);
+        const minimumY = Math.max(0, Math.floor(rowBounds?.[row] ?? row * cellHeight));
+        const maximumY = Math.min(height - 1, Math.ceil(rowBounds?.[row + 1] ?? (row + 1) * cellHeight) - 1);
+        // Geometry stays at each partition-cell center and pigment uses the
+        // cell mean. The compact flat interior covers every cell corner.
         const actualCellWidth = maximumX + 1 - minimumX;
         const actualCellHeight = maximumY + 1 - minimumY;
         const centerX = (minimumX + maximumX + 1) * 0.5;
@@ -832,6 +853,7 @@
         residual_render_used: Boolean(residualRender),
         pigment_initialization: "cell-mean-linear-srgb",
         placement: "fixed-grid-source-colored-compact-brush-backcoat",
+        size_variation: sizeVariation,
         coverage_kernel: "compact-quartic-flat-interior-v1",
         coverage_guarantee: "one-flat-interior-splat-per-grid-cell",
         geometry_trainable: false,

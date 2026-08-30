@@ -68,6 +68,10 @@ optimizer. `Rectangle Splats` keeps the former Brush path as its `Illustrative
 Brush` shape. `GS Virtual Camera Sampling` is the only mode that enables
 virtual-camera teachers and the `Tilt` tab.
 
+Flow retains optimizer history as strokes grow. Balanced/Free motion alternate
+four shape updates with one color update. `Backcoat size variation` defaults to
+40%; use 0% for uniform cells. Both keep the opaque coverage backcoat.
+
 The selector configures the next run. Once a result exists, Export eligibility
 and Tilt availability stay bound to that completed result until Reset, Clear,
 image replacement, or a new completed run.

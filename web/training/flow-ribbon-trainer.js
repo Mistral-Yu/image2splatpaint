@@ -689,9 +689,12 @@
 
     const tileCols = Math.ceil(width / TILE_SIZE);
     const tileRows = Math.ceil(height / TILE_SIZE);
-    // Adam starts with zero moments in each stage. Cauchy-Schwarz bounds each
-    // normalized update even for arbitrary gradients; use that reachable width
-    // rather than inflating every candidate to the global three-times ceiling.
+    const continuousAdamCarry = options.continuousState !== false
+      && options.continuousState?.previousTrainingState != null;
+    // Fresh rows start with zero moments. Survivor rows may begin with a
+    // read-back Adam state. For beta1=.9, beta2=.999 the Cauchy-Schwarz
+    // normalized-step bound is < 7.28 at every age; 8 also covers float error.
+    // Position support already includes maxPositionDelta below.
     let widthTravel = 0;
     if (options.widthTrainingPhases === true) {
       for (let step = 0; step < Math.max(1, Number(options.iterations) || 1); step += 1) {
@@ -702,7 +705,8 @@
           * (1 - 0.999 ** t) / (1 - 0.9 ** t) ** 2
           * (1 - ratio ** t) / (1 - ratio),
         );
-        widthTravel += Math.abs(widthTrainingSettings(step, options).widthLearningRate) * momentBound;
+        widthTravel += Math.abs(widthTrainingSettings(step, options).widthLearningRate)
+          * (continuousAdamCarry ? 8 : momentBound);
       }
     }
     const tileLists = Array.from({ length: tileCols * tileRows }, () => []);
@@ -1307,6 +1311,17 @@ fn chain_kernel_sample(
   return ChainKernelSample(kernel, delta_gradient, d_kernel_d_q * d_q_d_width);
 }
 
+// Pull the local kernel derivative through normalized tangent rotation,
+// including the normal-offset movement of the dab center. Spacing is a
+// fixed per-stage parameter in forward and is deliberately held constant.
+fn chain_tangent_pullback(
+  normal: vec2<f32>, tangent_length: f32,
+  along: f32, side: f32, offset: f32, kernel_gradient: vec2<f32>
+) -> vec2<f32> {
+  return normal * (kernel_gradient.x * (side + offset) - kernel_gradient.y * along)
+    / max(1e-7, tangent_length);
+}
+
 fn coverage_backcoat_kernel(
   along_distance: f32,
   side_distance: f32,
@@ -1565,6 +1580,7 @@ fn tile_is_active(tile: u32) -> bool {
 @group(0) @binding(2) var<storage, read> tile_offsets: array<u32>;
 @group(0) @binding(3) var<storage, read> tile_indices: array<u32>;
 @group(0) @binding(4) var<storage, read_write> rendered: array<vec4<f32>>;
+@group(0) @binding(8) var<storage, read_write> log_transmittance: array<f32>;
 ${COMMON_WGSL}
 ${TILE_SAMPLING_WGSL}
 
@@ -1581,14 +1597,17 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let pixel = vec2<f32>(f32(id.x) + 0.5, f32(id.y) + 0.5);
   var color = vec3<f32>(0.0);
   var transmittance = 1.0;
+  var log_t = 0.0;
   for (var cursor = start; cursor < end; cursor += 1u) {
     let candidate = tile_indices[cursor];
     let evaluated = evaluate_candidate(candidate, pixel);
     color += transmittance * evaluated.alpha * evaluated.pigment;
     transmittance *= 1.0 - evaluated.alpha;
+    log_t += log(max(1e-4, 1.0 - evaluated.alpha));
   }
   let canvas = vec3<f32>(config.canvas_linear_r, config.canvas_linear_g, config.canvas_linear_b);
   rendered[pixel_index] = vec4<f32>(color + transmittance * canvas, transmittance);
+  log_transmittance[pixel_index] = log_t;
 }
 `;
 
@@ -1600,6 +1619,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 @group(0) @binding(4) var<storage, read> teacher_pixels: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> rendered: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read_write> gradients: array<atomic<u32>>;
+@group(0) @binding(8) var<storage, read> log_transmittance: array<f32>;
 ${COMMON_WGSL}
 ${TILE_SAMPLING_WGSL}
 
@@ -1638,7 +1658,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   );
   let canvas = vec3<f32>(config.canvas_linear_r, config.canvas_linear_g, config.canvas_linear_b);
   var d_transmittance_after = dot(d_color, canvas);
-  var transmittance_after = result.a;
+  // The final linear transmittance can underflow to zero with opaque dabs.
+  // Recover each prefix in log space so visible front marks retain gradients.
+  // The forward RGB/alpha and export surface remain unchanged.
+  var log_t_after = log_transmittance[pixel_index];
   var cursor = end;
   loop {
     if (cursor <= start) { break; }
@@ -1647,7 +1670,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let stroke = select(candidate, candidate / config.sample_count, config.representation > 0.5);
     let evaluated = evaluate_candidate(candidate, pixel);
     let one_minus_alpha = max(1e-4, 1.0 - evaluated.alpha);
-    let transmittance_before = transmittance_after / one_minus_alpha;
+    log_t_after -= log(one_minus_alpha);
+    let transmittance_before = exp(min(0.0, log_t_after));
     let d_alpha = transmittance_before * (dot(d_color, evaluated.pigment) - d_transmittance_after);
     let base = stroke * config.param_stride;
     let d_pigment = d_color * (transmittance_before * evaluated.alpha * evaluated.pigment_scale);
@@ -1672,7 +1696,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
       let width_factor = chain_width_factor(stroke, sample);
       let sigma_short = max(0.38, width * width_factor);
       let random = param_at(stroke, 13u);
-      let tangent = normalize(cubic_tangent(stroke, t) + vec2<f32>(1e-7, 0.0));
+      let raw_tangent = cubic_tangent(stroke, t) + vec2<f32>(1e-7, 0.0);
+      let tangent = normalize(raw_tangent);
       let normal = vec2<f32>(-tangent.y, tangent.x);
       let normal_offset_factor = chain_normal_offset_factor(stroke, sample);
       let point = cubic_point(stroke, t)
@@ -1698,9 +1723,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
           tangent * kernel_sample.delta_gradient.x
           + normal * kernel_sample.delta_gradient.y
         );
+        let d_tangent = d_kernel * chain_tangent_pullback(normal, length(raw_tangent),
+          along_distance, side_distance, normal_offset_factor * width, kernel_sample.delta_gradient);
+        let bernstein_derivative = vec4<f32>(-3.0*s*s, 3.0*s*s-6.0*s*t, 6.0*s*t-3.0*t*t, 3.0*t*t);
         for (var control = 0u; control < 4u; control += 1u) {
-          atomic_add_f32(base + control * 2u, d_point.x * bernstein[control]);
-          atomic_add_f32(base + control * 2u + 1u, d_point.y * bernstein[control]);
+          let gradient = d_point * bernstein[control] + d_tangent * bernstein_derivative[control];
+          atomic_add_f32(base + control * 2u, gradient.x);
+          atomic_add_f32(base + control * 2u + 1u, gradient.y);
         }
         atomic_add_f32(
           base + 9u,
@@ -1708,8 +1737,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         );
         atomic_add_f32(
           base + 8u,
-          d_kernel * kernel_sample.width_gradient
-            + dot(d_point, normal) * normal_offset_factor
+          select(0.0, d_kernel * kernel_sample.width_gradient
+            + dot(d_point, normal) * normal_offset_factor, param_at(stroke, 8u) > 0.55)
         );
       }
     } else {
@@ -1755,7 +1784,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let d_transmittance_before = evaluated.alpha * dot(d_color, evaluated.pigment)
       + (1.0 - evaluated.alpha) * d_transmittance_after;
     d_transmittance_after = d_transmittance_before;
-    transmittance_after = transmittance_before;
   }
 }
 `;
@@ -1774,6 +1802,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 @group(0) @binding(4) var<storage, read> teacher_pixels: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> rendered: array<vec4<f32>>;
 @group(0) @binding(6) var<storage, read_write> gradients: array<atomic<u32>>;
+@group(0) @binding(8) var<storage, read> log_transmittance: array<f32>;
 ${COMMON_WGSL}
 ${TILE_SAMPLING_WGSL}
 
@@ -1868,7 +1897,7 @@ fn main(
   var pixels: array<vec2<f32>, 4>;
   var d_colors: array<vec3<f32>, 4>;
   var d_transmittances: array<f32, 4>;
-  var transmittances_after: array<f32, 4>;
+  var log_t_after: array<f32, 4>;
   for (var pixel_slot = 0u; pixel_slot < 4u; pixel_slot += 1u) {
     let x = base_x + offsets[pixel_slot].x;
     let y = base_y + offsets[pixel_slot].y;
@@ -1877,7 +1906,7 @@ fn main(
     pixels[pixel_slot] = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
     d_colors[pixel_slot] = vec3<f32>(0.0);
     d_transmittances[pixel_slot] = 0.0;
-    transmittances_after[pixel_slot] = 1.0;
+    log_t_after[pixel_slot] = 0.0;
     if (valid) {
       let pixel_index = y * config.width + x;
       let result = rendered[pixel_index];
@@ -1889,7 +1918,7 @@ fn main(
         select(-normalizer, normalizer, difference.z >= 0.0)
       );
       d_transmittances[pixel_slot] = dot(d_colors[pixel_slot], canvas);
-      transmittances_after[pixel_slot] = result.a;
+      log_t_after[pixel_slot] = log_transmittance[pixel_index];
     }
   }
 
@@ -1931,7 +1960,8 @@ fn main(
     let width_factor = chain_width_factor(stroke, sample);
     let sigma_short = max(0.38, width * width_factor);
     let random = param_at(stroke, 13u);
-    let tangent = normalize(cubic_tangent(stroke, t) + vec2<f32>(1e-7, 0.0));
+    let raw_tangent = cubic_tangent(stroke, t) + vec2<f32>(1e-7, 0.0);
+    let tangent = normalize(raw_tangent);
     let normal = vec2<f32>(-tangent.y, tangent.x);
     let normal_offset_factor = chain_normal_offset_factor(stroke, sample);
     let point = cubic_point(stroke, t)
@@ -1941,7 +1971,8 @@ fn main(
       let pixel = pixels[pixel_slot];
       let evaluated = evaluate_chain_micro_splat(candidate, pixel);
       let one_minus_alpha = max(1e-4, 1.0 - evaluated.alpha);
-      let transmittance_before = transmittances_after[pixel_slot] / one_minus_alpha;
+      log_t_after[pixel_slot] -= log(one_minus_alpha);
+      let transmittance_before = exp(min(0.0, log_t_after[pixel_slot]));
       let d_alpha = transmittance_before * (
         dot(d_colors[pixel_slot], evaluated.pigment) - d_transmittances[pixel_slot]
       );
@@ -1975,28 +2006,30 @@ fn main(
             tangent * kernel_sample.delta_gradient.x
             + normal * kernel_sample.delta_gradient.y
           );
+          let d_tangent = d_kernel * chain_tangent_pullback(normal, length(raw_tangent),
+            along_distance, side_distance, normal_offset_factor * width, kernel_sample.delta_gradient);
+          let db = vec4<f32>(-3.0*s*s, 3.0*s*s-6.0*s*t, 6.0*s*t-3.0*t*t, 3.0*t*t);
           gradient_0_3 += vec4<f32>(
             d_point.x * bernstein.x,
             d_point.y * bernstein.x,
             d_point.x * bernstein.y,
             d_point.y * bernstein.y
-          );
+          ) + vec4<f32>(d_tangent * db.x, d_tangent * db.y);
           gradient_4_7 += vec4<f32>(
             d_point.x * bernstein.z,
             d_point.y * bernstein.z,
             d_point.x * bernstein.w,
             d_point.y * bernstein.w
-          );
+          ) + vec4<f32>(d_tangent * db.z, d_tangent * db.w);
           let opacity_derivative = evaluated.opacity * (1.0 - evaluated.opacity);
           gradient_8_11.y += d_alpha * kernel_sample.kernel * micro_modulation
             * opacity_derivative;
-          gradient_8_11.x += d_kernel * kernel_sample.width_gradient
-            + dot(d_point, normal) * normal_offset_factor;
+          gradient_8_11.x += select(0.0, d_kernel * kernel_sample.width_gradient
+            + dot(d_point, normal) * normal_offset_factor, param_at(stroke, 8u) > 0.55);
         }
       }
       d_transmittances[pixel_slot] = evaluated.alpha * dot(d_colors[pixel_slot], evaluated.pigment)
         + (1.0 - evaluated.alpha) * d_transmittances[pixel_slot];
-      transmittances_after[pixel_slot] = transmittance_before;
     }
   }
   if (current_stroke != 0xffffffffu) {
@@ -2019,6 +2052,7 @@ fn main(
 @group(0) @binding(3) var<storage, read_write> gradients: array<atomic<u32>>;
 @group(0) @binding(4) var<storage, read_write> first_moment: array<f32>;
 @group(0) @binding(5) var<storage, read_write> second_moment: array<f32>;
+@group(0) @binding(6) var<storage, read_write> adam_steps: array<u32>;
 
 struct Config {
   width: u32,
@@ -2074,7 +2108,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let stroke = id.x;
   if (stroke >= config.stroke_count) { return; }
   let base = stroke * config.param_stride;
-  let step = f32(config.iteration + 1u);
+  let prior_step = min(0xfffffffeu, adam_steps[stroke]);
+  let step = f32(prior_step + 1u);
   let bias1 = max(1e-8, 1.0 - pow(config.beta1, step));
   let bias2 = max(1e-8, 1.0 - pow(config.beta2, step));
   let coverage_backcoat = params[base + 14u] > 2.5;
@@ -2158,6 +2193,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     params[index] = next;
   }
+  if (coverage_backcoat) {
+    adam_steps[stroke] = 0u;
+  } else {
+    adam_steps[stroke] = min(0xfffffffeu, prior_step + 1u);
+  }
   if (config.max_curve_arc > 0.0 && params[base + 14u] < 2.5) {
     var previous = update_cubic_point(base, 0.0);
     var curve_arc = 0.0;
@@ -2230,6 +2270,77 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     return next;
   }
 
+  function finiteOptimizerRow(values, base) {
+    if (!(values instanceof Float32Array) || base < 0 || base + PARAM_STRIDE > values.length) {
+      return false;
+    }
+    for (let component = 0; component < PARAM_STRIDE; component += 1) {
+      if (!Number.isFinite(values[base + component])) return false;
+    }
+    return true;
+  }
+
+  // Rebuild GPU state only for rows whose topology identity survived the
+  // stage boundary. Backcoat, growth, split, merge, and invalid readback rows
+  // stay zeroed so their Adam bias correction begins at their actual birth.
+  function remapContinuousOptimizerState(data, continuousState) {
+    const rowCount = data.strokeCount;
+    const firstMoment = new Float32Array(rowCount * PARAM_STRIDE);
+    const secondMoment = new Float32Array(rowCount * PARAM_STRIDE);
+    const adamSteps = new Uint32Array(rowCount);
+    const detailOffset = Math.max(0, Math.min(
+      rowCount,
+      Math.round(Number(data.underpaintParentCount) || 0),
+    ));
+    const detailCount = rowCount - detailOffset;
+    const enabled = continuousState !== false;
+    const previous = enabled && continuousState && typeof continuousState === "object"
+      ? continuousState.previousTrainingState
+      : null;
+    const survivorRows = enabled && continuousState && typeof continuousState === "object"
+      ? continuousState.survivorRows
+      : null;
+    const previousFirstMoment = previous?.firstMoment;
+    const previousSecondMoment = previous?.secondMoment;
+    const previousAdamSteps = previous?.adamSteps;
+    const previousDetailOffset = Math.max(0, Math.round(
+      Number(continuousState?.previousDetailOffset) || 0,
+    ));
+    const sourceAvailable = survivorRows != null
+      && previousFirstMoment instanceof Float32Array
+      && previousSecondMoment instanceof Float32Array
+      && previousAdamSteps instanceof Uint32Array;
+    let retainedDetailRows = 0;
+    for (let detailRow = 0; detailRow < detailCount; detailRow += 1) {
+      const previousDetailRow = Number(survivorRows?.[detailRow]);
+      if (!sourceAvailable || !Number.isInteger(previousDetailRow) || previousDetailRow < 0) continue;
+      const sourceStroke = previousDetailOffset + previousDetailRow;
+      const sourceBase = sourceStroke * PARAM_STRIDE;
+      const targetBase = (detailOffset + detailRow) * PARAM_STRIDE;
+      if (!finiteOptimizerRow(previousFirstMoment, sourceBase)
+        || !finiteOptimizerRow(previousSecondMoment, sourceBase)
+        || sourceStroke < 0
+        || sourceStroke >= previousAdamSteps.length) continue;
+      firstMoment.set(previousFirstMoment.subarray(sourceBase, sourceBase + PARAM_STRIDE), targetBase);
+      secondMoment.set(previousSecondMoment.subarray(sourceBase, sourceBase + PARAM_STRIDE), targetBase);
+      adamSteps[detailOffset + detailRow] = previousAdamSteps[sourceStroke];
+      retainedDetailRows += 1;
+    }
+    return {
+      firstMoment,
+      secondMoment,
+      adamSteps,
+      diagnostics: {
+        mode: enabled ? "survivor-row-remap" : "disabled",
+        scope: "this-stage-detail-row-initialization",
+        source_available: sourceAvailable,
+        retained_detail_rows: retainedDetailRows,
+        reset_detail_rows: detailCount - retainedDetailRows,
+        frozen_backcoat_rows: detailOffset,
+      },
+    };
+  }
+
   function configBytes(data, iteration, options, forceFullFrame = false) {
     const buffer = new ArrayBuffer(CONFIG_BYTES);
     const view = new DataView(buffer);
@@ -2248,10 +2359,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     const widthTraining = widthTrainingSettings(iteration, options);
     f32(40, widthTraining.widthAnchor);
     f32(44, options.opacityAnchor ?? 0.0008);
-    f32(48, options.positionLearningRate ?? 0.015);
-    f32(52, widthTraining.widthLearningRate);
+    // Both moments continue observing the same loss. Only parameter writes
+    // alternate, so per-stroke Adam age/bias correction stays well defined.
+    const colorStep = ((Number(options.globalIterationOffset) || 0) + iteration) % 5 === 4;
+    const shapeRate = options.alternateShapeColor === true && colorStep ? 0 : 1;
+    const colorRate = options.alternateShapeColor === true && !colorStep ? 0 : 1;
+    f32(48, (options.positionLearningRate ?? 0.015) * shapeRate);
+    f32(52, widthTraining.widthLearningRate * shapeRate);
     f32(56, options.opacityLearningRate ?? 0.006);
-    f32(60, options.colorLearningRate ?? 0.020);
+    f32(60, (options.colorLearningRate ?? 0.020) * colorRate);
     f32(64, 0.9);
     f32(68, 0.999);
     f32(72, 1e-8);
@@ -2325,6 +2441,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
           { binding: 3, resource: { buffer: buffers.tileIndices } },
           { binding: 4, resource: { buffer: buffers.rendered } },
           { binding: 7, resource: { buffer: buffers.tileSamplingMasks } },
+          { binding: 8, resource: { buffer: buffers.logTransmittance } },
         ],
       }),
       backward: device.createBindGroup({
@@ -2338,6 +2455,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
           { binding: 5, resource: { buffer: buffers.rendered } },
           { binding: 6, resource: { buffer: buffers.gradients } },
           { binding: 7, resource: { buffer: buffers.tileSamplingMasks } },
+          { binding: 8, resource: { buffer: buffers.logTransmittance } },
         ],
       }),
       update: device.createBindGroup({
@@ -2349,6 +2467,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
           { binding: 3, resource: { buffer: buffers.gradients } },
           { binding: 4, resource: { buffer: buffers.firstMoment } },
           { binding: 5, resource: { buffer: buffers.secondMoment } },
+          { binding: 6, resource: { buffer: buffers.adamSteps } },
         ],
       }),
     };
@@ -2391,6 +2510,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let over010Count = 0;
     let transmittanceTotal = 0;
     let maximumTransmittance = 0;
+    let zeroTransmittanceCount = 0;
     let creamLeakTotal = 0;
     let canvasLikeSourceCount = 0;
     const luminanceBuckets = {
@@ -2426,6 +2546,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         sourceOpaquePixels += 1;
         transmittanceTotal += transmittance;
         maximumTransmittance = Math.max(maximumTransmittance, transmittance);
+        zeroTransmittanceCount += transmittance === 0 ? 1 : 0;
         creamLeakTotal += transmittance * canvasDistance;
         canvasLikeSourceCount += canvasDistance < 0.04 ? 1 : 0;
         backgroundExposureCount += transmittance > 0.01 ? 1 : 0;
@@ -2458,6 +2579,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         source_opaque_pixel_count: sourceOpaquePixels,
         mean_transmittance: transmittanceTotal / coverageDenominator,
         maximum_transmittance: maximumTransmittance,
+        zero_transmittance_count: zeroTransmittanceCount,
         minimum_composite_alpha: 1 - maximumTransmittance,
         transmittance_over_0_01_ratio: backgroundExposureCount / coverageDenominator,
         transmittance_over_0_05_ratio: over005Count / coverageDenominator,
@@ -2494,7 +2616,16 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     return renderedImageSummary(data, rendered);
   }
 
-  function summarizeResult(data, rendered, finalParams, elapsedMs, iterations, runState = {}, options = {}) {
+  function summarizeResult(
+    data,
+    rendered,
+    finalParams,
+    elapsedMs,
+    iterations,
+    runState = {},
+    options = {},
+    optimizerState = null,
+  ) {
     const renderedSummary = renderedImageSummary(data, rendered);
     let colorDrift = 0;
     let geometryDriftSquared = 0;
@@ -2625,6 +2756,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
           ...renderedSummary.coverage_stats,
           step: iterations,
         },
+        optimizer_state: optimizerState?.diagnostics || {
+          mode: options.continuousState === false ? "disabled" : "survivor-row-remap",
+          scope: "this-stage-detail-row-initialization",
+          source_available: false,
+          retained_detail_rows: 0,
+          reset_detail_rows: data.strokeCount - data.underpaintParentCount,
+          frozen_backcoat_rows: data.underpaintParentCount,
+        },
         mean_color_anchor_drift_linear: colorDrift / data.strokeCount,
         control_point_rms_drift_px: Math.sqrt(geometryDriftSquared / (data.strokeCount * 8)),
         mean_width_drift_px: widthDrift / data.strokeCount,
@@ -2693,6 +2832,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         params: finalParams.slice(),
         topologyParams: paramsWithoutPhaseLift(finalParams, data.widthPhaseLifts),
         renderedLinearRgba: rendered.slice(),
+        firstMoment: optimizerState?.firstMoment?.slice() || new Float32Array(
+          data.strokeCount * PARAM_STRIDE,
+        ),
+        secondMoment: optimizerState?.secondMoment?.slice() || new Float32Array(
+          data.strokeCount * PARAM_STRIDE,
+        ),
+        adamSteps: optimizerState?.adamSteps?.slice() || new Uint32Array(data.strokeCount),
       };
     }
     return result;
@@ -2710,6 +2856,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
       Math.round(Number(options.previewInterval) || 0),
     ));
     const data = prepareTrainingData(image, strokePlan, options);
+    const continuousOptimizerState = remapContinuousOptimizerState(data, options.continuousState);
     const chainQuadBackward = options.representation === "curve-splat-chain"
       && options.quadBackward !== false;
     const adapter = await global.navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
@@ -2732,9 +2879,26 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
       ),
       target: createBuffer(device, "Flow ribbon target", data.target, U.STORAGE),
       rendered: createBuffer(device, "Flow ribbon rendered", data.width * data.height * 16, U.STORAGE | U.COPY_SRC),
+      logTransmittance: createBuffer(device, "Flow ribbon log transmittance", data.width * data.height * 4, U.STORAGE),
       gradients: createBuffer(device, "Flow ribbon gradients", data.strokeCount * GRAD_STRIDE * 4, U.STORAGE | U.COPY_DST),
-      firstMoment: createBuffer(device, "Flow ribbon Adam m", data.strokeCount * PARAM_STRIDE * 4, U.STORAGE | U.COPY_DST),
-      secondMoment: createBuffer(device, "Flow ribbon Adam v", data.strokeCount * PARAM_STRIDE * 4, U.STORAGE | U.COPY_DST),
+      firstMoment: createBuffer(
+        device,
+        "Flow ribbon Adam m",
+        continuousOptimizerState.firstMoment,
+        U.STORAGE | U.COPY_DST | U.COPY_SRC,
+      ),
+      secondMoment: createBuffer(
+        device,
+        "Flow ribbon Adam v",
+        continuousOptimizerState.secondMoment,
+        U.STORAGE | U.COPY_DST | U.COPY_SRC,
+      ),
+      adamSteps: createBuffer(
+        device,
+        "Flow ribbon Adam steps",
+        continuousOptimizerState.adamSteps,
+        U.STORAGE | U.COPY_DST | U.COPY_SRC,
+      ),
       previewReadback: createBuffer(
         device,
         "Flow ribbon preview readback",
@@ -2755,6 +2919,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     const startedAt = performance.now();
     let completedIterations = 0;
     let stopped = false;
+    let finalReadbacks = null;
     try {
       for (let iteration = 0; iteration < iterations; iteration += 1) {
         device.queue.writeBuffer(buffers.config, 0, configBytes(data, iteration, options));
@@ -2808,30 +2973,92 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
       device.queue.writeBuffer(buffers.config, 0, configBytes(data, completedIterations, options, true));
       const finalEncoder = device.createCommandEncoder({ label: "Flow ribbon final render" });
       encodeForward(finalEncoder, pipelines.forward, bindGroups.forward, data);
-      const renderReadback = device.createBuffer({
+      finalReadbacks = {};
+      finalReadbacks.rendered = device.createBuffer({
         label: "Flow ribbon render readback",
         size: data.width * data.height * 16,
         usage: U.COPY_DST | U.MAP_READ,
       });
-      const paramsReadback = device.createBuffer({
+      finalReadbacks.params = device.createBuffer({
         label: "Flow ribbon params readback",
         size: data.params.byteLength,
         usage: U.COPY_DST | U.MAP_READ,
       });
-      finalEncoder.copyBufferToBuffer(buffers.rendered, 0, renderReadback, 0, data.width * data.height * 16);
-      finalEncoder.copyBufferToBuffer(buffers.params, 0, paramsReadback, 0, data.params.byteLength);
+      if (options.returnTrainingState) {
+        finalReadbacks.firstMoment = device.createBuffer({
+          label: "Flow ribbon Adam m readback",
+          size: data.strokeCount * PARAM_STRIDE * 4,
+          usage: U.COPY_DST | U.MAP_READ,
+        });
+        finalReadbacks.secondMoment = device.createBuffer({
+          label: "Flow ribbon Adam v readback",
+          size: data.strokeCount * PARAM_STRIDE * 4,
+          usage: U.COPY_DST | U.MAP_READ,
+        });
+        finalReadbacks.adamSteps = device.createBuffer({
+          label: "Flow ribbon Adam step readback",
+          size: data.strokeCount * 4,
+          usage: U.COPY_DST | U.MAP_READ,
+        });
+      }
+      finalEncoder.copyBufferToBuffer(
+        buffers.rendered,
+        0,
+        finalReadbacks.rendered,
+        0,
+        data.width * data.height * 16,
+      );
+      finalEncoder.copyBufferToBuffer(buffers.params, 0, finalReadbacks.params, 0, data.params.byteLength);
+      if (options.returnTrainingState) {
+        finalEncoder.copyBufferToBuffer(
+          buffers.firstMoment,
+          0,
+          finalReadbacks.firstMoment,
+          0,
+          data.strokeCount * PARAM_STRIDE * 4,
+        );
+        finalEncoder.copyBufferToBuffer(
+          buffers.secondMoment,
+          0,
+          finalReadbacks.secondMoment,
+          0,
+          data.strokeCount * PARAM_STRIDE * 4,
+        );
+        finalEncoder.copyBufferToBuffer(
+          buffers.adamSteps,
+          0,
+          finalReadbacks.adamSteps,
+          0,
+          data.strokeCount * 4,
+        );
+      }
       device.queue.submit([finalEncoder.finish()]);
       await device.queue.onSubmittedWorkDone();
-      await Promise.all([
-        renderReadback.mapAsync(global.GPUMapMode.READ),
-        paramsReadback.mapAsync(global.GPUMapMode.READ),
-      ]);
-      const rendered = new Float32Array(renderReadback.getMappedRange().slice(0));
-      const finalParams = new Float32Array(paramsReadback.getMappedRange().slice(0));
-      renderReadback.unmap();
-      paramsReadback.unmap();
-      renderReadback.destroy();
-      paramsReadback.destroy();
+      const mapRequests = [
+        finalReadbacks.rendered.mapAsync(global.GPUMapMode.READ),
+        finalReadbacks.params.mapAsync(global.GPUMapMode.READ),
+      ];
+      if (options.returnTrainingState) {
+        mapRequests.push(
+          finalReadbacks.firstMoment.mapAsync(global.GPUMapMode.READ),
+          finalReadbacks.secondMoment.mapAsync(global.GPUMapMode.READ),
+          finalReadbacks.adamSteps.mapAsync(global.GPUMapMode.READ),
+        );
+      }
+      await Promise.all(mapRequests);
+      const rendered = new Float32Array(finalReadbacks.rendered.getMappedRange().slice(0));
+      const finalParams = new Float32Array(finalReadbacks.params.getMappedRange().slice(0));
+      const finalOptimizerState = options.returnTrainingState ? {
+        firstMoment: new Float32Array(finalReadbacks.firstMoment.getMappedRange().slice(0)),
+        secondMoment: new Float32Array(finalReadbacks.secondMoment.getMappedRange().slice(0)),
+        adamSteps: new Uint32Array(finalReadbacks.adamSteps.getMappedRange().slice(0)),
+        diagnostics: continuousOptimizerState.diagnostics,
+      } : continuousOptimizerState;
+      for (const buffer of Object.values(finalReadbacks)) {
+        buffer.unmap();
+        buffer.destroy();
+      }
+      finalReadbacks = null;
       return summarizeResult(
         data,
         rendered,
@@ -2840,8 +3067,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         completedIterations,
         { requestedIterations: iterations, stopped },
         options,
+        finalOptimizerState,
       );
     } finally {
+      Object.values(finalReadbacks || {}).forEach((buffer) => buffer.destroy());
       Object.values(buffers).forEach((buffer) => buffer.destroy());
       device.destroy();
     }
