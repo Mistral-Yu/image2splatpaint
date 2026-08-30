@@ -146,4 +146,3 @@ function inspectPlyContract(buffer = makePly(), sourceParams = state.params, sou
     defaultVirtualDepthThickness: DEFAULT_VIRTUAL_DEPTH_THICKNESS,
   });
 }
-

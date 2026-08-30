@@ -33,6 +33,10 @@ fn finite_paint_support(g: u32) -> bool {
 }
 
 fn finite_paint_extent(g: u32) -> f32 {
+  if (cfg(40u) > 5.5) {
+    // q <= 4 for the quartic soft-cell kernel, so each local axis reaches sqrt(2)x.
+    return 2.12132034356;
+  }
   if (cfg(40u) > 3.5) {
     let oilFeatherMargin = pow(1.0 + clamp(cfg(41u), 0.01, 0.49), 0.25);
     return ${LAYERED_OPAQUE_BRUSH_KERNEL_EXTENT} * oilFeatherMargin;

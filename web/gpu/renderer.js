@@ -3053,6 +3053,7 @@ class WebGpuPreview {
       tileIndexInitialReferencesPerSplat: tilePlan.observedPerSplat,
       tileIndexRequestedCapacity: tilePlan.requested,
       allocationPlan,
+      tileCullingEnabled: Boolean(params.tileCullingEnabled),
       tileReady: false,
       tileBuilds: 0,
       tileReserveLevel: 0,

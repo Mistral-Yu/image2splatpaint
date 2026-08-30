@@ -15,31 +15,24 @@
 </div>
 
 <p align="center">
-  <img src="assets/readme-ui.png" width="1280" alt="Image2SplatPaint with a loaded image, training controls, and two-row status display" />
+  <img src="assets/readme-ui.png" width="1280" alt="Image2SplatPaint with the generated geometric Sample image and ordered training settings" />
 </p>
 
 ## Project direction
 
-Image2SplatPaint explores faithful image representation and differentiable
-stylization with trainable splats. `Planar Gaussian` and
-`GS Virtual Camera Sampling` focus on reproduction, while `Rectangle Splats`
-and `Brush Splats` use geometric shapes, strokes, and independent paint layers
-to create deliberately stylized results. For these stylization paths, visible
-character matters alongside numerical fidelity. They can also act as trainable,
-shape-aware blur filters that simplify fine detail into larger paint forms.
+Image2SplatPaint explores image reconstruction and painterly stylization with
+trainable splats. Planar and Virtual Camera modes focus on reproduction;
+Rectangle, Illustrative Brush, and Flow Brush Fusion turn the same image into
+layered geometric or curved paint forms.
 
 ## Quick start
 
-1. Choose an **Algorithm**. Algorithm and setting changes apply to the next
-   Train without reloading the page or clearing the loaded image and current
-   result.
+1. Choose an **Algorithm**. Setting changes apply to the next Train.
 2. Select **Load image**, use **Sample**, or drop an image on the canvas.
 3. Set **Max image side**, splat counts, and **Iterations**, then select
    **Train**. Use **Pause** or **Stop** if needed.
-4. Switch between **Original** and **Splats**, then review the visible result.
-   RGB L1, SSIM, and PSNR help evaluate fidelity and compare runs; for Rectangle
-   and Brush results, also evaluate their visible style and stroke structure.
-   The status area reports GPU and runtime state.
+4. Compare **Original** and **Splats**. Metrics help with reconstruction modes;
+   visible paint and stroke structure matter more for stylized modes.
 5. Open **Export** to save the current rendering as PNG. Gaussian results can
    also be saved as a standard 3DGS PLY; virtual-camera results can be inspected
    in **Tilt**.
@@ -65,23 +58,22 @@ reload, so save PNG or PLY results you want to keep.
 | Algorithm | Purpose | Exact export | Tilt |
 | --- | --- | --- | --- |
 | `Planar Gaussian` | Stable front-view approximation of one image | PNG and standard 3DGS PLY | No |
-| `Rectangle Splats` | Analytic rectangle, trapezoid, or triangle paint shapes | PNG | No |
-| `Brush Splats` | Directional illustrative brush shapes | PNG | No |
+| `Rectangle Splats` | Rectangle, trapezoid, triangle, or legacy Illustrative Brush shapes | PNG | No |
+| `Flow Brush Fusion` | Curved strokes fused from compact Brush Splats | PNG | No |
 | `GS Virtual Camera Sampling` | Thin-depth 3DGS-style training from front and virtual teachers | PNG and standard 3DGS PLY | Yes |
 
-All four choices share one custom WebGPU optimizer and standard front-to-back
-alpha compositing. Each algorithm keeps its own initialization, kernel, opacity
-semantics, settings, metrics, and export capability. Grid initialization and
-density growth respect the source image's pixel aspect. `GS Virtual Camera
-Sampling` can additionally learn a small bounded depth and is the only path that
-enables virtual-camera teachers and the `Tilt` tab.
+All four choices run locally with WebGPU. Planar, Rectangle, and Virtual Camera
+share the main splat optimizer; Flow uses a differentiable curved-stroke
+optimizer. `Rectangle Splats` keeps the former Brush path as its `Illustrative
+Brush` shape. `GS Virtual Camera Sampling` is the only mode that enables
+virtual-camera teachers and the `Tilt` tab.
 
 The selector configures the next run. Once a result exists, Export eligibility
 and Tilt availability stay bound to that completed result until Reset, Clear,
 image replacement, or a new completed run.
 
 <details>
-<summary><strong>Advanced Rectangle and Brush behavior</strong></summary>
+<summary><strong>Advanced Rectangle behavior</strong></summary>
 
 `Rectangle Splats` exposes `Min` and `Max` values for
 `Short edge / long edge`. `1 / 1` keeps the current rectangular kernel.
@@ -100,11 +92,13 @@ center to Min at the perimeter. Final opacity is
 `learned opacity × directional multiplier × center-to-edge multiplier`.
 The default `1 / 1` for both multipliers preserves the former uniform behavior.
 
-### Brush Splats settings
+### Illustrative Brush shape settings
 
-Brush settings apply at the next Train start. Experimental checkboxes remain
-off by default. Equal directional endpoints are treated as a uniform/no-taper
-setting, so the defaults retain the accepted Brush path.
+Choose `Illustrative Brush` from the Rectangle `Splat shape` control to use the
+former Brush Splats path. Its settings apply at the next Train start.
+Experimental checkboxes remain off by default. Equal directional endpoints are
+treated as a uniform/no-taper setting, so the defaults retain the accepted
+Brush path.
 
 | Setting | What it changes |
 | --- | --- |
@@ -154,11 +148,12 @@ the selected point; final quality metrics always evaluate the RGB result.
 
 ## Exports
 
-- PNG exports the current rendered result for every algorithm.
+- PNG exports the current rendered or painted result for every algorithm.
 - Splat PNG resolution can use the training size, 2K, 4K, or a custom long side
   while preserving the trained image aspect ratio.
 - Standard SH0 3DGS PLY is available for the two Gaussian algorithms.
-  Rectangle and Brush use non-Gaussian kernels and therefore export PNG only.
+  Rectangle, Illustrative Brush, and Flow use paint-specific structures and
+  therefore export PNG only.
 
 PLY results are learned from one image and prioritize its front view. Virtual
 Camera Sampling supports bounded tilt, but does not replace true multi-view
@@ -170,7 +165,7 @@ Open `index.html` directly or serve the repository as static files. Before
 publishing, run:
 
 ```sh
-node verify-release.mjs
+npm run verify
 ```
 
 GitHub Pages publishes the reviewed static app. Training uses the custom WebGPU
@@ -181,17 +176,17 @@ validated with AI assistance.
 
 ## Research inspiration
 
-Image2SplatPaint was inspired by
-[Image-GS](https://arxiv.org/abs/2407.01866) and
-[Soft Anisotropic Diagrams](https://luckyiyi.github.io/SAD/index.html), while
-its implementation and paint-oriented design are developed independently.
+Image2SplatPaint takes inspiration from
+[Image-GS](https://arxiv.org/abs/2407.01866),
+[Soft Anisotropic Diagrams](https://luckyiyi.github.io/SAD/index.html), and the
+paint flow of [wet-paint-flow](https://github.com/simonxxooxxoo/wet-paint-flow).
+Its implementation and layered paint design are developed independently.
 
 ## Roadmap
 
 - Improve faithful image representation for the Planar Gaussian and Virtual
   Camera paths.
-- Develop Rectangle and Brush splats as distinct stylization and image-making
-  media.
+- Develop Rectangle, Illustrative Brush, and Flow as distinct paint media.
 - Improve training methods for paint-oriented effects, stroke structure, and
   controllable visual character.
 - Improve compatibility with conventional 3D Gaussian Splatting workflows.

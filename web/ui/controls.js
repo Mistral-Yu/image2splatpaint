@@ -119,6 +119,37 @@ els.finalSplatCount.addEventListener("input", () => {
 });
 els.adaptiveGridInitializationFraction.addEventListener("input", publishState);
 els.liveQualityMetrics.addEventListener("change", publishState);
+els.rectanglePaintShape.addEventListener("change", () => {
+  syncAlgorithmRequirements();
+  publishState();
+});
+els.flowSplatUnderpainting.addEventListener("change", () => {
+  syncAlgorithmRequirements();
+  publishState();
+});
+els.flowSplatUnderpaintPercent.addEventListener("input", publishState);
+els.flowSplatFusionStrokeOptimization.addEventListener("change", publishState);
+els.flowSplatFusionStrokeTexture.addEventListener("change", publishState);
+els.flowSplatFusionPaintCurriculum.addEventListener("change", () => {
+  syncAlgorithmRequirements();
+  publishState();
+});
+for (const control of [
+  els.flowSplatFusionFixedOpacity,
+  els.flowSplatFusionStartingWidthDivisor,
+  els.flowSplatFusionStartingLengthPercent,
+  els.flowSplatFusionResidualMovePx,
+  els.flowSplatFusionInitialWidthMin,
+  els.flowSplatFusionInitialWidthMax,
+  els.flowSplatFusionFrontWidthMax,
+  els.flowSplatFusionFrontWidthLearning,
+]) {
+  control.addEventListener("input", publishState);
+}
+els.flowSplatFusionScaleMatchedResidualRepaint.addEventListener("change", publishState);
+els.flowSplatFusionWidthPercent.addEventListener("input", publishState);
+els.flowSplatFusionSplatSizeVariation.addEventListener("input", publishState);
+els.flowSplatFusionMovementLimit.addEventListener("input", publishState);
 els.currentContributionCompaction.addEventListener("change", () => {
   syncAlgorithmRequirements();
   publishState();
@@ -293,6 +324,11 @@ els.rectangleMaxAspectRatio.addEventListener("change", () => {
 });
 els.rectangleOrientation.addEventListener("change", () => {
   els.rectangleOrientation.value = selectedRectangleOrientation();
+  syncAlgorithmRequirements();
+  publishState();
+});
+els.rectangleOrientationTolerance.addEventListener("change", () => {
+  els.rectangleOrientationTolerance.value = String(selectedRectangleOrientationToleranceDegrees());
   publishState();
 });
 for (const control of [

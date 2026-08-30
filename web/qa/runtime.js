@@ -1,4 +1,127 @@
+let qaFlowRibbonPreviewCache = null;
+
+function presentQaFlowRibbonResult(result) {
+  state.flowSplatResult = { sourceImage: state.image, ...result };
+  presentFlowSplatFusionResult(state.flowSplatResult);
+}
+
 if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
+  flowStrokeWorkloadProfile(options = {}) {
+    if (!state.image) throw new Error("Load an image before profiling flow-stroke training.");
+    const representation = options.representation === "fused-ribbon"
+      ? "fused-ribbon"
+      : "curve-splat-chain";
+    const maxSide = Math.max(32, Math.min(512, Math.round(Number(options.maxSide) || 512)));
+    const requestedSplats = Math.max(256, Math.min(14000, Math.round(Number(options.maxSplats) || 8192)));
+    const splatsPerChain = Image2SplatPaintFlowRibbonTrainer.constants.CURVE_SAMPLES;
+    const maxStrokes = representation === "curve-splat-chain"
+      ? Math.max(1, Math.floor(requestedSplats / splatsPerChain))
+      : requestedSplats;
+    const [width, height] = resizedSize(state.image.width, state.image.height, maxSide);
+    const trainingImage = width === state.image.width && height === state.image.height
+      ? state.image
+      : { ...state.image, ...resizeFloatImageBilinear(state.image, width, height) };
+    const reference = Image2SplatPaintFlowPaintReference.createFlowPaintReference(trainingImage, {
+      seed: 240825,
+      strength: 1,
+      profile: "connected-ribbon-v1",
+      maxStrokes,
+      minimumStrokes: representation === "curve-splat-chain" ? 1 : 256,
+      includeStrokePlan: true,
+    });
+    const prepared = Image2SplatPaintFlowRibbonTrainer.prepareTrainingData(
+      trainingImage,
+      reference.strokePlan,
+      { maxStrokes: reference.strokePlan.length, representation },
+    );
+    const curveSampleEvaluationsPerCandidate = representation === "curve-splat-chain" ? 3 : 84;
+    const tileSampleStride = representation === "curve-splat-chain" ? 8 : 1;
+    return {
+      representation,
+      width,
+      height,
+      pixels: width * height,
+      requested_splats: requestedSplats,
+      curve_count: prepared.strokeCount,
+      physical_splat_count: representation === "curve-splat-chain"
+        ? prepared.strokeCount * splatsPerChain
+        : null,
+      tile_size: Image2SplatPaintFlowRibbonTrainer.constants.TILE_SIZE,
+      tile_candidate_entries: prepared.tileCandidateEntries,
+      tile_candidates_mean: prepared.meanTileCandidates,
+      tile_candidates_max: prepared.maxTileCandidates,
+      pixel_candidate_pairs_per_iteration: prepared.pixelCandidatePairs,
+      tile_sample_stride: tileSampleStride,
+      sampled_pixel_candidate_pairs_per_iteration:
+        Math.ceil(prepared.pixelCandidatePairs / tileSampleStride),
+      curve_sample_evaluations_per_candidate: curveSampleEvaluationsPerCandidate,
+      curve_sample_evaluations_per_iteration:
+        Math.ceil(prepared.pixelCandidatePairs * curveSampleEvaluationsPerCandidate / tileSampleStride),
+      preview_readback_bytes: width * height * 16,
+    };
+  },
+  async trainFlowRibbon(options = {}) {
+    if (!state.image) throw new Error("Load an image before training the Flow Paint ribbon candidate.");
+    const sourceImage = state.image;
+    const requestedSide = Math.max(64, Math.min(256, Math.round(Number(options.maxSide) || 256)));
+    const [width, height] = resizedSize(state.image.width, state.image.height, requestedSide);
+    const trainingImage = width === state.image.width && height === state.image.height
+      ? state.image
+      : { ...state.image, ...resizeFloatImageBilinear(state.image, width, height) };
+    const reference = Image2SplatPaintFlowPaintReference.createFlowPaintReference(trainingImage, {
+      seed: 240825,
+      strength: 1,
+      profile: "connected-ribbon-v1",
+      maxStrokes: Math.max(256, Math.min(14000, Math.round(Number(options.maxStrokes) || 14000))),
+      includeStrokePlan: true,
+    });
+    const result = await Image2SplatPaintFlowRibbonTrainer.train(
+      trainingImage,
+      reference.strokePlan,
+      {
+        iterations: Math.max(1, Math.min(300, Math.round(Number(options.iterations) || 300))),
+        maxStrokes: reference.strokePlan.length,
+        colorAnchor: Number(options.colorAnchor ?? 0.0035),
+        geometryAnchor: Number(options.geometryAnchor ?? 0.00035),
+        widthAnchor: Number(options.widthAnchor ?? 0.0008),
+        opacityAnchor: Number(options.opacityAnchor ?? 0.0008),
+        shouldStop: options.shouldStop,
+        onProgress(progress) {
+          document.documentElement.dataset.qaFlowTrainIteration = String(progress.iteration);
+          document.documentElement.dataset.qaFlowTrainIterations = String(progress.iterations);
+          options.onProgress?.(progress);
+        },
+      },
+    );
+    if (state.image !== sourceImage) throw new Error("The loaded image changed during Flow Paint training.");
+    qaFlowRibbonPreviewCache = { sourceImage, result };
+    presentQaFlowRibbonResult(result);
+    window.__lastFlowRibbonTraining = structuredClone(result.metadata);
+    return structuredClone(result.metadata);
+  },
+  hasFlowRibbonResult() {
+    return Boolean(qaFlowRibbonPreviewCache?.sourceImage === state.image);
+  },
+  showFlowRibbonResult() {
+    if (qaFlowRibbonPreviewCache?.sourceImage !== state.image) return null;
+    presentQaFlowRibbonResult(qaFlowRibbonPreviewCache.result);
+    return structuredClone(qaFlowRibbonPreviewCache.result.metadata);
+  },
+  getLastFlowRibbonTraining() {
+    return structuredClone(window.__lastFlowRibbonTraining || null);
+  },
+  showFlowPaintReference(options = {}) {
+    if (!state.image) throw new Error("Load an image before previewing the flow-painted reference.");
+    const result = Image2SplatPaintFlowPaintReference.createFlowPaintReference(state.image, options);
+    fitCanvases(result.image.width, result.image.height);
+    previewCtx.putImageData(
+      rgbToImageData(result.image.rgb, result.image.width, result.image.height, result.image.alpha),
+      0,
+      0,
+    );
+    showCanvas("preview");
+    return structuredClone(result.metadata);
+  },
   loadGeneratedSample,
   structureGuidedProfileBenchmark,
   initialSplatOrientation,

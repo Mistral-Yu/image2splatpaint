@@ -138,7 +138,7 @@ class WebGpuOptimizerRuntime {
       phase37.progressiveGradientLoss || frontDetailLoss ? 0.02 : 0,
       learningRates.maxAnisotropy,
       experimentalDensifySteps(state.metrics?.steps_requested || 1),
-      els.tileCullingToggle.checked ? 1 : 0,
+      this.trainState.tileCullingEnabled ? 1 : 0,
       variants.importanceRecycle ? 1 : 0,
       variants.coverageLoss ? 1 : 0,
       variants.coverageTarget,
@@ -164,7 +164,7 @@ class WebGpuOptimizerRuntime {
       0,
       0,
       phase40.localColorAnchorWeight,
-      els.trainLayerOrder.checked ? 1 : 0,
+      params.layerOrderEnabled ? 1 : 0,
       phase40.alphaLoss ? phase40.alphaLossWeight : 0,
       0,
       0,
@@ -252,7 +252,7 @@ class WebGpuOptimizerRuntime {
     const segmentedExactBackwardActive = Boolean(
       useExactBackward &&
       !sourceDomainActive &&
-      els.tileCullingToggle.checked &&
+      this.trainState.tileCullingEnabled &&
       this.trainState.segmentedExactBackward?.enabled,
     );
     const fixedPointExactGradientActive = Boolean(
@@ -292,7 +292,7 @@ class WebGpuOptimizerRuntime {
       } else {
         this.device.queue.writeBuffer(this.trainState.configBuffer, 0, config);
       }
-      if (els.tileCullingToggle.checked) {
+      if (this.trainState.tileCullingEnabled) {
         await this.prepareTileLists(workImage, params, {
           encoder,
           profileSample,
@@ -828,7 +828,7 @@ class WebGpuOptimizerRuntime {
         opacity_aware_support: this.opacityAwareSupportMode,
         render_gradient_optimizer: true,
         dssim_weight: DEFAULT_DSSIM_WEIGHT,
-        compact_tile_candidates: Boolean(els.tileCullingToggle.checked),
+        compact_tile_candidates: this.trainState.tileCullingEnabled,
         tile_builds: this.trainState.tileBuilds,
         sgld_2d: true,
         experimental_variants: experimentalVariants(),
@@ -943,12 +943,8 @@ class WebGpuOptimizerRuntime {
       }
       let result;
       const virtualStep = trainingCamera.kind === "virtual";
-      const gradientBalance = virtualCameraGradientBalance(
-        samplingVariants.virtualSlots,
-        samplingVariants.slots,
-      );
       const frontGradientAnchorWeight = virtualStep
-        ? gradientBalance.frontGradientAnchorWeight
+        ? samplingVariants.frontGradientAnchorWeight
         : 0;
       const cameraCounts = virtualCameraSamplingCountsThroughStep(
         currentStep,
@@ -1026,7 +1022,7 @@ class WebGpuOptimizerRuntime {
           : "selected-view-all",
         virtual_camera_front_anchor_weight: frontGradientAnchorWeight,
         virtual_camera_effective_gradient_share_percent:
-          gradientBalance.effectiveVirtualShare * 100,
+          samplingVariants.effectiveGradientSharePercent,
         virtual_camera_front_anchor_passes: frontGradientAnchorWeight > 0
           ? cameraCounts.virtual
           : 0,

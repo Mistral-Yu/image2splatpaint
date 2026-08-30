@@ -58,7 +58,7 @@ const ALGORITHM_REGISTRY = Object.freeze({
   }),
   [LAYERED_OPAQUE_BRUSH_ALGORITHM_ID]: Object.freeze({
     id: LAYERED_OPAQUE_BRUSH_ALGORITHM_ID,
-    label: "Brush Splats",
+    label: "Brush Splats (compatibility)",
     backend: "custom-webgpu",
     initialize: initLayeredOpaqueBrush,
     train: trainLayeredOpaqueBrush,
@@ -76,6 +76,46 @@ const ALGORITHM_REGISTRY = Object.freeze({
       requiresLayerOrder: true,
       configurableLayerCount: true,
       contributionCleanup: true,
+      compatibilityAliasFor: RECTANGLE_SPLATS_ALGORITHM_ID,
+    }),
+  }),
+  [FLOW_SPLAT_FUSION_ALGORITHM_ID]: Object.freeze({
+    id: FLOW_SPLAT_FUSION_ALGORITHM_ID,
+    label: "Flow Brush Fusion",
+    backend: "flow-splat-chain-webgpu",
+    initialize: null,
+    train: trainFlowSplatFusion,
+    exports: Object.freeze(["png"]),
+    capabilities: Object.freeze({
+      render: true,
+      metrics: true,
+      png: true,
+      ply: false,
+      tilt: false,
+      virtualCameras: false,
+      flowSplatFusion: true,
+      curveSplatChain: true,
+      microSplatsPerChain: 4,
+    }),
+  }),
+  [CURVE_SPLAT_CHAIN_ALGORITHM_ID]: Object.freeze({
+    id: CURVE_SPLAT_CHAIN_ALGORITHM_ID,
+    label: "Curve Splat Chain",
+    backend: "flow-splat-chain-webgpu",
+    initialize: null,
+    train: trainFlowSplatFusion,
+    exports: Object.freeze([]),
+    capabilities: Object.freeze({
+      render: true,
+      metrics: true,
+      png: false,
+      ply: false,
+      tilt: false,
+      virtualCameras: false,
+      flowSplatFusion: true,
+      curveSplatChain: true,
+      microSplatsPerChain: 4,
+      compatibilityAliasFor: FLOW_SPLAT_FUSION_ALGORITHM_ID,
     }),
   }),
   [GS_VIRTUAL_CAMERA_ALGORITHM_ID]: Object.freeze({
@@ -131,11 +171,16 @@ const els = {
   dropZone: document.querySelector("#dropZone"),
   fileInput: document.querySelector("#fileInput"),
   trainSize: document.querySelector("#trainSize"),
+  initialSplatCountLabel: document.querySelector("#initialSplatCountLabel"),
   initialSplatCount: document.querySelector("#initialSplatCount"),
   adaptiveGridInitializationFraction: document.querySelector("#adaptiveGridInitializationFraction"),
   finalSplatCount: document.querySelector("#finalSplatCount"),
+  finalSplatCountLabel: document.querySelector("#finalSplatCountLabel"),
   capacityMode: document.querySelector("#capacityMode"),
   algorithmSelect: document.querySelector("#algorithmSelect"),
+  rectanglePaintPanel: document.querySelector(".rectangle-paint-panel"),
+  rectanglePaintShape: document.querySelector("#rectanglePaintShape"),
+  rectangleShapeSettings: document.querySelector("#rectangleShapeSettings"),
   stepCount: document.querySelector("#stepCount"),
   previewRefresh: document.querySelector("#previewRefresh"),
   liveQualityMetrics: document.querySelector("#liveQualityMetrics"),
@@ -190,6 +235,7 @@ const els = {
   rectangleMinAspectRatio: document.querySelector("#rectangleMinAspectRatio"),
   rectangleMaxAspectRatio: document.querySelector("#rectangleMaxAspectRatio"),
   rectangleOrientation: document.querySelector("#rectangleOrientation"),
+  rectangleOrientationTolerance: document.querySelector("#rectangleOrientationTolerance"),
   rectanglePreserveArea: document.querySelector("#rectanglePreserveArea"),
   rectangleEdgeDirectedTaper: document.querySelector("#rectangleEdgeDirectedTaper"),
   rectangleStructureAwareRatio: document.querySelector("#rectangleStructureAwareRatio"),
@@ -252,6 +298,30 @@ const els = {
   pauseButton: document.querySelector("#pauseButton"),
   stopButton: document.querySelector("#stopButton"),
   resetButton: document.querySelector("#resetButton"),
+  flowSplatFusionPanel: document.querySelector("#flowSplatFusionPanel"),
+  flowSplatFusionPanelSummary: document.querySelector("#flowSplatFusionPanelSummary"),
+  flowSplatFusionPanelNote: document.querySelector("#flowSplatFusionPanelNote"),
+  flowSplatFusionStrokeTexture: document.querySelector("#flowSplatFusionStrokeTexture"),
+  flowSplatFusionStrokeOptimization: document.querySelector("#flowSplatFusionStrokeOptimization"),
+  flowSplatFusionPaintCurriculum: document.querySelector("#flowSplatFusionPaintCurriculum"),
+  flowSplatFusionFixedOpacity: document.querySelector("#flowSplatFusionFixedOpacity"),
+  flowSplatFusionStartingWidthDivisor: document.querySelector("#flowSplatFusionStartingWidthDivisor"),
+  flowSplatFusionStartingLengthPercent: document.querySelector("#flowSplatFusionStartingLengthPercent"),
+  flowSplatFusionResidualMovePx: document.querySelector("#flowSplatFusionResidualMovePx"),
+  flowSplatFusionScaleMatchedResidualRepaint: document.querySelector("#flowSplatFusionScaleMatchedResidualRepaint"),
+  flowSplatFusionInitialWidthMin: document.querySelector("#flowSplatFusionInitialWidthMin"),
+  flowSplatFusionInitialWidthMax: document.querySelector("#flowSplatFusionInitialWidthMax"),
+  flowSplatFusionFrontWidthMax: document.querySelector("#flowSplatFusionFrontWidthMax"),
+  flowSplatFusionFrontWidthLearning: document.querySelector("#flowSplatFusionFrontWidthLearning"),
+  flowSplatFusionColorAnchor: document.querySelector("#flowSplatFusionColorAnchor"),
+  flowSplatFusionWidthPercent: document.querySelector("#flowSplatFusionWidthPercent"),
+  flowSplatFusionSplatSizeVariation: document.querySelector("#flowSplatFusionSplatSizeVariation"),
+  flowSplatFusionMovementLimit: document.querySelector("#flowSplatFusionMovementLimit"),
+  flowSplatUnderpainting: document.querySelector("#flowSplatUnderpainting"),
+  flowSplatUnderpaintPercentLabel: document.querySelector("#flowSplatUnderpaintPercentLabel"),
+  flowSplatUnderpaintPercent: document.querySelector("#flowSplatUnderpaintPercent"),
+  flowSplatFusionMaxArcLabel: document.querySelector("#flowSplatFusionMaxArcLabel"),
+  flowSplatFusionMaxArcPercent: document.querySelector("#flowSplatFusionMaxArcPercent"),
   savePngButton: document.querySelector("#savePngButton"),
   savePlyButton: document.querySelector("#savePlyButton"),
   pngExportResolution: document.querySelector("#pngExportResolution"),
@@ -348,16 +418,6 @@ function resizedSize(width, height, longSide, maximumLongSide = LIMITS.trainSize
   const safeLongSide = clampNumber(longSide, 1, maximumLongSide, Math.min(DEFAULT_MAX_SIDE, maximumLongSide));
   const scale = Math.min(1, safeLongSide / Math.max(width, height));
   return [Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale))];
-}
-
-function resizeTargetSize(width, height) {
-  const [targetWidth, targetHeight] = resizedSize(width, height, Number(els.trainSize.value));
-  return {
-    width: targetWidth,
-    height: targetHeight,
-    mode: "max-side",
-    scale: Math.max(targetWidth / width, targetHeight / height),
-  };
 }
 
 function syncTrainSizeUi() {
@@ -505,6 +565,7 @@ function resetTrainingState() {
   state.webgpu.renderer?.disposeTrainState();
   state.webgpu.renderer?.disposeResultRenderState();
   state.params = null;
+  state.flowSplatResult = null;
   state.metrics = null;
   state.previewPadding = previewPaddingSpec(state.image, null, false);
   state.paused = false;
@@ -540,6 +601,7 @@ function clearImage() {
   releaseImageSource(state.image);
   state.image = null;
   state.params = null;
+  state.flowSplatResult = null;
   state.metrics = null;
   state.paused = false;
   state.stopRequested = false;

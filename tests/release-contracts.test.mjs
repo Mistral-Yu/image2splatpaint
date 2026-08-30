@@ -36,18 +36,19 @@ test("training WGSL declaration block remains byte-stable", async () => {
   const begin = "    // BEGIN BYTE-STABLE TRAINING SHADER DECLARATIONS\n";
   const end = "    // END BYTE-STABLE TRAINING SHADER DECLARATIONS";
   const block = source.slice(source.indexOf(begin) + begin.length, source.indexOf(end));
-  assert.equal(block.length, 149625);
+  // Intentional Rectangle orientation-tolerance addition; other WGSL stays frozen.
+  assert.equal(block.length, 150371);
   const { createHash } = await import("node:crypto");
-  assert.equal(createHash("sha256").update(block).digest("hex"), "055b4e1d21108a0a48b58aa3cfc5a39ef19b5f3d8a84d477367b093a2ee92019");
+  assert.equal(createHash("sha256").update(block).digest("hex"), "6e6c2973e28f3c5d28085d19202de80909d58c1090c4d821d8ddda108acae3c1");
 });
 
 test("density WGSL literal remains byte-stable", async () => {
   const source = await readFile(new URL("../web/gpu/shaders/density-pipelines.js", import.meta.url), "utf8");
   const tick = String.fromCharCode(96);
   const shader = source.slice(source.indexOf(`return ${tick}`) + 8, source.lastIndexOf(`${tick};`));
-  assert.equal(shader.length, 87070);
+  assert.equal(shader.length, 87425);
   const { createHash } = await import("node:crypto");
-  assert.equal(createHash("sha256").update(shader).digest("hex"), "fce07bd4b31ef69d8639e58bf44fa885e058f38abc4dfab92fdefe1cfe04b08c");
+  assert.equal(createHash("sha256").update(shader).digest("hex"), "516f7109af923d68b066d8714b48146f4112919370f4283cfbb6248ec0d9483e");
 });
 
 test("Pages workflow uses tracked source, contract, build, and release gates", async () => {
@@ -74,4 +75,233 @@ test("GPU feature composition rejects collisions without copying implementations
   assert.match(tileRuntime, /registerWebGpuPreviewFeature\(WebGpuTileRuntime\.prototype/);
   assert.match(optimizer, /registerWebGpuPreviewFeature\(WebGpuOptimizerRuntime\.prototype/);
   assert.doesNotMatch(`${tilePipelines}\n${tileRuntime}\n${optimizer}`, /Object\.defineProperty\(\s*WebGpuPreview\.prototype/);
+  assert.doesNotMatch(optimizer, /\bels\./, "GPU optimizer must consume run state rather than live DOM controls");
+  assert.match(optimizer, /this\.trainState\.tileCullingEnabled/);
+  assert.match(optimizer, /params\.layerOrderEnabled/);
+});
+
+test("Training actions stay on one four-column row", async () => {
+  const styles = await readFile(new URL("../web/styles.css", import.meta.url), "utf8");
+  assert.match(
+    styles,
+    /\.actions\s*\{[^}]*grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\)/s,
+    "Train, Pause, Stop, and Reset must stay on one four-column row",
+  );
+});
+
+test("Flow Brush Fusion is the third public Algorithm and legacy Brush is a Rectangle shape", async () => {
+  const html = await readFile(new URL("../web/index.html", import.meta.url), "utf8");
+  const styles = await readFile(new URL("../web/styles.css", import.meta.url), "utf8");
+  const app = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
+  const exportRuntime = await readFile(new URL("../web/export/runtime.js", import.meta.url), "utf8");
+  const bootstrap = await readFile(new URL("../web/ui/bootstrap.js", import.meta.url), "utf8");
+  const controls = await readFile(new URL("../web/ui/training-controls.js", import.meta.url), "utf8");
+  const algorithms = await readFile(new URL("../web/core/algorithms.js", import.meta.url), "utf8");
+  const initialization = await readFile(new URL("../web/training/initialization-runtime.js", import.meta.url), "utf8");
+  const integration = await readFile(new URL("../web/training/flow-splat-fusion.js", import.meta.url), "utf8");
+  const topology = await readFile(new URL("../web/training/flow-stroke-topology.js", import.meta.url), "utf8");
+  const flowReference = await readFile(new URL("../web/training/flow-paint-reference.js", import.meta.url), "utf8");
+  const ribbonTrainer = await readFile(new URL("../web/training/flow-ribbon-trainer.js", import.meta.url), "utf8");
+  assert.match(
+    html,
+    /value="planar-gaussian" selected>Planar Gaussian<\/option>[^]*value="rectangle-splats">Rectangle Splats<\/option>[^]*value="flow-splat-fusion">Flow Brush Fusion<\/option>[^]*value="gs-virtual-camera-sampling">GS Virtual Camera Sampling<\/option>/,
+  );
+  assert.doesNotMatch(html, /<option value="layered-opaque-brush">/);
+  assert.match(html, /id="rectanglePaintShape"[^]*value="rectangle" selected>Rectangle<\/option>[^]*value="opaque-brush">Illustrative Brush<\/option>/);
+  assert.match(html, /id="rectangleShapeSettings"/);
+  assert.match(html, /Illustrative Brush shape settings/);
+  const rectangleSettingsMarkup = html.slice(
+    html.indexOf('<section class="rectangle-paint-panel'),
+    html.indexOf('<section class="virtual-camera-panel'),
+  );
+  assert.equal((rectangleSettingsMarkup.match(/<details\b/g) || []).length, 1);
+  assert.match(rectangleSettingsMarkup, /data-testid="opaque-paint-settings"[^]*data-testid="layered-opaque-brush-settings"/);
+  assert.match(controls, /rectangleShapeSettings\.hidden = !rectangleSelected/);
+  assert.match(
+    controls,
+    /function setInputControlsDisabled\(disabled\)[^]*els\.algorithmSelect,[^]*els\.rectanglePaintShape,[^]*els\.trainSize,/,
+    "Rectangle / Brush shape selection must be locked with the other training inputs",
+  );
+  assert.match(algorithms, /function selectedRectanglePaintShape\(\)/);
+  assert.match(algorithms, /algorithm\?\.id === RECTANGLE_SPLATS_ALGORITHM_ID[^]*selectedRectanglePaintShape\(\) === "opaque-brush"/);
+  assert.match(initialization, /initOpaqueLayeredPaint\(image, count, selectedRectanglePaintShape\(\)\)/);
+  assert.doesNotMatch(html, /id="flowSplatFusionPanel"[^>]*\bhidden\b/);
+  assert.doesNotMatch(controls, /flowSplatFusionPanel\.hidden/);
+  assert.match(html, /data-settings-scope="shared" data-settings-order="1"/);
+  assert.match(html, /data-testid="rectangle-paint-panel" data-settings-order="2"/);
+  assert.doesNotMatch(html, /data-testid="opaque-paint-panel"[^>]*data-settings-order/);
+  assert.match(html, /data-testid="flow-splat-fusion-panel" data-settings-order="3"/);
+  assert.match(html, /data-testid="virtual-camera-panel" data-settings-order="4"/);
+  assert.match(html, /data-testid="budget-panel" data-settings-order="5"/);
+  assert.match(
+    styles,
+    /\[data-settings-order="1"\]\s*\{\s*order:\s*1;\s*\}[^]*\[data-settings-order="5"\]\s*\{\s*order:\s*5;\s*\}/,
+  );
+  assert.match(html, /\.\/training\/flow-paint-reference\.js/);
+  assert.match(html, /\.\/training\/flow-ribbon-trainer\.js/);
+  assert.doesNotMatch(html, /\.\/qa\/flow-(?:paint-reference|ribbon-trainer)\.js/);
+  assert.match(
+    app,
+    /\[FLOW_SPLAT_FUSION_ALGORITHM_ID\][^]*exports: Object\.freeze\(\["png"\]\)[^]*png: true/,
+  );
+  assert.match(exportRuntime, /function currentFlowPngResult\(\)/);
+  assert.match(exportRuntime, /async function makeFlowPreviewPngBlob\(/);
+  assert.match(exportRuntime, /image2splatpaint-flow-brush-fusion\.png/);
+  assert.match(html, /id="flowSplatFusionMaxArcPercent"[^>]*value="10"/);
+  assert.match(html, /id="flowSplatFusionStrokeOptimization"/);
+  assert.match(html, /id="flowSplatFusionStrokeTexture"/);
+  assert.doesNotMatch(html, /id="flowSplatFusionTopology"/);
+  assert.match(html, /id="flowSplatFusionPaintCurriculum"[^>]*\bchecked\b/);
+  assert.match(html, /id="flowSplatFusionFixedOpacity"[^>]*value="0\.995"/);
+  assert.doesNotMatch(html, /id="flowSplatFusionDepthLayerOpacity"/);
+  assert.match(html, /id="flowSplatFusionStartingWidthDivisor"[^>]*value="32"/);
+  assert.match(html, /id="flowSplatFusionStartingLengthPercent"[^>]*value="160"/);
+  assert.match(html, /id="flowSplatFusionResidualMovePx"[^>]*value="1\.5"/);
+  assert.match(html, /id="flowSplatFusionScaleMatchedResidualRepaint"/);
+  assert.doesNotMatch(html, /id="flowSplatFusionScaleMatchedResidualRepaint"[^>]*\bchecked\b/);
+  assert.match(html, /id="flowSplatFusionInitialWidthMin"[^>]*value="55"/);
+  assert.match(html, /id="flowSplatFusionInitialWidthMax"[^>]*value="165"/);
+  assert.match(html, /id="flowSplatFusionFrontWidthMax"[^>]*value="300"/);
+  assert.match(html, /id="flowSplatFusionFrontWidthLearning"[^>]*value="400"/);
+  assert.doesNotMatch(html, /flowSplatFusionInitialOpacity(?:Min|Max)/);
+  assert.match(html, /value="brush-dabs" selected>Flow Brush \(8-Splat Baseline\)/);
+  assert.match(html, /value="baseline">Classic Gaussian \(4-Splat\)/);
+  assert.match(html, /value="fine-bristles">Fine bristles \(Gaussian\)/);
+  assert.match(controls, /The Baseline uses eight compact Brush Splats per curved stroke/);
+  assert.match(controls, /opaque interior and a feathered contour/);
+  assert.match(html, /value="balanced" selected>Balanced motion/);
+  assert.match(html, /id="flowSplatFusionWidthPercent"[^>]*value="300"/);
+  assert.match(html, /id="flowSplatFusionSplatSizeVariation"[^>]*value="40"/);
+  assert.match(html, /id="flowSplatFusionMovementLimit"[^>]*value="12"/);
+  assert.match(html, /id="flowSplatUnderpainting"[^>]*\bchecked\b/);
+  assert.match(html, /Opaque coverage backcoat/);
+  assert.match(html, /id="flowSplatUnderpaintPercent"[^>]*value="10"/);
+  assert.doesNotMatch(html, /flowPaintPreviewButton|localFlowPaintTrain/);
+  assert.doesNotMatch(bootstrap, /FLOW_SPLAT_FUSION_ALGORITHM_ID/);
+  assert.doesNotMatch(bootstrap, /Curve Splat Chain \(Local\)/);
+  assert.doesNotMatch(controls, /syncAlgorithmTrainingPreset|>Ribbons</);
+  assert.match(controls, /finalSplatCountLabel\.textContent = "Max splats"/);
+  assert.match(controls, /Physical Splat budget\. Detail uses complete stroke chains/);
+  assert.match(controls, /fixed compact backcoat closes gaps without changing standard alpha/);
+  assert.match(controls, /trainSize\.max = flowSelected \? "512"/);
+  assert.match(integration, /trainFlowSplatFusion/);
+  assert.match(integration, /: "brush-dabs";/);
+  assert.match(integration, /const representation = "curve-splat-chain"/);
+  assert.match(integration, /progressiveParentCounts/);
+  assert.match(integration, /strokeOptimizationProfiles/);
+  assert.match(integration, /flowStrokeTexture/);
+  assert.match(integration, /bristleBundle: flowBristleBundle/);
+  assert.match(integration, /brushDabs: flowBrushDabs/);
+  assert.match(integration, /flow_brush_dabs/);
+  assert.match(integration, /flow_brush_kernel: flowBrushDabs \? "compact-quartic-opaque-interior-v1" : "gaussian"/);
+  assert.match(integration, /const flowTextureGuidedDabs = flowBrushDabs/);
+  assert.match(integration, /flow-texture-guided-dabs/);
+  assert.match(integration, /textureGuidedAllocation: flowTextureGuidedDabs/);
+  assert.match(integration, /textureGuidedDabs: flowTextureGuidedDabs/);
+  assert.match(integration, /flow_texture_guided_dabs/);
+  assert.match(integration, /Image2SplatPaintFlowStrokeTopology\.evolve/);
+  assert.match(integration, /flow_topology_split_count/);
+  assert.match(integration, /flow_topology_residual_move_count/);
+  assert.match(integration, /flow_scale_matched_residual_repaint/);
+  assert.match(integration, /flow_fixed_stroke_opacity/);
+  assert.match(integration, /fixedOpacity: fixedStrokeOpacity/);
+  assert.match(integration, /flow_front_width_maximum_percent/);
+  assert.match(integration, /const strokeWidthMaximumFactor = strokeWidthPercent \/ 100/);
+  assert.match(integration, /frontWidthMaximumFactor: Math\.min\(/);
+  assert.match(integration, /flow_stroke_width_mode: "global-parent-width-ceiling"/);
+  assert.match(integration, /flow-xdog-thin-bristle-moderate-body-scale-families/);
+  assert.doesNotMatch(integration, /half_width_px: Math\.max\(0\.25, Number\(stroke\.half_width_px\) \* strokeWidthScale\)/);
+  assert.match(integration, /frontWidthLearningScale,/);
+  assert.match(integration, /"adaptive-brush-dab-texture-guided"/);
+  assert.match(integration, /: "adaptive-baseline"/);
+  assert.doesNotMatch(integration, /flow-adaptive-topology/);
+  assert.match(integration, /flow-residual-priority-tiles/);
+  assert.match(integration, /flow_tile_list_update: "growth-boundary-only"/);
+  assert.match(topology, /function splitStroke/);
+  assert.match(topology, /function mergePair/);
+  assert.match(topology, /sampleResidual/);
+  assert.match(topology, /optimizeResidualPlacement/);
+  assert.match(topology, /applyPaintCurriculum/);
+  assert.match(topology, /function fixedStrokeOpacity/);
+  assert.match(topology, /function widthFactorRangeForLayer/);
+  assert.match(topology, /function annotateTextureGuide/);
+  assert.match(topology, /edge_score: stats\.edge/);
+  assert.match(topology, /splitCellCapacity/);
+  assert.match(topology, /const learnedWidthDelta = Number\(target\.half_width_px\) - scheduledWidth/);
+  assert.match(ribbonTrainer, /fixed_opacity_logit: f32/);
+  assert.match(ribbonTrainer, /front_width_learning_scale: f32/);
+  assert.match(ribbonTrainer, /texture_guided_dabs: f32/);
+  assert.match(ribbonTrainer, /fn chain_texture_score/);
+  assert.match(ribbonTrainer, /fn chain_edge_score/);
+  assert.match(ribbonTrainer, /struct ChainKernelSample/);
+  assert.match(ribbonTrainer, /fn chain_kernel_sample/);
+  assert.match(ribbonTrainer, /let q = u4 \+ v4/);
+  assert.match(ribbonTrainer, /let feather = 0\.16/);
+  assert.match(ribbonTrainer, /if \(chain_uses_brush_dabs\(\)\) \{ return 1\.0; \}/);
+  assert.match(ribbonTrainer, /smoothstepRange\(0\.12, 0\.65, textureScore\)/);
+  assert.match(ribbonTrainer, /smoothstepRange\(0\.12, 0\.68, edgeScore\)/);
+  assert.match(ribbonTrainer, /0\.72 \+ shapeGuide \* 0\.28/);
+  assert.match(ribbonTrainer, /flatNormalOffsets = \[0\.16, 0\.08, -0\.16, -0\.08, 0\]/);
+  assert.match(ribbonTrainer, /mix\(0\.62, factor, shape_guide\)/);
+  assert.match(ribbonTrainer, /mix\(1\.15, factor, shape_guide\)/);
+  assert.match(ribbonTrainer, /dab_t = 0\.5 \+ \(dab_t - 0\.5\) \* \(0\.5 \+ texture \* 0\.5\)/);
+  assert.match(ribbonTrainer, /mix\(0\.88, factor, texture\)/);
+  assert.match(ribbonTrainer, /mix\(1\.45, factor, texture\)/);
+  assert.match(ribbonTrainer, /fn chain_uses_brush_dabs/);
+  assert.match(ribbonTrainer, /fn chain_normal_offset_factor/);
+  assert.match(ribbonTrainer, /fn chain_width_factor/);
+  assert.match(flowReference, /function buildFlowXdogGuide/);
+  assert.match(flowReference, /algorithm: "linear-srgb-flow-xdog-guide"/);
+  assert.match(flowReference, /edge_score_mode: "coherent-colour-plus-flow-xdog-78"/);
+  assert.match(flowReference, /normalDog\[index\] = Math\.abs/);
+  assert.match(flowReference, /coherentEdgeScore[^]*\+ \(1 - coherentEdgeScore\) \* flowXdog\.score\[index\] \* 0\.78/);
+  assert.match(ribbonTrainer, /splat_size_variation: f32/);
+  assert.match(ribbonTrainer, /fn chain_splat_width_variation/);
+  assert.match(ribbonTrainer, /fn chain_splat_length_variation/);
+  assert.match(ribbonTrainer, /sample == 0u \|\| sample == 2u/);
+  assert.match(ribbonTrainer, /sample == 0u\) \{ family_scale = 0\.06/);
+  assert.match(ribbonTrainer, /sample == 2u\) \{ family_scale = 1\.88/);
+  assert.match(ribbonTrainer, /f32\(136, Math\.max\(0, Math\.min\(1, Number\(options\.splatSizeVariation\)/);
+  assert.match(ribbonTrainer, /fn chain_pigment_scale/);
+  assert.match(ribbonTrainer, /const BRUSH_DAB_SAMPLES = 8/);
+  assert.match(ribbonTrainer, /params\[index\] = config\.fixed_opacity_logit/);
+  assert.match(integration, /createFlowGeometryAnchorParams/);
+  assert.match(integration, /detailGeometryAnchorParams/);
+  assert.match(integration, /FLOW_PROGRESSIVE_GROWTH_INTERVAL = 100/);
+  assert.match(integration, /FLOW_PROGRESSIVE_GROWTH_APPLY_UNTIL = 0\.90/);
+  assert.match(integration, /FLOW_SPLIT_APPLY_UNTIL = 0\.75/);
+  assert.match(integration, /splitFraction: 0\.04/);
+  assert.match(integration, /maximumSplitsPerEvent: 24/);
+  assert.match(integration, /buildFlowProgressiveGrowthSchedule/);
+  assert.match(integration, /progressive_growth_stage_count/);
+  assert.match(integration, /progressive_settle_iterations/);
+  assert.match(integration, /progressive_growth_parent_counts/);
+  assert.match(integration, /createSplatUnderpaintPlan/);
+  assert.match(integration, /trainingStrokePlan = \[\.\.\.rearPlan, \.\.\.detailPlan\]/);
+  assert.match(integration, /flow-coverage-backcoat/);
+  assert.match(integration, /fixed-grid-source-colored-compact-brush-backcoat/);
+  assert.match(integration, /coverage_backcoat_geometry_trainable: false/);
+  assert.match(integration, /residualRender: previousStage\?\.trainingState\.renderedLinearRgba/);
+  assert.match(integration, /initialDetailParams: undefined/);
+  assert.match(integration, /maximumCurveArcPx: reference\.metadata\.maximum_ribbon_arc_px/);
+  assert.match(integration, /previewInterval/);
+  assert.doesNotMatch(integration, /\bels\./, "Algorithm training must use the UI adapter rather than direct DOM controls");
+  assert.match(ribbonTrainer, /16x16-tile-2x2-lane-quad-parent-curve-reduction/);
+  assert.match(ribbonTrainer, /estimateCanvasLinear/);
+  assert.match(ribbonTrainer, /config\.canvas_linear_r/);
+  assert.match(ribbonTrainer, /stroke_motion_coherence/);
+  assert.match(ribbonTrainer, /BRISTLE_BUNDLE_SAMPLES = 4/);
+  assert.match(ribbonTrainer, /chain_uses_bristle/);
+  assert.match(ribbonTrainer, /translation_gradient/);
+  assert.match(ribbonTrainer, /alternating-residual-weighted-and-uniform/);
+  assert.match(ribbonTrainer, /tile_sampling_masks/);
+  assert.match(ribbonTrainer, /if \(config\.max_curve_arc > 0\.0 && params\[base \+ 14u\] < 2\.5\)/);
+  assert.match(ribbonTrainer, /chainQuadBackward \? CHAIN_QUAD_BACKWARD_WGSL : BACKWARD_WGSL/);
+  assert.match(ribbonTrainer, /evaluate_flow_underpaint_splat/);
+  assert.match(ribbonTrainer, /fn coverage_backcoat_kernel/);
+  assert.match(ribbonTrainer, /let coverage_backcoat = params\[base \+ 14u\] > 2\.5/);
+  assert.match(ribbonTrainer, /params\[index\] = anchors\[index\]/);
+  assert.match(ribbonTrainer, /cream_canvas_leak_linear_mean/);
+  assert.match(ribbonTrainer, /maximum_transmittance: maximumTransmittance/);
+  assert.match(integration, /dataset\.flowMaximumTransmittance/);
 });

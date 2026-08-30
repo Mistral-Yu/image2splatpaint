@@ -2480,11 +2480,19 @@ fn apply_optimizer(
   if (cfg(40u) > 0.5 && cfg(40u) < 1.5 && cfg(92u) > 0.5) {
     let longAxisIsX = nextScale.x >= nextScale.y;
     let vertical = cfg(92u) < 1.5;
-    nextTheta = select(
+    let targetTheta = select(
       select(1.57079632679, 0.0, longAxisIsX),
       select(0.0, 1.57079632679, longAxisIsX),
       vertical
     );
+    let tolerance = clamp(cfg(127u), 0.0, 1.57079632679);
+    if (tolerance <= 0.0) {
+      nextTheta = targetTheta;
+    } else if (tolerance < 1.57079632679) {
+      let offset = nextTheta - targetTheta;
+      let delta = offset - floor((offset + 1.57079632679) / 3.14159265359) * 3.14159265359;
+      nextTheta += clamp(delta, -tolerance, tolerance) - delta;
+    }
   }
   let nextCos = abs(cos(nextTheta));
   let nextSin = abs(sin(nextTheta));
@@ -2805,11 +2813,19 @@ fn optimize(@builtin(global_invocation_id) id: vec3<u32>) {
   if (cfg(40u) > 0.5 && cfg(40u) < 1.5 && cfg(92u) > 0.5) {
     let longAxisIsX = nextScale.x >= nextScale.y;
     let vertical = cfg(92u) < 1.5;
-    nextTheta = select(
+    let targetTheta = select(
       select(1.57079632679, 0.0, longAxisIsX),
       select(0.0, 1.57079632679, longAxisIsX),
       vertical
     );
+    let tolerance = clamp(cfg(127u), 0.0, 1.57079632679);
+    if (tolerance <= 0.0) {
+      nextTheta = targetTheta;
+    } else if (tolerance < 1.57079632679) {
+      let offset = nextTheta - targetTheta;
+      let delta = offset - floor((offset + 1.57079632679) / 3.14159265359) * 3.14159265359;
+      nextTheta += clamp(delta, -tolerance, tolerance) - delta;
+    }
   }
   let nextCos = abs(cos(nextTheta));
   let nextSin = abs(sin(nextTheta));

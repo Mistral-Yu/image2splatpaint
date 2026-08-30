@@ -419,6 +419,12 @@ label {
   grid-column: 1 / -1;
 }
 
+.training-panel-body > [data-settings-order="1"] { order: 1; }
+.training-panel-body > [data-settings-order="2"] { order: 2; }
+.training-panel-body > [data-settings-order="3"] { order: 3; }
+.training-panel-body > [data-settings-order="4"] { order: 4; }
+.training-panel-body > [data-settings-order="5"] { order: 5; }
+
 .brand h1 {
   margin: 0;
   font-size: 20px;
@@ -714,6 +720,41 @@ select {
 .rectangle-edge-ratio-row label,
 .paired-setting-row label {
   min-width: 0;
+}
+
+.local-flow-paint-panel {
+  border-color: color-mix(in srgb, var(--accent, #3277d5) 36%, transparent);
+}
+
+.flow-hidden {
+  display: none !important;
+}
+
+.local-flow-paint-note,
+.local-flow-paint-status,
+.local-flow-paint-metrics {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.local-flow-paint-note,
+.local-flow-paint-metrics {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.local-flow-paint-actions {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.local-flow-paint-status {
+  min-height: 1.2em;
+  font-size: 0.82rem;
+  font-weight: 700;
 }
 
 .brush-setting-divider {

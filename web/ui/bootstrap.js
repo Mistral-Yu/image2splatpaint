@@ -37,6 +37,7 @@ if (QA_RUNTIME_ENABLED) {
 }
 
 if (QA_RUNTIME_ENABLED && new URLSearchParams(location.search).has("qa")) {
+  const qaQuery = new URLSearchParams(location.search);
   els.pathInput.type = "text";
   els.pathInput.hidden = false;
   els.pathInput.setAttribute("aria-label", "QA image path");
@@ -56,14 +57,23 @@ if (QA_RUNTIME_ENABLED && new URLSearchParams(location.search).has("qa")) {
     "position:fixed;left:16px;bottom:80px;z-index:20;width:96px;height:30px;font-size:12px;opacity:0.35;";
   qaMetricsButton.addEventListener("click", () => {
     try {
+      const flowWorkload = state.image ? {
+        unified_flow_splat_chain: window.__flatPhotoTest.flowStrokeWorkloadProfile({
+          maxSide: Number(els.trainSize.value) || 512,
+          maxSplats: Number(els.finalSplatCount.value) || 8192,
+          representation: "curve-splat-chain",
+        }),
+      } : null;
       qaMetricsData.value = JSON.stringify({
         snapshot: window.__image2SplatPaint.snapshot(),
         metrics: window.__flatPhotoTest.metricsSummary(),
         benchmark: window.__flatPhotoTest.benchmarkSummary(),
+        flow_workload: flowWorkload,
         ply_contract: state.params ? inspectPlyContract() : null,
         edge_containment_probe: window.__flatPhotoTest.edgeContainmentProbe(),
       });
       document.documentElement.dataset.qaMetricsBytes = String(qaMetricsData.value.length);
+      document.documentElement.dataset.qaFlowWorkload = JSON.stringify(flowWorkload);
       document.documentElement.dataset.qaMetricsError = "";
     } catch (error) {
       qaMetricsData.value = "";
@@ -71,6 +81,63 @@ if (QA_RUNTIME_ENABLED && new URLSearchParams(location.search).has("qa")) {
       document.documentElement.dataset.qaMetricsError = error.message;
     }
   });
+  if (["1", "fine", "ribbon"].includes(qaQuery.get("brush-flow-reference"))) {
+    const flowReferenceMode = qaQuery.get("brush-flow-reference");
+    const fineFlowReference = flowReferenceMode === "fine";
+    const ribbonFlowReference = flowReferenceMode === "ribbon";
+    const qaFlowReferenceButton = document.createElement("button");
+    qaFlowReferenceButton.type = "button";
+    qaFlowReferenceButton.textContent = ribbonFlowReference
+      ? "QA Flow Ribbon"
+      : fineFlowReference ? "QA Fine Flow" : "QA Flow Reference";
+    qaFlowReferenceButton.style.cssText =
+      "position:fixed;left:316px;bottom:80px;z-index:20;width:128px;height:30px;font-size:12px;opacity:0.35;";
+    qaFlowReferenceButton.addEventListener("click", () => {
+      const report = window.__flatPhotoTest.showFlowPaintReference({
+        seed: 240825,
+        strength: 1,
+        profile: ribbonFlowReference
+          ? "connected-ribbon-v1"
+          : fineFlowReference ? "fine-layered-v2" : "broad-flow-v1",
+        maxStrokes: fineFlowReference || ribbonFlowReference ? 14000 : undefined,
+      });
+      document.documentElement.dataset.qaFlowReferenceStrokes = String(report.accepted_strokes);
+      document.documentElement.dataset.qaFlowReferenceCandidate = report.candidate;
+    });
+    document.body.append(qaFlowReferenceButton);
+  }
+  if (qaQuery.get("brush-flow-train") === "1") {
+    const qaFlowTrainButton = document.createElement("button");
+    qaFlowTrainButton.type = "button";
+    qaFlowTrainButton.textContent = "QA Train Ribbon";
+    qaFlowTrainButton.style.cssText =
+      "position:fixed;left:450px;bottom:80px;z-index:20;width:128px;height:30px;font-size:12px;opacity:0.35;";
+    qaFlowTrainButton.addEventListener("click", async () => {
+      qaFlowTrainButton.disabled = true;
+      document.documentElement.dataset.qaFlowTrainStatus = "running";
+      document.documentElement.dataset.qaFlowTrainError = "";
+      document.documentElement.dataset.qaFlowTrainReport = "";
+      try {
+        const report = await window.__flatPhotoTest.trainFlowRibbon({
+          maxSide: Number(qaQuery.get("flow-paint-side") || 256),
+          maxStrokes: Number(qaQuery.get("flow-paint-strokes") || 14000),
+          iterations: Number(qaQuery.get("flow-paint-iters") || 300),
+          colorAnchor: Number(qaQuery.get("flow-paint-color-anchor") || 0.0035),
+        });
+        document.documentElement.dataset.qaFlowTrainStatus = "done";
+        document.documentElement.dataset.qaFlowTrainL1 = String(report.rgb_l1_signal);
+        document.documentElement.dataset.qaFlowTrainPsnr = String(report.psnr_signal_db);
+        document.documentElement.dataset.qaFlowTrainElapsedMs = String(report.elapsed_ms);
+        document.documentElement.dataset.qaFlowTrainReport = JSON.stringify(report);
+      } catch (error) {
+        document.documentElement.dataset.qaFlowTrainStatus = "failed";
+        document.documentElement.dataset.qaFlowTrainError = error.message;
+      } finally {
+        qaFlowTrainButton.disabled = false;
+      }
+    });
+    document.body.append(qaFlowTrainButton);
+  }
   const qaObliqueButton = document.createElement("button");
   qaObliqueButton.id = "qaObliqueButton";
   qaObliqueButton.dataset.testid = "qa-oblique-button";

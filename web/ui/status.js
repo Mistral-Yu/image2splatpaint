@@ -17,10 +17,6 @@ function ownsTrainingRun(run) {
   return Boolean(run?.owns(state));
 }
 
-function trainingRunCancelledError() {
-  return Image2SplatPaintTrainingSession.cancelledError();
-}
-
 function assertTrainingRun(run) {
   if (run) run.assertCurrent(state);
 }
@@ -391,6 +387,11 @@ function publishState() {
   data.rectangleMaxAspectRatioInput =
     String(selectedRectangleMaxAspectRatio(selectedRectangleMinAspectRatio()));
   data.rectangleOrientationInput = selectedRectangleOrientation();
+  data.rectangleOrientationToleranceInput = String(selectedRectangleOrientationToleranceDegrees());
+  data.rectangleOrientationToleranceUnit = "degrees";
+  data.rectangleOrientationConstraints = state.metrics?.rectangle_orientation_constraints
+    ? JSON.stringify(state.metrics.rectangle_orientation_constraints)
+    : "";
   const rectangleShape = selectedRectangleShapeSettings();
   data.rectanglePreserveAreaInput = String(rectangleShape.preserveArea);
   data.rectangleEdgeDirectedTaperInput = String(rectangleShape.edgeDirectedTaper);

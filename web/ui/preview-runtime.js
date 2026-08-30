@@ -167,5 +167,3 @@ function setImageDragover(active) {
   els.dropZone.classList.toggle("dragover", active && !state.image);
   els.viewer.classList.toggle("image-dragover", active && Boolean(state.image));
 }
-
-

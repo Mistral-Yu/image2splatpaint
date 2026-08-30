@@ -40,7 +40,7 @@ function initGaussians(image, count) {
 }
 
 function initRectangles(image, count) {
-  return initOpaqueLayeredPaint(image, count, "rectangle");
+  return initOpaqueLayeredPaint(image, count, selectedRectanglePaintShape());
 }
 
 function strokeTensorAt(image, x, y, radius = 1) {
@@ -149,42 +149,6 @@ function illustrativeOilFamily(detail, anisotropy) {
   return anisotropy >= ILLUSTRATIVE_OIL_RIBBON_ANISOTROPY ? 1 : 0;
 }
 
-function gaussianBlurScalar(values, width, height, sigma) {
-  const boundedSigma = Math.max(0.6, Math.min(4, Number(sigma) || 1));
-  const radius = Math.max(1, Math.min(10, Math.ceil(boundedSigma * 3)));
-  const kernel = new Float32Array(radius * 2 + 1);
-  let kernelSum = 0;
-  for (let offset = -radius; offset <= radius; offset += 1) {
-    const value = Math.exp(-(offset * offset) / (2 * boundedSigma * boundedSigma));
-    kernel[offset + radius] = value;
-    kernelSum += value;
-  }
-  for (let index = 0; index < kernel.length; index += 1) kernel[index] /= kernelSum;
-  const horizontal = new Float32Array(values.length);
-  const result = new Float32Array(values.length);
-  for (let y = 0; y < height; y += 1) {
-    const row = y * width;
-    for (let x = 0; x < width; x += 1) {
-      let sum = 0;
-      for (let offset = -radius; offset <= radius; offset += 1) {
-        sum += values[row + Math.max(0, Math.min(width - 1, x + offset))] * kernel[offset + radius];
-      }
-      horizontal[row + x] = sum;
-    }
-  }
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      let sum = 0;
-      for (let offset = -radius; offset <= radius; offset += 1) {
-        const sampleY = Math.max(0, Math.min(height - 1, y + offset));
-        sum += horizontal[sampleY * width + x] * kernel[offset + radius];
-      }
-      result[y * width + x] = sum;
-    }
-  }
-  return result;
-}
-
 function initLayeredOpaqueBrush(image, count) {
   return initOpaqueLayeredPaint(image, count, "opaque-brush");
 }
@@ -217,6 +181,9 @@ function initOpaqueLayeredPaint(image, count, kernelShape) {
   params.rectangleOrientation = kernelShape === "rectangle"
     ? selectedRectangleOrientation()
     : DEFAULT_RECTANGLE_ORIENTATION;
+  params.rectangleOrientationTolerance = kernelShape === "rectangle"
+    ? selectedRectangleOrientationTolerance()
+    : 0;
   const rectangleShape = selectedRectangleShapeSettings();
   params.rectanglePreserveArea =
     kernelShape === "rectangle" ? rectangleShape.preserveArea : DEFAULT_RECTANGLE_PRESERVE_AREA;
@@ -320,6 +287,7 @@ function initOpaqueLayeredPaint(image, count, kernelShape) {
           nextSx,
           nextSy,
           params.rectangleOrientation,
+          params.rectangleOrientationTolerance,
         )
       : unconstrainedTheta;
     const constrained = constrainSplat(
@@ -366,4 +334,3 @@ function initOpaqueLayeredPaint(image, count, kernelShape) {
   }
   return params;
 }
-

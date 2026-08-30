@@ -86,10 +86,6 @@ function curriculumMidMaxSideForFullSide(fullSide, coarseMaxSide = PHASE33_COARS
   return Math.min(boundedFullSide, Math.max(coarseSide + 1, Math.round(boundedFullSide / 2)));
 }
 
-function curriculumMidMaxSide(image, coarseMaxSide = PHASE33_COARSE_MAX_SIDE) {
-  return curriculumMidMaxSideForFullSide(Math.max(image.width, image.height), coarseMaxSide);
-}
-
 function curriculumStageDimensions(width, height, variants = phase33Variants()) {
   const full = { width: Math.max(1, Math.round(width)), height: Math.max(1, Math.round(height)) };
   const fullSide = Math.max(full.width, full.height);
@@ -961,6 +957,7 @@ function snapshotParams(params) {
       DEFAULT_RECTANGLE_ASPECT_RATIO,
     ),
     rectangleOrientation: normalizedRectangleOrientation(params.rectangleOrientation),
+    rectangleOrientationTolerance: normalizedRectangleOrientationTolerance(params.rectangleOrientationTolerance),
     rectanglePreserveArea:
       params.rectanglePreserveArea ?? DEFAULT_RECTANGLE_PRESERVE_AREA,
     rectangleEdgeDirectedTaper:
@@ -1389,4 +1386,3 @@ function splatShapeStats(params, image) {
     },
   };
 }
-

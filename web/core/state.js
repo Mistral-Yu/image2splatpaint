@@ -1,6 +1,7 @@
 const state = {
   image: null,
   params: null,
+  flowSplatResult: null,
   metrics: null,
   running: false,
   startPending: false,

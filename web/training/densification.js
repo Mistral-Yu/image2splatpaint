@@ -778,6 +778,7 @@ function growParamPlaceholders(params, targetCount) {
       DEFAULT_RECTANGLE_ASPECT_RATIO,
     ),
     rectangleOrientation: normalizedRectangleOrientation(params.rectangleOrientation),
+    rectangleOrientationTolerance: normalizedRectangleOrientationTolerance(params.rectangleOrientationTolerance),
     rectanglePreserveArea:
       params.rectanglePreserveArea ?? DEFAULT_RECTANGLE_PRESERVE_AREA,
     rectangleEdgeDirectedTaper:
@@ -877,24 +878,6 @@ function growParamPlaceholders(params, targetCount) {
     virtualDepthThickness: Number(params.virtualDepthThickness) || DEFAULT_VIRTUAL_DEPTH_THICKNESS,
     virtualDepthSoftConstraintEnabled: params.virtualDepthSoftConstraintEnabled !== false,
     virtualDepthPriorDelta: Number(params.virtualDepthPriorDelta) || DEFAULT_VIRTUAL_DEPTH_PRIOR_DELTA,
-  };
-}
-
-function resizeParamPlaceholders(params, targetCount) {
-  if (targetCount >= params.count) return growParamPlaceholders(params, targetCount);
-  const slice = (values, length) => values?.slice?.(0, length) || null;
-  return {
-    ...params,
-    count: targetCount,
-    xy: slice(params.xy, targetCount * 2),
-    scale: slice(params.scale, targetCount * 2),
-    rgb: slice(params.rgb, targetCount * 3),
-    opacity: slice(params.opacity, targetCount),
-    theta: slice(params.theta, targetCount),
-    depthOrder: slice(params.depthOrder, targetCount),
-    virtualDepth: slice(params.virtualDepth, targetCount),
-    brushTaper: slice(params.brushTaper, targetCount),
-    detailTags: slice(params.detailTags, targetCount),
   };
 }
 
@@ -1177,4 +1160,3 @@ function currentContributionCompactionPlan(
     keepIndices,
   };
 }
-

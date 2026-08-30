@@ -9,7 +9,7 @@
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; worker-src 'self' blob:; connect-src 'self' blob:; img-src 'self' file: data: blob:; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
     <link rel="icon" href="data:," />
     <title>Image2SplatPaint</title>
-    <link rel="stylesheet" href="./styles.css?v=memory-unlock-v1" />
+    <link rel="stylesheet" href="./styles.css?v=flow-splat-fusion-v4" />
   </head>
   <body>
     <main class="app">
@@ -64,7 +64,7 @@
               <span>image size</span>
               <strong id="imageSizeText" data-testid="image-size-text">-</strong>
             </div>
-            <div title="Low-alpha coverage (alpha below 0.99) / splats whose Gaussian footprint extends outside the image">
+            <div title="Low-alpha coverage (alpha below 0.99) / splats whose rendered footprint extends outside the image">
               <span>low-alpha / outside</span>
               <strong id="coverageText" data-testid="coverage-text">- / -</strong>
             </div>
@@ -135,7 +135,7 @@
                   <select id="algorithmSelect" data-testid="algorithm-select">
                     <option value="planar-gaussian" selected>Planar Gaussian</option>
                     <option value="rectangle-splats">Rectangle Splats</option>
-                    <option value="layered-opaque-brush">Brush Splats</option>
+                    <option value="flow-splat-fusion">Flow Brush Fusion</option>
                     <option value="gs-virtual-camera-sampling">GS Virtual Camera Sampling</option>
                   </select>
                 </label>
@@ -144,11 +144,11 @@
                   <input id="trainSize" data-testid="train-size" type="number" min="32" max="3200" step="64" value="512" />
                 </label>
                 <label title="Number of splats created before the first training iteration.">
-                  Initial splats
+                  <span id="initialSplatCountLabel">Initial splats</span>
                   <input id="initialSplatCount" data-testid="initial-splat-count" type="number" min="4" max="262144" step="4" value="128" />
                 </label>
                 <label title="Maximum number of splats available to density growth. Loading an image does not change this value.">
-                  Max splats
+                  <span id="finalSplatCountLabel">Max splats</span>
                   <input id="finalSplatCount" data-testid="final-splat-count" type="number" min="4" max="1048576" step="4" value="8192" />
                 </label>
                 <label>
@@ -165,7 +165,100 @@
                 </label>
               </div>
 
-              <details class="lr-panel" data-testid="lr-panel" data-settings-scope="shared">
+              <details id="flowSplatFusionPanel" class="lr-panel local-flow-paint-panel" data-testid="flow-splat-fusion-panel" data-settings-order="3">
+                <summary id="flowSplatFusionPanelSummary">Flow Brush Fusion settings</summary>
+                <div class="lr-body">
+                  <p id="flowSplatFusionPanelNote" class="local-flow-paint-note">Layered paint Algorithm. The Baseline uses eight compact Brush Splats per curved stroke, with an opaque interior and a feathered contour. Textured regions receive more bundles, while two thin-long bristles follow a Linear-sRGB Flow-XDoG contour guide. Classic Gaussian preserves the previous four-Splat mode for comparison. The fixed compact backcoat closes gaps without changing standard alpha. Training grows, moves, splits, and merges strokes from broad shapes toward shorter detail.</p>
+                  <div class="training-grid">
+                    <label title="Flow Brush is the eight-Splat compact Baseline: two Flow-XDoG-guided thin bristles and three middle Brush Splats over three moderate paint-body Splats. Classic Gaussian preserves the previous four-Gaussian mode. Fine bristles keeps Gaussian footprints and splits only the front layer into narrow strands. Max splats remains the final physical-Splat budget.">
+                      Stroke texture
+                      <select id="flowSplatFusionStrokeTexture" data-testid="flow-splat-fusion-stroke-texture">
+                        <option value="brush-dabs" selected>Flow Brush (8-Splat Baseline)</option>
+                        <option value="baseline">Classic Gaussian (4-Splat)</option>
+                        <option value="fine-bristles">Fine bristles (Gaussian)</option>
+                      </select>
+                    </label>
+                    <label class="inline-option" title="Experimental topology-only repaint. At each 100-iteration growth boundary, early stages compare a broad Linear-sRGB residual and later stages reduce that radius to full resolution. Accepted proposals move a complete curved stroke, while the WebGPU optimizer, Splat layout, alpha, budget, and final target remain unchanged.">
+                      <input id="flowSplatFusionScaleMatchedResidualRepaint" data-testid="flow-splat-fusion-scale-matched-residual-repaint" type="checkbox" />
+                      Scale-matched repaint
+                    </label>
+                    <label class="field-wide" title="Controls differentiable movement of each complete curved stroke. Balanced prioritizes coherent translation while retaining limited curve deformation. Stable reproduces the previous near-fixed geometry; Free allows stronger movement but may soften the brush structure.">
+                      Stroke optimization
+                      <select id="flowSplatFusionStrokeOptimization" data-testid="flow-splat-fusion-stroke-optimization">
+                        <option value="stable">Stable (legacy)</option>
+                        <option value="balanced" selected>Balanced motion</option>
+                        <option value="free">Free motion</option>
+                      </select>
+                    </label>
+                    <label class="inline-option field-wide" title="Starts with broad, longer marks, then approaches the generated target width and length through the first 90% of training. Split, merge, and residual-guided movement remain part of the Baseline even when this visual curriculum is disabled.">
+                      <input id="flowSplatFusionPaintCurriculum" data-testid="flow-splat-fusion-paint-curriculum" type="checkbox" checked />
+                      Coarse-to-fine paint curriculum
+                    </label>
+                    <label title="Fixed opacity shared by Flow strokes for the complete training run. 0.995 is nearly opaque and prevents light source-border canvas from leaking through low-opacity stroke interiors.">
+                      Fixed stroke opacity
+                      <input id="flowSplatFusionFixedOpacity" data-testid="flow-splat-fusion-fixed-opacity" type="number" min="0.05" max="0.995" step="0.005" value="0.995" />
+                    </label>
+                    <label title="Full starting stroke width equals the training-image long side divided by this value. It gradually returns to each stroke's learned target width. Larger divisors start thinner.">
+                      Starting width (long side /)
+                      <input id="flowSplatFusionStartingWidthDivisor" data-testid="flow-splat-fusion-starting-width-divisor" type="number" min="8" max="256" step="1" value="32" />
+                    </label>
+                    <label title="Starting curve length relative to the generated target. It gradually returns to 100% by the final fixed-count settle stage.">
+                      Starting length (%)
+                      <input id="flowSplatFusionStartingLengthPercent" data-testid="flow-splat-fusion-starting-length-percent" type="number" min="100" max="300" step="5" value="160" />
+                    </label>
+                    <label title="Maximum local residual-guided translation proposed at each 100-iteration growth boundary. A move is accepted only when nearby target color and residual improve; the step decays toward the end.">
+                      Residual move / stage (px)
+                      <input id="flowSplatFusionResidualMovePx" data-testid="flow-splat-fusion-residual-move-px" type="number" min="0" max="8" step="0.25" value="1.5" />
+                    </label>
+                    <label title="Minimum deterministic multiplier applied to initialized detail-stroke target width in the Baseline.">
+                      Initial width min (%)
+                      <input id="flowSplatFusionInitialWidthMin" data-testid="flow-splat-fusion-initial-width-min" type="number" min="25" max="300" step="5" value="55" />
+                    </label>
+                    <label title="Maximum deterministic multiplier applied to initialized detail-stroke target width in the Baseline.">
+                      Initial width max (%)
+                      <input id="flowSplatFusionInitialWidthMax" data-testid="flow-splat-fusion-initial-width-max" type="number" min="25" max="300" step="5" value="165" />
+                    </label>
+                    <label title="Maximum deterministic width multiplier for front-layer strokes. It overrides the ordinary initial-width maximum for that layer, so front strokes are not required to start thin.">
+                      Front width max (%)
+                      <input id="flowSplatFusionFrontWidthMax" data-testid="flow-splat-fusion-front-width-max" type="number" min="25" max="400" step="5" value="300" />
+                    </label>
+                    <label title="Width-learning-rate multiplier used only by front-layer strokes. Learned width is carried across growth boundaries. 400% allows clearly wider optimization than rear and medium strokes without forcing every front stroke to become thick.">
+                      Front width learning (%)
+                      <input id="flowSplatFusionFrontWidthLearning" data-testid="flow-splat-fusion-front-width-learning" type="number" min="100" max="800" step="25" value="400" />
+                    </label>
+                    <label title="Soft linear-sRGB pigment anchor. Higher values preserve the initialized stroke pigment more strongly.">
+                      Color anchor
+                      <input id="flowSplatFusionColorAnchor" data-testid="flow-splat-fusion-color-anchor" type="number" min="0" max="0.05" step="0.0005" value="0.0035" />
+                    </label>
+                    <label title="Initial parent-width ceiling after the per-layer range is applied; it does not multiply every stroke. Training may still widen an accepted stroke up to 9% of the image short side. 300% preserves selected broad front strokes while the physical Splat family keeps middle marks and thin bristles distinct.">
+                      Stroke width (%)
+                      <input id="flowSplatFusionWidthPercent" data-testid="flow-splat-fusion-width-percent" type="number" min="25" max="300" step="5" value="300" />
+                    </label>
+                    <label title="Controls the difference between Flow-XDoG-guided thin long bristles, middle marks, and paint bodies. 40% keeps a moderate shared-material distribution; away from connected source contours the two thin-long members return toward the middle profile. 0% reproduces the previous fixed per-Splat profile.">
+                      Splat size variation (%)
+                      <input id="flowSplatFusionSplatSizeVariation" data-testid="flow-splat-fusion-splat-size-variation" type="number" min="0" max="100" step="5" value="40" />
+                    </label>
+                    <label title="Maximum absolute movement of each Bezier control coordinate from its original generated position during the complete training run. This is independent of the optimization preset. 0 keeps positions fixed.">
+                      Movement limit (px)
+                      <input id="flowSplatFusionMovementLimit" data-testid="flow-splat-fusion-movement-limit" type="number" min="0" max="64" step="0.5" value="12" />
+                    </label>
+                    <label class="inline-option field-wide" title="After the detail warmup, adds a fixed-geometry source-colored compact Brush Splat grid behind every stroke. Each source-opaque grid cell stays inside one flat alpha=0.99 interior, so optimization cannot reopen canvas holes. Standard alpha and the physical Max splats budget are preserved.">
+                      <input id="flowSplatUnderpainting" data-testid="flow-splat-underpainting" type="checkbox" checked />
+                      Opaque coverage backcoat
+                    </label>
+                    <label id="flowSplatUnderpaintPercentLabel" title="Share of the physical Splat budget reserved for the compact Brush backcoat. More cells preserve finer source-color variation; the default leaves 90% for detail strokes.">
+                      Backcoat budget (%)
+                      <input id="flowSplatUnderpaintPercent" data-testid="flow-splat-underpaint-percent" type="number" min="0" max="50" step="0.25" value="10" />
+                    </label>
+                    <label id="flowSplatFusionMaxArcLabel" title="Maximum cubic ribbon arc length as a percentage of the training image short side. 0 disables the limit.">
+                      Maximum ribbon length (%)
+                      <input id="flowSplatFusionMaxArcPercent" data-testid="flow-splat-fusion-max-arc-percent" type="number" min="0" max="50" step="1" value="10" />
+                    </label>
+                  </div>
+                </div>
+              </details>
+
+              <details class="lr-panel" data-testid="lr-panel" data-settings-scope="shared" data-settings-order="1">
                 <summary>Shared training settings</summary>
                 <div class="lr-body">
                   <section class="lr-section" aria-labelledby="trainingFeedbackHeading">
@@ -322,11 +415,18 @@
                 </div>
               </details>
 
-              <section class="rectangle-paint-panel settings-section" data-testid="rectangle-paint-panel">
+              <section class="rectangle-paint-panel settings-section" data-testid="rectangle-paint-panel" data-settings-order="2">
                 <details class="opaque-paint-settings" data-testid="opaque-paint-settings">
                   <summary>Rectangle Splats settings</summary>
                   <div class="opaque-paint-body">
-                    <section class="lr-section" aria-labelledby="paintAppearanceHeading">
+                    <label class="field-wide" title="Keeps one Rectangle Algorithm while selecting its analytic Splat footprint. Illustrative Brush preserves the former Brush Splats training path and settings.">
+                      Splat shape
+                      <select id="rectanglePaintShape" data-testid="rectangle-paint-shape">
+                        <option value="rectangle" selected>Rectangle</option>
+                        <option value="opaque-brush">Illustrative Brush</option>
+                      </select>
+                    </label>
+                    <section id="rectangleShapeSettings" class="lr-section" aria-labelledby="paintAppearanceHeading">
                       <strong id="paintAppearanceHeading" class="lr-section-heading">Paint appearance</strong>
                       <div class="lr-grid">
                         <div class="rectangle-edge-ratio-row field-wide" role="group" aria-labelledby="rectangleLearnedOpacityHeading">
@@ -384,13 +484,17 @@
                             <input id="rectangleMaxAspectRatio" data-testid="rectangle-max-aspect-ratio" type="number" min="1" max="32" step="0.1" value="4" />
                           </label>
                         </div>
-                        <label title="Constrains the Rectangle long axis. Free preserves the current structure-guided orientation. Applied at the next Train start.">
+                        <label title="Constrains the Rectangle long axis within Orientation tolerance. Free keeps unrestricted rotation. Applied at the next Train start.">
                           Orientation
                           <select id="rectangleOrientation" data-testid="rectangle-orientation">
                             <option value="free" selected>Free</option>
                             <option value="vertical">Vertical</option>
                             <option value="horizontal">Horizontal</option>
                           </select>
+                        </label>
+                        <label title="Allowed long-axis rotation from Vertical or Horizontal, in degrees: 0° = exact lock, 9° = ±9°, 90° = unrestricted axis. Uses the existing normalized image-plane rotation. Optimized within the range, not random jitter. Applied at the next Train start.">
+                          Orientation tolerance (°)
+                          <input id="rectangleOrientationTolerance" data-testid="rectangle-orientation-tolerance" type="number" min="0" max="90" step="1" value="9" disabled />
                         </label>
                         <label class="inline-option field-wide" title="Keeps the initial footprint area stable as the top edge narrows. Ratio 1 is unchanged.">
                           <input id="rectanglePreserveArea" data-testid="rectangle-preserve-area" type="checkbox" checked />
@@ -410,14 +514,10 @@
                         </label>
                       </div>
                     </section>
-                  </div>
-                </details>
-              </section>
 
-              <section id="opaquePaintPanel" class="opaque-paint-panel settings-section" data-testid="opaque-paint-panel">
-                <details class="opaque-paint-settings" data-testid="layered-opaque-brush-settings">
-                  <summary id="opaquePaintSummary">Brush Splats settings</summary>
-                  <div class="opaque-paint-body">
+                    <section id="opaquePaintPanel" class="opaque-paint-panel" data-testid="opaque-paint-panel">
+                      <strong id="opaquePaintSummary" class="lr-section-heading">Illustrative Brush shape settings</strong>
+                      <div class="opaque-paint-body" data-testid="layered-opaque-brush-settings">
                     <section class="lr-section" aria-labelledby="brushPaintAppearanceHeading">
                       <strong id="brushPaintAppearanceHeading" class="lr-section-heading">Paint appearance</strong>
                       <div class="lr-grid">
@@ -484,12 +584,14 @@
                           <label>Accent minimum<input id="layeredBrushAccentAspectFloor" data-testid="layered-brush-accent-aspect-floor" type="number" min="1" max="8" step="0.1" value="2.8" /></label>
                         </div>
                       </div>
+                        </section>
+                      </div>
                     </section>
                   </div>
                 </details>
               </section>
 
-              <section class="virtual-camera-panel settings-section" data-testid="virtual-camera-panel">
+              <section class="virtual-camera-panel settings-section" data-testid="virtual-camera-panel" data-settings-order="4">
                 <details class="virtual-camera-settings" data-testid="virtual-camera-settings">
                   <summary>GS Virtual Camera Sampling</summary>
                   <div class="virtual-camera-body">
@@ -511,7 +613,7 @@
                 </details>
               </section>
 
-              <details class="budget-panel" data-testid="budget-panel">
+              <details class="budget-panel" data-testid="budget-panel" data-settings-order="5">
                 <summary>GPU memory details</summary>
                 <div class="budget-body">
                   <label class="capacity-control" title="Use Max splats for the GPU allocation, or reduce the allocation automatically when the requested WebGPU capacity does not fit.">
@@ -676,47 +778,51 @@
     <script src="./tilt-viewer.bundle.js?v=camera-summary-v3"></script>
     <script src="./sample-image-data.js?v=sample-v1"></script>
     <script src="./core/numeric-utils.js?v=app-refactor-v1"></script>
-    <script src="./core/config.js?v=app-refactor-v1"></script>
-    <script src="./core/state.js?v=app-refactor-v1"></script>
+    <script src="./core/config.js?v=rectangle-orientation-tolerance-v1"></script>
+    <script src="./core/state.js?v=flow-splat-fusion-v1"></script>
     <script src="./training/session.js?v=deep-refactor-v1"></script>
     <script src="./export/canvas-blob.js?v=app-refactor-v1"></script>
     <script src="./export/ply-serializer.js?v=app-refactor-v1"></script>
     <script src="./export/ply-inspector.js?v=app-refactor-v1"></script>
     <script src="./input/image-metadata.js?v=app-refactor-v1"></script>
-    <script src="./input/image-loader.js?v=app-refactor-v1"></script>
+    <script src="./input/image-loader.js?v=flow-splat-fusion-v1"></script>
     <script src="./gpu/metrics.js?v=app-refactor-v1"></script>
     <script src="./gpu/device.js?v=app-refactor-v1"></script>
     <script src="./gpu/memory.js?v=app-refactor-v1"></script>
     <script src="./gpu/shaders/tile-pipeline.js?v=deep-refactor-v1"></script>
     <script src="./gpu/shaders/optimizer-reset.js?v=deep-refactor-v1"></script>
-    <script src="./gpu/shaders/training-pipelines.js?v=deep-refactor-v1"></script>
+    <script src="./gpu/shaders/training-pipelines.js?v=rectangle-orientation-tolerance-v1"></script>
     <script src="./gpu/shaders/preview-pipelines.js?v=deep-refactor-v1"></script>
     <script src="./gpu/shaders/metric-pipelines.js?v=deep-refactor-v1"></script>
-    <script src="./gpu/shaders/density-pipelines.js?v=deep-refactor-v1"></script>
+    <script src="./gpu/shaders/density-pipelines.js?v=rectangle-orientation-tolerance-v1"></script>
     <script src="./gpu/shaders/compaction-pipelines.js?v=deep-refactor-v1"></script>
     <script src="./gpu/renderer.js?v=app-refactor-v1"></script>
     <script src="./gpu/runtime.js?v=app-refactor-v1"></script>
     <script src="./gpu/tile-pipelines.js?v=app-refactor-v1"></script>
     <script src="./gpu/tile-runtime.js?v=app-refactor-v1"></script>
     <script src="./gpu/optimizer-runtime.js?v=app-refactor-v1"></script>
-    <script src="./training/trainer.js?v=app-refactor-v1"></script>
+    <script src="./training/flow-paint-reference.js?v=balanced-stroke-distribution-v1"></script>
+    <script src="./training/flow-ribbon-trainer.js?v=flow-xdog-width-v1"></script>
+    <script src="./training/flow-stroke-topology.js?v=balanced-stroke-distribution-v1"></script>
+    <script src="./training/flow-splat-fusion.js?v=flow-brush-fusion-baseline-v1"></script>
+    <script src="./training/trainer.js?v=rectangle-orientation-degrees-v1"></script>
     <script src="./training/metrics.js?v=app-refactor-v1"></script>
-    <script src="./training/initialization.js?v=app-refactor-v1"></script>
-    <script src="./training/initialization-runtime.js?v=app-refactor-v1"></script>
-    <script src="./training/densification.js?v=app-refactor-v1"></script>
+    <script src="./training/initialization.js?v=rectangle-orientation-tolerance-v1"></script>
+    <script src="./training/initialization-runtime.js?v=rectangle-orientation-tolerance-v1"></script>
+    <script src="./training/densification.js?v=rectangle-orientation-tolerance-v1"></script>
     <script src="./training/runtime.js?v=app-refactor-v1"></script>
-    <script src="./core/algorithms.js?v=app-refactor-v1"></script>
-    <script src="./ui/training-controls.js?v=app-refactor-v1"></script>
-    <script src="./export/runtime.js?v=app-refactor-v1"></script>
+    <script src="./core/algorithms.js?v=rectangle-orientation-degrees-v1"></script>
+    <script src="./ui/training-controls.js?v=rectangle-orientation-tolerance-v1"></script>
+    <script src="./export/runtime.js?v=brush-rectangle-flow-surface-v1"></script>
     <script src="./export/actions.js?v=app-refactor-v1"></script>
-    <script src="./ui/status.js?v=app-refactor-v1"></script>
-    <script src="./ui/preview.js?v=app-refactor-v1"></script>
+    <script src="./ui/status.js?v=rectangle-orientation-degrees-v1"></script>
+    <script src="./ui/preview.js?v=flow-splat-fusion-v1"></script>
     <script src="./ui/tilt.js?v=app-refactor-v1"></script>
     <script src="./ui/preview-runtime.js?v=app-refactor-v1"></script>
     <script src="./ui/splat-controls.js?v=app-refactor-v1"></script>
-    <script src="./app.js?v=memory-unlock-v1"></script>
-    <script src="./ui/bootstrap.js?v=app-refactor-v1"></script>
-    <script src="./qa/runtime.js?v=app-refactor-v1"></script>
-    <script src="./ui/controls.js?v=app-refactor-v1"></script>
+    <script src="./app.js?v=rectangle-orientation-tolerance-v1"></script>
+    <script src="./ui/bootstrap.js?v=brush-rectangle-flow-surface-v1"></script>
+    <script src="./qa/runtime.js?v=unified-flow-chain-v1"></script>
+    <script src="./ui/controls.js?v=rectangle-orientation-degrees-v1"></script>
   </body>
 </html>

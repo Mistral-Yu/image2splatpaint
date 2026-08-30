@@ -46,7 +46,9 @@ function showCanvas(kind) {
 }
 
 function activePreviewCanvas() {
-  return state.previewMode === "splats" && !els.gpuCanvas.hidden ? els.gpuCanvas : els.previewCanvas;
+  return state.previewMode === "splats" && !state.flowSplatResult && !els.gpuCanvas.hidden
+    ? els.gpuCanvas
+    : els.previewCanvas;
 }
 
 function fittedCanvasScale(width = activePreviewCanvas().width, height = activePreviewCanvas().height) {
@@ -171,9 +173,27 @@ function drawOriginalToCanvas() {
   return true;
 }
 
+function currentFlowSplatFusionResult() {
+  return state.flowSplatResult?.sourceImage === state.image ? state.flowSplatResult : null;
+}
+
+function presentFlowSplatFusionResult(result = currentFlowSplatFusionResult()) {
+  if (!result?.image) return false;
+  const { image } = result;
+  els.previewCanvas.width = image.width;
+  els.previewCanvas.height = image.height;
+  fitCanvases(image.width, image.height);
+  previewCtx.putImageData(rgbToImageData(image.rgb, image.width, image.height, image.alpha), 0, 0);
+  state.previewMode = "splats";
+  showCanvas("preview");
+  updatePreviewModeControls();
+  publishState();
+  return true;
+}
+
 function updatePreviewModeControls() {
   const hasImage = Boolean(state.image);
-  const hasSplats = Boolean(state.params);
+  const hasSplats = Boolean(state.params || currentFlowSplatFusionResult());
   const locked = previewModeInputLocked();
   els.originalPreviewButton.disabled = !hasImage || locked;
   els.splatsPreviewButton.disabled = !hasSplats || locked;
@@ -196,6 +216,8 @@ function setPreviewMode(mode) {
     drawOriginalToCanvas();
     showCanvas("preview");
   } else if (mode === "splats") {
+    const flowResult = currentFlowSplatFusionResult();
+    if (flowResult) return presentFlowSplatFusionResult(flowResult);
     if (!state.params) return false;
     state.previewMode = "splats";
     if (state.running) {
@@ -212,4 +234,3 @@ function setPreviewMode(mode) {
   publishState();
   return true;
 }
-

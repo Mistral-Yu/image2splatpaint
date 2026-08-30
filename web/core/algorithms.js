@@ -37,7 +37,7 @@ function stageAwareGrowthDefaultForAlgorithm(algorithm = selectedAlgorithm()) {
 }
 
 function trainedResultAlgorithm() {
-  if (!state.params || !state.metrics?.algorithm) return null;
+  if ((!state.params && !state.flowSplatResult) || !state.metrics?.algorithm) return null;
   return ALGORITHM_REGISTRY[state.metrics.algorithm] || null;
 }
 
@@ -59,12 +59,35 @@ function algorithmUsesVirtualCameras(algorithm = selectedAlgorithm()) {
   return Boolean(algorithm.capabilities.virtualCameras);
 }
 
+function selectedRectanglePaintShape() {
+  const value = document.querySelector("#rectanglePaintShape")?.value;
+  return value === "opaque-brush" ? "opaque-brush" : "rectangle";
+}
+
 function algorithmUsesRectangleKernel(algorithm = selectedAlgorithm()) {
+  if (algorithm?.id === RECTANGLE_SPLATS_ALGORITHM_ID) {
+    return selectedRectanglePaintShape() === "rectangle";
+  }
   return algorithm.capabilities.kernelShape === "rectangle";
 }
 
 function algorithmUsesLayeredOpaqueBrush(algorithm = selectedAlgorithm()) {
+  if (algorithm?.id === RECTANGLE_SPLATS_ALGORITHM_ID) {
+    return selectedRectanglePaintShape() === "opaque-brush";
+  }
   return algorithm.capabilities.kernelShape === "opaque-brush";
+}
+
+function algorithmUsesFlowSplatFusion(algorithm = selectedAlgorithm()) {
+  return Boolean(algorithm.capabilities.flowSplatFusion);
+}
+
+function algorithmUsesCurveSplatChain(algorithm = selectedAlgorithm()) {
+  return Boolean(algorithm.capabilities.curveSplatChain);
+}
+
+function algorithmUsesFlowStrokeTraining(algorithm = selectedAlgorithm()) {
+  return algorithmUsesFlowSplatFusion(algorithm) || algorithmUsesCurveSplatChain(algorithm);
 }
 
 function algorithmUsesOpaqueLayeredPaint(algorithm = selectedAlgorithm()) {
@@ -209,7 +232,10 @@ function configurePaintKernel(config, params = state.params) {
     1,
     1,
   );
-  config[127] = 0;
+  // Rectangle long-axis allowance in radians. Missing saved params retain the old exact lock.
+  config[127] = shape === "rectangle"
+    ? normalizedRectangleOrientationTolerance(params?.rectangleOrientationTolerance) * Math.PI / 200
+    : 0;
   return config;
 }
 
@@ -382,12 +408,39 @@ function rectangleOrientationCode(value) {
   return orientation === "vertical" ? 1 : orientation === "horizontal" ? 2 : 0;
 }
 
-function constrainedRectangleTheta(theta, sx, sy, orientation = DEFAULT_RECTANGLE_ORIENTATION) {
+function normalizedRectangleOrientationTolerance(value, fallback = 0) {
+  return clampNumber(value, 0, 100, fallback);
+}
+
+function selectedRectangleOrientationTolerance() {
+  // Keep the existing run/snapshot percentage contract; only the UI uses degrees.
+  return selectedRectangleOrientationToleranceDegrees() / 90 * 100;
+}
+
+function selectedRectangleOrientationToleranceDegrees() {
+  return clampNumber(
+    document.querySelector("#rectangleOrientationTolerance")?.value,
+    0,
+    90,
+    DEFAULT_RECTANGLE_ORIENTATION_TOLERANCE * 0.9,
+  );
+}
+
+function constrainedRectangleTheta(theta, sx, sy, orientation = DEFAULT_RECTANGLE_ORIENTATION, tolerancePercent = 0) {
   const normalized = normalizedRectangleOrientation(orientation);
   if (normalized === "free") return theta;
   const longAxisIsX = sx >= sy;
-  if (normalized === "vertical") return longAxisIsX ? Math.PI * 0.5 : 0;
-  return longAxisIsX ? 0 : Math.PI * 0.5;
+  const target = normalized === "vertical"
+    ? (longAxisIsX ? Math.PI * 0.5 : 0)
+    : (longAxisIsX ? 0 : Math.PI * 0.5);
+  const tolerance = normalizedRectangleOrientationTolerance(tolerancePercent) * Math.PI / 200;
+  if (tolerance <= 0) return target;
+  if (tolerance >= Math.PI * 0.5) return theta;
+  // Long-axis orientation repeats every half turn. Keep the nearest half turn
+  // so a tapered Rectangle does not flip its narrow edge when it is already allowed.
+  const offset = theta - target;
+  const delta = offset - Math.floor((offset + Math.PI * 0.5) / Math.PI) * Math.PI;
+  return theta + Math.min(tolerance, Math.max(-tolerance, delta)) - delta;
 }
 
 function rectangleConstraintProbe(params = state.params) {
@@ -400,8 +453,10 @@ function rectangleConstraintProbe(params = state.params) {
     };
   }
   const orientation = normalizedRectangleOrientation(params.rectangleOrientation);
+  const toleranceDegrees = normalizedRectangleOrientationTolerance(params.rectangleOrientationTolerance) * 0.9;
   let maxAspectRatio = 1;
   let maxOrientationError = 0;
+  let violationCount = 0;
   for (let i = 0; i < params.count; i += 1) {
     const sx = Math.max(1e-12, Math.abs(params.scale[i * 2]));
     const sy = Math.max(1e-12, Math.abs(params.scale[i * 2 + 1]));
@@ -412,12 +467,16 @@ function rectangleConstraintProbe(params = state.params) {
       ? Math.abs(Math.cos(longAxisAngle))
       : Math.abs(Math.sin(longAxisAngle));
     maxOrientationError = Math.max(maxOrientationError, orientationError);
+    if (Math.asin(Math.min(1, orientationError)) > toleranceDegrees * Math.PI / 180 + 0.00001) violationCount += 1;
   }
   return {
     count: params.count,
     max_aspect_ratio: maxAspectRatio,
     orientation,
     max_orientation_error: orientation === "free" ? null : maxOrientationError,
+    tolerance_degrees: orientation === "free" ? null : toleranceDegrees,
+    max_deviation_degrees: orientation === "free" ? null : Math.asin(Math.min(1, maxOrientationError)) * 180 / Math.PI,
+    violation_count: violationCount,
   };
 }
 
@@ -2205,8 +2264,15 @@ function virtualCameraSamplingVariants(enabledOverride = null) {
     : queryNumber("virtual-camera-fov", Number(fovInput?.value) || DEFAULT_SHARED_CAMERA_FOV_DEGREES));
   const hasSlotOverride = Number.isFinite(Number(overrides.virtualSlots)) ||
     (QA_RUNTIME_ENABLED && query.has("virtual-camera-slots"));
+  const frontlessSampling = Boolean(QA_RUNTIME_ENABLED && (
+    overrides.frontlessSampling === true || query.get("virtual-camera-frontless") === "1"
+  ));
   const uniformCameras = !hasSlotOverride && requestedUiSharePercent >= 100;
-  const slots = uniformCameras ? cameraCount + 1 : DEFAULT_VIRTUAL_CAMERA_POOL_SLOTS;
+  const slots = frontlessSampling
+    ? cameraCount
+    : uniformCameras
+      ? cameraCount + 1
+      : DEFAULT_VIRTUAL_CAMERA_POOL_SLOTS;
   const requestedVirtualSlots = Number.isFinite(Number(overrides.virtualSlots))
     ? Number(overrides.virtualSlots)
     : QA_RUNTIME_ENABLED && query.has("virtual-camera-slots")
@@ -2215,10 +2281,18 @@ function virtualCameraSamplingVariants(enabledOverride = null) {
   const requestedSharePercent = hasSlotOverride
     ? requestedVirtualSlots / slots * 100
     : requestedUiSharePercent;
-  const virtualSlots = uniformCameras
-    ? cameraCount
-    : Math.max(1, Math.min(slots - 1, Math.round(requestedVirtualSlots)));
+  const virtualSlots = frontlessSampling
+    ? slots
+    : uniformCameras
+      ? cameraCount
+      : Math.max(1, Math.min(slots - 1, Math.round(requestedVirtualSlots)));
   const gradientBalance = virtualCameraGradientBalance(virtualSlots, slots);
+  const requestedFrontAnchorWeight = Number.isFinite(Number(overrides.frontGradientAnchorWeight))
+    ? Number(overrides.frontGradientAnchorWeight)
+    : queryNumber("virtual-camera-front-anchor", NaN);
+  const frontGradientAnchorWeight = QA_RUNTIME_ENABLED && Number.isFinite(requestedFrontAnchorWeight)
+    ? Math.max(0, Math.min(1, requestedFrontAnchorWeight))
+    : gradientBalance.frontGradientAnchorWeight;
   const tilt = virtualTiltVariants();
   const planeConstrained = typeof overrides.planeConstrained === "boolean"
     ? overrides.planeConstrained
@@ -2240,10 +2314,10 @@ function virtualCameraSamplingVariants(enabledOverride = null) {
       : DEFAULT_VIRTUAL_DEPTH_THICKNESS)),
     depthCenterWeight: Math.max(0, Math.min(10, Number.isFinite(Number(overrides.depthCenterWeight))
       ? Number(overrides.depthCenterWeight)
-      : DEFAULT_VIRTUAL_DEPTH_CENTER_WEIGHT)),
+      : queryNumber("virtual-camera-depth-center-weight", DEFAULT_VIRTUAL_DEPTH_CENTER_WEIGHT))),
     depthSmoothnessWeight: Math.max(0, Math.min(10, Number.isFinite(Number(overrides.depthSmoothnessWeight))
       ? Number(overrides.depthSmoothnessWeight)
-      : DEFAULT_VIRTUAL_DEPTH_SMOOTHNESS_WEIGHT)),
+      : queryNumber("virtual-camera-depth-smoothness-weight", DEFAULT_VIRTUAL_DEPTH_SMOOTHNESS_WEIGHT))),
     depthLearningRate: Math.max(0, Math.min(1, Number.isFinite(Number(overrides.depthLearningRate))
       ? Number(overrides.depthLearningRate)
       : DEFAULT_VIRTUAL_DEPTH_LEARNING_RATE)),
@@ -2264,15 +2338,21 @@ function virtualCameraSamplingVariants(enabledOverride = null) {
         : Boolean(gofDensityInput?.checked),
     slots,
     virtualSlots,
+    frontlessSampling,
     uniformCameras,
-    mode: uniformCameras ? "uniform-all-cameras" : "weighted-virtual-share",
+    mode: frontlessSampling
+      ? "frontless-virtual-sampling"
+      : uniformCameras
+        ? "uniform-all-cameras"
+        : "weighted-virtual-share",
     cameraCount,
     maxAngleDegrees,
     fovDegrees,
     requestedSharePercent,
     effectiveSharePercent: virtualSlots / slots * 100,
-    frontGradientAnchorWeight: gradientBalance.frontGradientAnchorWeight,
-    effectiveGradientSharePercent: gradientBalance.effectiveVirtualShare * 100,
+    frontGradientAnchorWeight,
+    effectiveGradientSharePercent:
+      gradientBalance.sampledVirtualShare / (1 + frontGradientAnchorWeight) * 100,
     seed: Math.max(0, Math.floor(Number.isFinite(Number(overrides.seed))
       ? Number(overrides.seed)
       : queryNumber("virtual-camera-seed", DEFAULT_VIRTUAL_CAMERA_SEED))) >>> 0,
@@ -2305,10 +2385,16 @@ function virtualCameraGradientBalance(virtualSlots, slots) {
     Math.min(1, Number(virtualSlots) / safeSlots || 0),
   );
   // A single source image does not provide independent virtual observations.
-  // Above a 50% sampled-view share, pair each virtual gradient with enough
-  // canonical-front gradient to keep the aggregate objective at most 50%
-  // virtual. The virtual camera still runs at the requested frequency.
-  const frontGradientAnchorWeight = Math.max(0, Math.min(1, sampledVirtualShare * 2 - 1));
+  // Give every virtual update a weak canonical-front anchor so alternating
+  // views cannot drive isolated splats toward saturated RGB. Above a 50%
+  // sampled-view share, strengthen that anchor enough to keep the aggregate
+  // objective at most 50% virtual. Camera sampling frequency is unchanged.
+  const lowShareAnchor = sampledVirtualShare * 0.5;
+  const highShareBalance = sampledVirtualShare * 2 - 1;
+  const frontGradientAnchorWeight = Math.max(
+    0,
+    Math.min(1, Math.max(lowShareAnchor, highShareBalance)),
+  );
   return {
     sampledVirtualShare,
     frontGradientAnchorWeight,
@@ -2714,4 +2800,3 @@ function experimentalVariants() {
     qualityRecovery: qualityRecoveryVariants(),
   };
 }
-

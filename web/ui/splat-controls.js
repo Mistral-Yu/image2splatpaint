@@ -405,4 +405,3 @@ function resetSplatAdjustments() {
   resetSplatAdjustmentControls();
   queueSplatAdjustments({ immediate: true });
 }
-

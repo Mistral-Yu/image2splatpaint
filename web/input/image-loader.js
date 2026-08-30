@@ -84,6 +84,7 @@ async function resizeLoadedImageToMaxSide(maxSide) {
   };
   updateImageSizeStatus();
   state.params = null;
+  state.flowSplatResult = null;
   state.metrics = null;
   state.previewPadding = previewPaddingSpec(state.image, null, false);
   state.lastDownload = "";
@@ -208,6 +209,7 @@ async function loadFile(file, { loadGeneration: inheritedLoadGeneration = null }
     if (loadGeneration !== state.imageLoadGeneration) return false;
     updateImageSizeStatus();
     state.params = null;
+    state.flowSplatResult = null;
     state.metrics = null;
     state.previewPadding = previewPaddingSpec(state.image, null, false);
     state.lastDownload = "";

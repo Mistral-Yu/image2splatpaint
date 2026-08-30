@@ -1,7 +1,96 @@
+function applyQaFlowStrokeInitialization(params, trainingImage, strokePlan, planWidth, planHeight) {
+  if (!strokePlan?.length || !params?.count) return null;
+  const width = Math.max(1, Number(planWidth) || trainingImage.width);
+  const height = Math.max(1, Number(planHeight) || trainingImage.height);
+  const extent = LAYERED_OPAQUE_BRUSH_KERNEL_EXTENT;
+  const maxAspect = Math.max(1, Number(params.brushMaxAspectRatio) || DEFAULT_MAX_ANISOTROPY);
+  let meanPath = 0;
+  let meanAspect = 0;
+  const layerCounts = [0, 0, 0];
+  for (let index = 0; index < params.count; index += 1) {
+    const planIndex = Math.min(
+      strokePlan.length - 1,
+      Math.floor((index + 0.5) * strokePlan.length / params.count),
+    );
+    const stroke = strokePlan[planIndex];
+    let tangentX = stroke.end_x - stroke.start_x;
+    let tangentY = stroke.end_y - stroke.start_y;
+    let tangentLength = Math.hypot(tangentX, tangentY);
+    if (tangentLength < 1e-6) {
+      const fallback = params.theta[index] || 0;
+      tangentX = Math.cos(fallback) * width;
+      tangentY = Math.sin(fallback) * height;
+      tangentLength = Math.hypot(tangentX, tangentY);
+    }
+    const unitX = tangentX / Math.max(1e-6, tangentLength);
+    const unitY = tangentY / Math.max(1e-6, tangentLength);
+    const tangentNdcPerPixel = Math.hypot(2 * unitX / width, 2 * unitY / height);
+    const normalNdcPerPixel = Math.hypot(-2 * unitY / width, 2 * unitX / height);
+    const halfPathNdc = Math.max(MIN_SPLAT_SCALE, 0.5 * stroke.path_length_px * tangentNdcPerPixel);
+    const halfWidthNdc = Math.max(MIN_SPLAT_SCALE, stroke.half_width_px * normalNdcPerPixel);
+    let major = Math.max(
+      MIN_SPLAT_SCALE,
+      halfPathNdc / extent,
+      halfWidthNdc * 1.6,
+    );
+    let minor = Math.max(MIN_SPLAT_SCALE, halfWidthNdc / (extent * 0.82));
+    if (major / minor > maxAspect) minor = major / maxAspect;
+    const theta = Math.atan2(2 * unitY / height, 2 * unitX / width);
+    const x = -1 + 2 * stroke.center_x / Math.max(1, width - 1);
+    const y = -1 + 2 * stroke.center_y / Math.max(1, height - 1);
+    const constrained = constrainSplat(
+      x,
+      y,
+      major,
+      minor,
+      theta,
+      params.boundarySigma,
+      maxAspect,
+    );
+    params.xy[index * 2] = constrained.x;
+    params.xy[index * 2 + 1] = constrained.y;
+    params.scale[index * 2] = constrained.sx;
+    params.scale[index * 2 + 1] = constrained.sy;
+    params.theta[index] = theta;
+    params.detailTags[index] = 1;
+    params.rgb[index * 3] = clampNumber(stroke.color_r, 0, 1, 0);
+    params.rgb[index * 3 + 1] = clampNumber(stroke.color_g, 0, 1, 0);
+    params.rgb[index * 3 + 2] = clampNumber(stroke.color_b, 0, 1, 0);
+    const layer = Math.max(0, Math.min(2, Math.round(stroke.layer) || 0));
+    layerCounts[layer] += 1;
+    meanPath += stroke.path_length_px;
+    meanAspect += Math.max(constrained.sx, constrained.sy) /
+      Math.max(MIN_SPLAT_SCALE, Math.min(constrained.sx, constrained.sy));
+  }
+  params.initializationScheme = "qa-flow-stroke-plan";
+  params.initializationStats = {
+    candidate: "BR-CAND-58",
+    source: "independent-three-level-poisson-flow-plan",
+    plan_count: strokePlan.length,
+    applied_count: params.count,
+    plan_size: [width, height],
+    layer_counts: layerCounts,
+    mean_path_length_px: meanPath / params.count,
+    mean_aspect_ratio: meanAspect / params.count,
+    brush_primitive_and_optimizer_unchanged: true,
+  };
+  return params.initializationStats;
+}
+
 async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginTrainingRun()) {
   assertTrainingRun(run);
   if (!state.image || state.running) return;
   const algorithm = selectedAlgorithm();
+  const qaQuery = QA_RUNTIME_ENABLED ? new URLSearchParams(location.search) : null;
+  const flowPaintReferenceMode = qaQuery?.get("brush-flow-reference") || "";
+  const runFlowPaintReference = Boolean(
+    algorithmUsesLayeredOpaqueBrush(algorithm) &&
+    (flowPaintReferenceMode === "1" || flowPaintReferenceMode === "fine")
+  );
+  const runFineFlowPaintReference = runFlowPaintReference && flowPaintReferenceMode === "fine";
+  const runFlowStrokeInitialization = runFineFlowPaintReference &&
+    qaQuery?.get("brush-flow-init") === "1";
+  const flowPaintSourceImage = runFineFlowPaintReference ? state.image : null;
   syncAlgorithmRequirements();
   if (Boolean(algorithm.capabilities.virtualCameras) !== Boolean(virtualCameraSamplingEnabled)) {
     throw new Error(`Training entry does not match selected algorithm: ${algorithm.id}`);
@@ -55,6 +144,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   if (preflightFailure) log(`Auto probe will search below the rejected ${trainingUiAdapter.controls.finalSplatCount.value} splat request.`);
   resetEvaluationStatusForNewTraining();
   state.running = true;
+  state.flowSplatResult = null;
   state.previewGeneration += 1;
   state.paused = false;
   resetTrainingTiming(false);
@@ -118,7 +208,65 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   const runBrushMinAspectRatio = selectedBrushMinAspectRatio();
   const runBrushMaxAspectRatio = selectedBrushMaxAspectRatio();
   const runBrushAspectFloors = selectedBrushAspectFloors();
-  const trainingImage = state.image;
+  const flowPaintStrength = Math.max(
+    0,
+    Math.min(1, Number(qaQuery?.get("brush-flow-strength") ?? 1) || 0),
+  );
+  let flowPaintResult = null;
+  if (runFlowPaintReference) {
+    if (runFineFlowPaintReference) {
+      const trainingSide = Math.max(state.image.width, state.image.height);
+      const sourceSide = Math.max(flowPaintSourceImage.width, flowPaintSourceImage.height);
+      const referenceSide = Math.min(sourceSide, 1024, Math.max(512, trainingSide * 2));
+      const [referenceWidth, referenceHeight] = resizedSize(
+        flowPaintSourceImage.width,
+        flowPaintSourceImage.height,
+        referenceSide,
+      );
+      const referenceSource = referenceWidth === flowPaintSourceImage.width &&
+        referenceHeight === flowPaintSourceImage.height
+        ? flowPaintSourceImage
+        : {
+            ...flowPaintSourceImage,
+            ...resizeFloatImageBilinear(flowPaintSourceImage, referenceWidth, referenceHeight),
+          };
+      const generated = Image2SplatPaintFlowPaintReference.createFlowPaintReference(referenceSource, {
+        seed: 240825,
+        strength: flowPaintStrength,
+        profile: "fine-layered-v2",
+        maxStrokes: 14000,
+        includeStrokePlan: runFlowStrokeInitialization,
+      });
+      const resizedReference = resizeFloatImageBilinear(
+        generated.image,
+        state.image.width,
+        state.image.height,
+      );
+      flowPaintResult = {
+        image: { ...state.image, ...resizedReference },
+        strokePlan: generated.strokePlan,
+        metadata: {
+          ...generated.metadata,
+          generated_size: [referenceWidth, referenceHeight],
+          training_size: [state.image.width, state.image.height],
+          generated_before_training_resize: true,
+        },
+      };
+    } else {
+      flowPaintResult = Image2SplatPaintFlowPaintReference.createFlowPaintReference(state.image, {
+        seed: 240825,
+        strength: flowPaintStrength,
+      });
+    }
+  }
+  const trainingImage = flowPaintResult?.image || state.image;
+  if (flowPaintResult) {
+    const flow = flowPaintResult.metadata;
+    log(
+      `QA flow-painted Brush reference: ${flow.accepted_strokes}/${flow.requested_strokes} strokes, ` +
+      `mean ${flow.mean_path_length_px.toFixed(2)}px, long ${(flow.long_stroke_fraction * 100).toFixed(1)}%`,
+    );
+  }
   const runSharedColorWorkflow = selectedSharedColorWorkflow();
   const runSurfaceLayerPrior = scaleBiasedSurfaceLayerPriorSettings();
   const runHarmfulRectangleParentSplit = harmfulRectangleParentSplitSettings();
@@ -133,6 +281,8 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   const runRectangleMaxAspectRatio =
     selectedRectangleMaxAspectRatio(runRectangleMinAspectRatio);
   const runRectangleOrientation = selectedRectangleOrientation();
+  const runRectangleOrientationToleranceDegrees = selectedRectangleOrientationToleranceDegrees();
+  const runRectangleOrientationTolerance = runRectangleOrientationToleranceDegrees / 90 * 100;
   if (algorithmUsesRectangleKernel(algorithm)) {
     learningRates = {
       ...learningRates,
@@ -220,6 +370,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
   trainingUiAdapter.controls.rectangleMinAspectRatio.value = String(runRectangleMinAspectRatio);
   trainingUiAdapter.controls.rectangleMaxAspectRatio.value = String(runRectangleMaxAspectRatio);
   trainingUiAdapter.controls.rectangleOrientation.value = runRectangleOrientation;
+  trainingUiAdapter.controls.rectangleOrientationTolerance.value = String(runRectangleOrientationToleranceDegrees);
   trainingUiAdapter.controls.rectanglePreserveArea.checked = runRectangleShape.preserveArea;
   trainingUiAdapter.controls.rectangleEdgeDirectedTaper.checked = runRectangleShape.edgeDirectedTaper;
   trainingUiAdapter.controls.rectangleStructureAwareRatio.checked = runRectangleShape.structureAwareRatio;
@@ -254,6 +405,25 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       ? "image-rgb-grid-adaptive-placement"
       : "image-rgb-grid";
   state.params = algorithm.initialize(trainingImage, baseInitialCount);
+  if (runFlowStrokeInitialization) {
+    const flowInitialization = applyQaFlowStrokeInitialization(
+      state.params,
+      trainingImage,
+      flowPaintResult?.strokePlan,
+      flowPaintResult?.metadata?.generated_size?.[0],
+      flowPaintResult?.metadata?.generated_size?.[1],
+    );
+    if (flowInitialization) {
+      log(
+        `QA flow-stroke initialization: ${flowInitialization.applied_count}/` +
+        `${flowInitialization.plan_count}, mean aspect ${flowInitialization.mean_aspect_ratio.toFixed(2)}`,
+      );
+    }
+  }
+  // Training controls are disabled for the lifetime of a run. Snapshot tile
+  // culling with the other run parameters so GPU optimizer code never reads
+  // mutable DOM state while command buffers are being encoded.
+  state.params.tileCullingEnabled = Boolean(trainingUiAdapter.controls.tileCullingToggle.checked);
   state.params.brushRibbonAspectFloor = runBrushAspectFloors.ribbon;
   state.params.brushAccentAspectFloor = runBrushAspectFloors.accent;
   state.params.brushMinAspectRatio = runBrushMinAspectRatio;
@@ -316,6 +486,9 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
     state.params.rectangleOrientation = algorithmUsesRectangleKernel(algorithm)
       ? runRectangleOrientation
       : DEFAULT_RECTANGLE_ORIENTATION;
+    state.params.rectangleOrientationTolerance = algorithmUsesRectangleKernel(algorithm)
+      ? runRectangleOrientationTolerance
+      : 0;
     state.params.rectanglePreserveArea = algorithmUsesRectangleKernel(algorithm)
       ? runRectangleShape.preserveArea
       : DEFAULT_RECTANGLE_PRESERVE_AREA;
@@ -383,7 +556,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
     algorithm_label: algorithm.label,
     algorithm_backend: algorithm.backend,
     algorithm_capabilities: { ...algorithm.capabilities },
-    initialization,
+    initialization: runFlowStrokeInitialization ? "qa-flow-stroke-plan" : initialization,
     initialization_adaptive: {
       requested: runAdaptiveGridInitialization.requested,
       applied: false,
@@ -393,6 +566,18 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       backend: "webgpu-compute",
     },
     initialization_bsp: state.params.initializationStats || null,
+    brush_flow_paint_reference: flowPaintResult?.metadata || {
+      enabled: false,
+      candidate: runFineFlowPaintReference ? "BR-CAND-57" : "BR-CAND-56",
+      qa_only: true,
+    },
+    brush_flow_stroke_initialization: runFlowStrokeInitialization
+      ? state.params.initializationStats
+      : {
+          enabled: false,
+          candidate: "BR-CAND-58",
+          qa_only: true,
+        },
     brush_detail_layer_policy: algorithmUsesLayeredOpaqueBrush(algorithm)
       ? {
           split_birth: "inherit-parent-layer",
@@ -759,6 +944,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       mode: runVirtualCameraSampling.enabled ? runVirtualCameraSampling.mode : "off",
       pool_slots: runVirtualCameraSampling.slots,
       virtual_slots: runVirtualCameraSampling.virtualSlots,
+      frontless_sampling: runVirtualCameraSampling.frontlessSampling,
       requested_share_percent: runVirtualCameraSampling.requestedSharePercent,
       effective_share_percent: runVirtualCameraSampling.effectiveSharePercent,
       front_gradient_anchor_weight: runVirtualCameraSampling.frontGradientAnchorWeight,
@@ -1793,6 +1979,9 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
       }
       await updatePreview(state.metrics.steps_done, true, {}, run);
       state.metrics.training_evaluation.final_full_image_evaluations = 1;
+      if (algorithmUsesRectangleKernel(algorithm)) {
+        state.metrics.rectangle_orientation_constraints = rectangleConstraintProbe(state.params);
+      }
       // The final metric pass has read the trained parameters and verified the
       // visible training surface. Preserve that CPU result before allocating a
       // second GPU cache so a device loss in the copy phase stays recoverable.

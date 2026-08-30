@@ -2,6 +2,7 @@ function setInputControlsDisabled(disabled) {
   for (const element of [
     els.fileInput,
     els.algorithmSelect,
+    els.rectanglePaintShape,
     els.trainSize,
     els.initialSplatCount,
     els.adaptiveGridInitializationFraction,
@@ -60,6 +61,7 @@ function setInputControlsDisabled(disabled) {
     els.rectangleMinAspectRatio,
     els.rectangleMaxAspectRatio,
     els.rectangleOrientation,
+    els.rectangleOrientationTolerance,
     els.rectanglePreserveArea,
     els.rectangleEdgeDirectedTaper,
     els.rectangleStructureAwareRatio,
@@ -101,6 +103,25 @@ function setInputControlsDisabled(disabled) {
     els.clearImageButton,
     els.sampleButton,
     els.pathButton,
+    els.flowSplatFusionStrokeTexture,
+    els.flowSplatFusionStrokeOptimization,
+    els.flowSplatFusionPaintCurriculum,
+    els.flowSplatFusionFixedOpacity,
+    els.flowSplatFusionStartingWidthDivisor,
+    els.flowSplatFusionStartingLengthPercent,
+    els.flowSplatFusionResidualMovePx,
+    els.flowSplatFusionScaleMatchedResidualRepaint,
+    els.flowSplatFusionInitialWidthMin,
+    els.flowSplatFusionInitialWidthMax,
+    els.flowSplatFusionFrontWidthMax,
+    els.flowSplatFusionFrontWidthLearning,
+    els.flowSplatFusionColorAnchor,
+    els.flowSplatFusionWidthPercent,
+    els.flowSplatFusionSplatSizeVariation,
+    els.flowSplatFusionMovementLimit,
+    els.flowSplatUnderpainting,
+    els.flowSplatUnderpaintPercent,
+    els.flowSplatFusionMaxArcPercent,
   ]) {
     element.disabled = disabled;
   }
@@ -112,9 +133,75 @@ function setInputControlsDisabled(disabled) {
 }
 
 function syncAlgorithmRequirements() {
+  const algorithm = selectedAlgorithm();
   const opaqueLayered = algorithmUsesOpaqueLayeredPaint();
-  const brushSelected = algorithmUsesLayeredOpaqueBrush();
-  const rectangleSelected = algorithmUsesRectangleKernel();
+  const rectangleAlgorithmSelected =
+    algorithm.id === RECTANGLE_SPLATS_ALGORITHM_ID ||
+    algorithm.id === LAYERED_OPAQUE_BRUSH_ALGORITHM_ID;
+  const brushSelected = algorithmUsesLayeredOpaqueBrush(algorithm);
+  const rectangleSelected = algorithmUsesRectangleKernel(algorithm);
+  const flowSelected = algorithmUsesFlowStrokeTraining(algorithm);
+  if (flowSelected) {
+    const budgetKey = "flow";
+    const previousBudgetKey = els.flowSplatUnderpaintPercent.dataset.algorithm;
+    if (previousBudgetKey && previousBudgetKey !== budgetKey) {
+      els.flowSplatUnderpaintPercent.dataset[`${previousBudgetKey}Value`] =
+        els.flowSplatUnderpaintPercent.value;
+    }
+    if (previousBudgetKey !== budgetKey) {
+      els.flowSplatUnderpaintPercent.value =
+        els.flowSplatUnderpaintPercent.dataset[`${budgetKey}Value`] ||
+        "10";
+      els.flowSplatUnderpaintPercent.dataset.algorithm = budgetKey;
+    }
+  }
+  document.documentElement.dataset.flowSplatFusion = String(flowSelected);
+  if (flowSelected) els.flowSplatFusionPanel.open = true;
+  els.flowSplatFusionPanelSummary.textContent = "Flow Brush Fusion settings";
+  els.flowSplatFusionPanelNote.textContent =
+    "Layered paint Algorithm. The Baseline uses eight compact Brush Splats per curved stroke, with an opaque interior and a feathered contour. Textured regions receive more bundles, while two thin-long bristles follow a Linear-sRGB Flow-XDoG contour guide. Classic Gaussian preserves the previous four-Splat mode for comparison. The fixed compact backcoat closes gaps without changing standard alpha. Training grows, moves, splits, and merges strokes from broad shapes toward shorter detail.";
+  els.initialSplatCount.closest("label").classList.toggle("flow-hidden", flowSelected);
+  els.initialSplatCountLabel.textContent = "Initial splats";
+  els.finalSplatCountLabel.textContent = "Max splats";
+  els.finalSplatCount.closest("label").title = flowSelected
+    ? "Physical Splat budget. Detail uses complete stroke chains; the optional compact Brush backcoat uses individual Splats, so only the detail remainder rounds down."
+    : "Maximum number of splats available to density growth. Loading an image does not change this value.";
+  els.trainSize.min = String(LIMITS.trainSizeMin);
+  els.trainSize.max = flowSelected ? "512" : String(LIMITS.trainSizeMax);
+  els.finalSplatCount.min = flowSelected ? "256" : String(LIMITS.splatsMin);
+  els.finalSplatCount.max = flowSelected ? "14000" : String(LIMITS.splatsMax);
+  els.finalSplatCount.step = "4";
+  els.stepCount.removeAttribute("max");
+  els.stepCount.step = "100";
+  els.flowSplatFusionColorAnchor.disabled = state.running || !flowSelected;
+  els.flowSplatFusionStrokeTexture.disabled = state.running || !flowSelected;
+  els.flowSplatFusionStrokeOptimization.disabled = state.running || !flowSelected;
+  els.flowSplatFusionPaintCurriculum.disabled = state.running || !flowSelected;
+  els.flowSplatFusionFixedOpacity.disabled = state.running || !flowSelected;
+  const paintCurriculum = flowSelected && els.flowSplatFusionPaintCurriculum.checked;
+  els.flowSplatFusionStartingWidthDivisor.disabled = state.running || !paintCurriculum;
+  els.flowSplatFusionStartingLengthPercent.disabled = state.running || !paintCurriculum;
+  els.flowSplatFusionResidualMovePx.disabled = state.running || !flowSelected;
+  els.flowSplatFusionScaleMatchedResidualRepaint.disabled = state.running || !flowSelected;
+  els.flowSplatFusionInitialWidthMin.disabled = state.running || !flowSelected;
+  els.flowSplatFusionInitialWidthMax.disabled = state.running || !flowSelected;
+  els.flowSplatFusionFrontWidthMax.disabled = state.running || !flowSelected;
+  els.flowSplatFusionFrontWidthLearning.disabled = state.running || !flowSelected;
+  els.flowSplatFusionWidthPercent.disabled = state.running || !flowSelected;
+  els.flowSplatFusionSplatSizeVariation.disabled = state.running || !flowSelected;
+  els.flowSplatFusionMovementLimit.disabled = state.running || !flowSelected;
+  els.flowSplatUnderpainting.disabled = state.running || !flowSelected;
+  els.flowSplatUnderpaintPercent.disabled =
+    state.running || !flowSelected || !els.flowSplatUnderpainting.checked;
+  els.flowSplatFusionMaxArcLabel.hidden = false;
+  els.flowSplatFusionMaxArcPercent.disabled = state.running || !flowSelected;
+  els.rectanglePaintPanel.hidden = !rectangleAlgorithmSelected;
+  els.rectanglePaintShape.disabled = state.running || !rectangleAlgorithmSelected;
+  els.rectangleShapeSettings.hidden = !rectangleSelected;
+  els.opaquePaintPanel.hidden = !brushSelected;
+  document.documentElement.dataset.rectanglePaintShape = rectangleAlgorithmSelected
+    ? selectedRectanglePaintShape()
+    : "";
   document.documentElement.dataset.opaquePaintSettings = "visible";
   if (brushSelected) {
     if (!els.discreteLayerMoveRadius.dataset.nonBrushValue) {
@@ -142,7 +229,8 @@ function syncAlgorithmRequirements() {
     els.layerAwareAccumulation.checked = true;
     els.discreteLayers.checked = true;
   }
-  els.opacityLearningRate.disabled = state.running;
+  els.initialSplatCount.disabled = state.running || flowSelected;
+  els.opacityLearningRate.disabled = state.running || flowSelected;
   els.structureRegionGrid.disabled = state.running || (
     !els.structureGuidedAllocation.checked && !els.midTrainingOverdensityCorrection.checked
   );
@@ -192,6 +280,7 @@ function syncAlgorithmRequirements() {
   els.rectangleMinAspectRatio.disabled = state.running || !rectangleSelected;
   els.rectangleMaxAspectRatio.disabled = state.running || !rectangleSelected;
   els.rectangleOrientation.disabled = state.running || !rectangleSelected;
+  els.rectangleOrientationTolerance.disabled = state.running || !rectangleSelected || selectedRectangleOrientation() === "free";
   els.scaleBiasedSurfaceLayerPrior.disabled = state.running;
   for (const control of [
     els.scaleBiasedSurfaceLayerPriorLayers,
@@ -215,7 +304,7 @@ function syncAlgorithmRequirements() {
     ? "Maximum long-side / short-side aspect ratio; this Rectangle value overrides Shared Max anisotropy."
     : "Available for Rectangle Splats.";
   els.rectangleOrientation.title = rectangleSelected
-    ? "Free keeps structure-guided rotation; Vertical or Horizontal locks the long axis."
+    ? "Free keeps unrestricted rotation; Vertical or Horizontal constrains the long axis within Orientation tolerance."
     : "Available for Rectangle Splats.";
   for (const control of [
     els.rectanglePreserveArea,

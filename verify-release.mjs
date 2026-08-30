@@ -124,7 +124,7 @@ export async function verifyRelease(sitePath) {
   const expectedAlgorithms = [
     "planar-gaussian",
     "rectangle-splats",
-    "layered-opaque-brush",
+    "flow-splat-fusion",
     "gs-virtual-camera-sampling",
   ];
   const csp = contentSecurityPolicy(webHtml);
@@ -147,6 +147,13 @@ export async function verifyRelease(sitePath) {
   check("app has a visible local-only privacy notice", /\b(?:no uploads?|never uploads?|processed locally|kept locally|stays? (?:on|in) (?:this|your) (?:device|browser))\b/i.test(webHtml), failures);
   check("live quality metrics are default-off", liveMetricsInput.includes('type="checkbox"') && !/\bchecked(?:\s|=|>)/i.test(liveMetricsInput), failures);
   check("app exposes exactly four public algorithms", JSON.stringify(algorithmValues) === JSON.stringify(expectedAlgorithms), failures);
+  check(
+    "Flow Brush Fusion supports PNG export",
+    /\[FLOW_SPLAT_FUSION_ALGORITHM_ID\][^]*exports: Object\.freeze\(\["png"\]\)[^]*png: true/.test(app) &&
+      webHtml.includes("pngExportResolution") &&
+      webHtml.includes("pngExportLongSide"),
+    failures,
+  );
   check(
     "export parity accounts for one alpha quantization step in premultiplied color",
     gpuRuntime.includes("const premultipliedTolerance = alphaMaximum > 0 ? 2 : 1") &&

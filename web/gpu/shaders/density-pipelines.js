@@ -468,11 +468,17 @@ fn constrain_rectangle_orientation(scale: vec2<f32>, theta: f32) -> f32 {
   }
   let longAxisIsX = scale.x >= scale.y;
   let vertical = config[92] < 1.5;
-  return select(
+  let targetTheta = select(
     select(1.57079632679, 0.0, longAxisIsX),
     select(0.0, 1.57079632679, longAxisIsX),
     vertical
   );
+  let tolerance = clamp(config[127], 0.0, 1.57079632679);
+  if (tolerance <= 0.0) { return targetTheta; }
+  if (tolerance >= 1.57079632679) { return theta; }
+  let offset = theta - targetTheta;
+  let delta = offset - floor((offset + 1.57079632679) / 3.14159265359) * 3.14159265359;
+  return theta + clamp(delta, -tolerance, tolerance) - delta;
 }
 
 fn constrain_scale(pos: vec2<f32>, scale: vec2<f32>, theta: f32, maxAnisotropy: f32) -> vec2<f32> {

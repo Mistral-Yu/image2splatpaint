@@ -408,11 +408,6 @@ function estimatedImageSizeFor(trainSize) {
   return { width, height };
 }
 
-function imagePixelEstimate(trainSize) {
-  const size = estimatedImageSizeFor(trainSize);
-  return size.width * size.height;
-}
-
 function sideFromPixelBudget(pixelBudget, trainSize) {
   if (!state.image) return Math.sqrt(pixelBudget);
   const sourceWidth = state.image.cacheWidth || state.image.width;
@@ -697,4 +692,3 @@ function updateMemoryRecommendation({ reconcileSplatCounts = true } = {}) {
   publishState();
   return rec;
 }
-

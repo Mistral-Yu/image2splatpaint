@@ -5,7 +5,17 @@ function selectedPngExportResolutionMode() {
     : DEFAULT_PNG_EXPORT_RESOLUTION;
 }
 
-function pngExportFrameSpec(image = state.image) {
+function currentFlowPngResult() {
+  return state.flowSplatResult?.sourceImage === state.image
+    ? state.flowSplatResult
+    : null;
+}
+
+function pngExportSourceImage() {
+  return currentFlowPngResult()?.image || state.image;
+}
+
+function pngExportFrameSpec(image = pngExportSourceImage()) {
   const trainingWidth = Math.max(1, Math.round(Number(image?.width) || Number(els.trainSize?.value) || DEFAULT_MAX_SIDE));
   const trainingHeight = Math.max(1, Math.round(Number(image?.height) || trainingWidth));
   const trainingLongSide = Math.max(trainingWidth, trainingHeight);
@@ -52,6 +62,18 @@ function syncPngExportResolutionUi() {
 }
 
 function currentSplatPngSpec() {
+  if (currentFlowPngResult()) {
+    return {
+      filename: "image2splatpaint-flow-brush-fusion.png",
+      shape: "flow-brush-fusion",
+      renderOptions: {
+        splatSmallFirstOrder: false,
+        kernelFalloff: 1,
+        alphaBackground: [0, 0, 0],
+        outside: false,
+      },
+    };
+  }
   const renderOptions = {
     ...splatAlphaRenderOptions(),
     outside: Boolean(els.outsidePreviewToggle?.checked),
@@ -83,12 +105,18 @@ function updateExportPanel() {
   els.savePlyButton.disabled = !plyEnabled;
   els.savePngButton.textContent = state.exporting ? "Saving..." : "Save Splat PNG";
   els.savePlyButton.textContent = state.exporting ? "Exporting..." : "Export PLY";
-  els.exportDescription.textContent = algorithm.capabilities.kernelShape === "opaque-brush"
-    ? "Brush Splats export exactly as PNG. Standard Gaussian Splatting PLY cannot represent the analytic brush kernel."
-    : algorithm.capabilities.kernelShape === "rectangle"
-      ? "Rectangle Splats export exactly as PNG. Standard Gaussian Splatting PLY cannot represent the rectangular kernel."
-      : EXPORT_FORMATS.ply.description;
-  els.exportCount.textContent = state.params ? state.params.count.toLocaleString() : "-";
+  const resultKernelShape = normalizedKernelShape(
+    state.params?.kernelShape || algorithm.capabilities.kernelShape,
+  );
+  els.exportDescription.textContent = currentFlowPngResult()
+    ? "Flow Brush Fusion exports its final opaque painted result as PNG. PLY cannot represent the fused Brush stroke structure."
+    : resultKernelShape === "opaque-brush"
+      ? "Brush Splats export exactly as PNG. Standard Gaussian Splatting PLY cannot represent the analytic brush kernel."
+      : resultKernelShape === "rectangle"
+        ? "Rectangle Splats export exactly as PNG. Standard Gaussian Splatting PLY cannot represent the rectangular kernel."
+        : EXPORT_FORMATS.ply.description;
+  const exportCount = state.params?.count ?? state.metrics?.num_gaussians;
+  els.exportCount.textContent = Number.isFinite(exportCount) ? exportCount.toLocaleString() : "-";
   els.exportStatus.textContent = enabled && plyPlan && !plyPlan.ok
     ? `PNG is ready. PLY needs ${plyPlan.estimatedPeakMB} MB peak memory; ${plyPlan.reason}.`
     : state.exportMessage;
@@ -194,6 +222,8 @@ async function decodeImageBlobRgba(blob, width, height) {
 }
 
 async function makeSplatPreviewPngBlob() {
+  const flowResult = currentFlowPngResult();
+  if (flowResult) return makeFlowPreviewPngBlob(flowResult);
   if (!state.image || !state.params || !state.webgpu.renderer) {
     throw new Error("No trained splat result to export.");
   }
@@ -252,6 +282,61 @@ async function makeSplatPreviewPngBlob() {
     padding: capture.padding,
     nonblackPixels,
     meanRgb: rgbSum / Math.max(1, width * height * 3 * 255),
+    pngRgbaParity,
+  };
+}
+
+async function makeFlowPreviewPngBlob(flowResult = currentFlowPngResult()) {
+  if (!flowResult?.image) throw new Error("No trained Flow Brush Fusion result to export.");
+  const sourceImage = flowResult.image;
+  const exportFrame = pngExportFrameSpec(sourceImage);
+  const sourceCanvas = document.createElement("canvas");
+  sourceCanvas.width = sourceImage.width;
+  sourceCanvas.height = sourceImage.height;
+  const sourceContext = sourceCanvas.getContext("2d", { alpha: true });
+  if (!sourceContext) throw new Error("2D canvas is unavailable for Flow PNG export.");
+  sourceContext.putImageData(
+    rgbToImageData(sourceImage.rgb, sourceImage.width, sourceImage.height, sourceImage.alpha),
+    0,
+    0,
+  );
+
+  const frame = document.createElement("canvas");
+  frame.width = exportFrame.width;
+  frame.height = exportFrame.height;
+  const context = frame.getContext("2d", { alpha: true, willReadFrequently: true });
+  if (!context) throw new Error("2D canvas is unavailable for Flow PNG export.");
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.clearRect(0, 0, frame.width, frame.height);
+  context.drawImage(sourceCanvas, 0, 0, frame.width, frame.height);
+  const rgba = new Uint8ClampedArray(context.getImageData(0, 0, frame.width, frame.height).data);
+  const blob = await canvasToBlob(frame);
+  const decodedRgba = await decodeImageBlobRgba(blob, frame.width, frame.height);
+  const pngRgbaParity = displayRgbaParity(rgba, decodedRgba);
+  if (!pngRgbaParity.exact) {
+    throw new Error(
+      `Flow PNG display RGBA round-trip mismatch: alpha ${pngRgbaParity.alpha_max_abs}, ` +
+      `premultiplied max ${pngRgbaParity.premultiplied_max_abs}, mean ${pngRgbaParity.premultiplied_mean_abs}`,
+    );
+  }
+
+  let nonblackPixels = 0;
+  let rgbSum = 0;
+  for (let index = 0; index < rgba.length; index += 4) {
+    const sum = rgba[index] + rgba[index + 1] + rgba[index + 2];
+    rgbSum += sum;
+    if (sum > 0) nonblackPixels += 1;
+  }
+  return {
+    blob,
+    width: frame.width,
+    height: frame.height,
+    exportFrame,
+    spec: currentSplatPngSpec(),
+    padding: { x: 0, y: 0 },
+    nonblackPixels,
+    meanRgb: rgbSum / Math.max(1, frame.width * frame.height * 3 * 255),
     pngRgbaParity,
   };
 }
@@ -603,4 +688,3 @@ function makePly(params = state.params, image = state.image) {
     logit,
   });
 }
-
