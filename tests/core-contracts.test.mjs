@@ -1188,7 +1188,10 @@ test("Single-Splat internal bend grows the real active count through P1/P2/P3", 
   assert.match(runtime, /discreteLayersEnabled: layerSettings\.enabled/);
   assert.match(links, /baseMinorScaleByNode/);
   assert.match(links, /seedChains\(localChains/);
-  assert.match(links, /const isolatedRows = \[\]/);
+  assert.match(links, /const trainableRows = Array\.from/);
+  assert.match(links, /this\.graph\.resetEdges\(trainableRows\)/);
+  assert.match(links, /group_size_histogram/);
+  assert.match(links, /mean_arc_height_px/);
   assert.match(links, /baseMinorScaleByNode\.get\(event\.parent\)/);
   assert.match(links, /train\.colorBuffers\[front\]/);
   assert.match(links, /PAINTERLY_LINK_STRENGTH = 0\.03/);

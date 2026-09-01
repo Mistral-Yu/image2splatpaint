@@ -25,8 +25,9 @@
     const dWidth=rawWidth>.0001?dBase*taperFactor+baseWidth*dTaper:0;
     const v=(transverse-bend)/width,v2=v*v;
     const dvdu=-dBend/width-v*dWidth/width;
-    const gl=(4*u*u2+4*v*v2*dvdu)/length,gt=4*v*v2/width;
-    return {q:u2*u2+v2*v2,g:majorX?[gl,gt]:[gt,gl]};
+    const u3=u*u2,u4=u2*u2,u5=u3*u2;
+    const gl=((.55*4*u3+.45*6*u5)+4*v*v2*dvdu)/length,gt=4*v*v2/width;
+    return {q:.55*u4+.45*u4*u2+v2*v2,g:majorX?[gl,gt]:[gt,gl]};
   }
 
   // Solve the first paint-core intersection on a ray, then differentiate the
@@ -115,9 +116,9 @@ fn brush_q(p:vec2<f32>,row:u32)->QSample{
   let tf=options.brush.x+taper*(options.brush.y-options.brush.x)*progress;
   let raw=base*tf;let w=max(.0001,raw);
   let dw=select(0.0,dbase*tf+base*taper*(options.brush.y-options.brush.x)*dp,raw>.0001);
-  let v=(transverse-bend)/w;let v2=v*v;
-  let gl=(4.0*u*u2+4.0*v*v2*(-db/w-v*dw/w))/len;let gt=4.0*v*v2/w;
-  return QSample(u2*u2+v2*v2,select(vec2<f32>(gt,gl),vec2<f32>(gl,gt),major));
+  let v=(transverse-bend)/w;let v2=v*v;let u3=u*u2;let u4=u2*u2;let u5=u3*u2;
+  let gl=(.55*4.0*u3+.45*6.0*u5+4.0*v*v2*(-db/w-v*dw/w))/len;let gt=4.0*v*v2/w;
+  return QSample(.55*u4+.45*u4*u2+v2*v2,select(vec2<f32>(gt,gl),vec2<f32>(gl,gt),major));
 }
 fn radius(row:u32,n:vec2<f32>)->Radius{
   let t=transforms[row];let c=cos(t.z);let s=sin(t.z);let D=options.geometry.xy;
@@ -182,9 +183,8 @@ fn birth_links(@builtin(global_invocation_id) id:vec3<u32>){
       let midpoint=0.5*(neighborCenter0+neighborCenter1)*options.geometry.xy;
       let centerPx=positions[row].center*options.geometry.xy;
       let signedDistance=dot(centerPx-midpoint,normal);
-      let widthPx=1.5*targetWidth*min(options.geometry.x,options.geometry.y);
       let direction=select(-1.0,1.0,signedTargetWidth>0.0);
-      let desired=direction*min(0.20*chordLength,max(1.0,0.9*widthPx));
+      let desired=direction*min(18.0,max(1.2,0.18*chordLength));
       let curvatureGradient=(signedDistance-desired)/max(1.0,chordLength*chordLength);
       center+=12.0*curvatureGradient*normal*options.geometry.xy;
     }

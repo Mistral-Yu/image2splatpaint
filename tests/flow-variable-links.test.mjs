@@ -17,6 +17,12 @@ async function loadBirthGraph() {
   vm.runInContext(await read("web/training/flow-birth-graph.js"), context);
   return context.Image2SplatPaintFlowBirthGraph.BirthGraph;
 }
+
+async function loadBirthLinks() {
+  const context = vm.createContext({ Float32Array, Map, Math, Number, Object, Set, Uint8Array });
+  vm.runInContext(await read("web/training/flow-birth-links.js"), context);
+  return context.Image2SplatPaintFlowBirthLinks._test;
+}
 const stroke = (random = 0.4) => ({
   start_x: 24, start_y: 40, control_1_x: 36, control_1_y: 28,
   control_2_x: 56, control_2_y: 48, end_x: 72, end_y: 40,
@@ -78,6 +84,51 @@ test("Birth-linked strokes can seed local P1 chains before growth", async () => 
   assert.deepEqual([...packed.groups].map((group) => group.length), [2, 2]);
   assert.throws(() => graph.seedChains([[2, 3]]), /Invalid initial chain row/);
   assert.throws(() => graph.seedChains([[6, 7, 0, 3, 4, 5]]), /Invalid initial chain/);
+});
+
+test("Structural reset preserves stable nodes and accepts rebuilt chains", async () => {
+  const BirthGraph = await loadBirthGraph();
+  const graph = new BirthGraph(6, { minMembers: 2, maxMembers: 4 });
+  const stable = [...graph.rows];
+  graph.seedChains([[0, 1, 2], [3, 4, 5]]);
+  graph.resetEdges([0, 1, 2, 3, 4, 5]);
+  assert.equal(graph.pack(() => true, { includeDormant: true }).edges.length, 0);
+  assert.deepEqual([...graph.rows], stable);
+  graph.seedChains([[0, 3, 4], [1, 2, 5]]);
+  assert.equal(graph.pack().edges.length, 4);
+});
+
+test("Direction-guided local chains prefer compatible Brush axes", async () => {
+  const { localChains } = await loadBirthLinks();
+  const xy = new Float32Array([
+    -.24, -.04, -.08, -.04, .08, -.04, .24, -.04,
+    -.24, .04, -.08, .04, .08, .04, .24, .04,
+  ]);
+  const params = {
+    xy,
+    scale: new Float32Array(16).fill(.1),
+    theta: new Float32Array(8),
+    rgb: new Float32Array(24).fill(.4),
+    depthOrder: new Float32Array(8).fill(.5),
+  };
+  for (let row = 0; row < 8; row += 1) params.scale[row * 2] = .3;
+  const chains = localChains(params, [0, 1, 2, 3, 4, 5, 6, 7], 4, 4);
+  assert.deepEqual(Array.from(chains, chain => chain.length), [4, 4]);
+  const mismatches = [];
+  for (const chain of chains) for (let i = 1; i < chain.length; i += 1) {
+    const a = chain[i - 1], b = chain[i];
+    mismatches.push(Math.abs(Math.sin(Math.atan2(xy[b * 2 + 1] - xy[a * 2 + 1], xy[b * 2] - xy[a * 2]))));
+  }
+  assert.ok(mismatches.reduce((sum, value) => sum + value, 0) / mismatches.length < .45);
+
+  const sparse = { ...params,
+    xy: new Float32Array([-.9, -.9, -.3, -.3, .3, .3, .9, .9]),
+    scale: new Float32Array([.2,.1,.2,.1,.2,.1,.2,.1]),
+    theta: new Float32Array(4), rgb: new Float32Array(12).fill(.4),
+    depthOrder: new Float32Array(4).fill(.5),
+  };
+  assert.equal(localChains(sparse, [0, 1, 2, 3], 2, 4).length, 0,
+    "distant same-layer dabs must remain separate");
 });
 
 test("A full linked stroke starts a sibling curve fragment instead of isolated split dots", async () => {

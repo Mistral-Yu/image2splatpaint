@@ -1226,7 +1226,10 @@ fn illustrative_oil_kernel_sample(
   let widthTaperGradient = select(0.0, rawWidthTaperGradient, rawWidth > 0.0001);
   let v = bentTransverse / width;
   let v2 = v * v;
-  let q = u2 * u2 + v2 * v2;
+  // A balanced flat-headed Brush contour. Most of the stable quartic body is
+  // retained while a sixth-order long-axis component reduces ellipse-like ends.
+  let u4 = u2 * u2;
+  let q = 0.55 * u4 + 0.45 * u4 * u2 + v2 * v2;
   let denominator = max(0.0001, 2.0 * feather);
   let t = clamp((q - (1.0 - feather)) / denominator, 0.0, 1.0);
   let baseKernel = 1.0 - t * t * (3.0 - 2.0 * t);
@@ -1236,7 +1239,8 @@ fn illustrative_oil_kernel_sample(
   let dKernelDq = -6.0 * t * (1.0 - t) / denominator;
   let dVdU = -bendGradient / width - v * widthGradient / width;
   let dVdTaper = -v * widthTaperGradient / width;
-  let dQdU = 4.0 * u * u2 + 4.0 * v * v2 * dVdU;
+  let dQdU = 0.55 * 4.0 * u * u2 +
+    0.45 * 6.0 * u * u2 * u2 + 4.0 * v * v2 * dVdU;
   let dQdTaper = 4.0 * v * v2 * dVdTaper;
   let dQdLongitudinal = dQdU / lengthScale;
   let dQdTransverse = 4.0 * v * v2 / width;
@@ -1257,8 +1261,8 @@ fn illustrative_oil_kernel_sample(
   );
   let opacityGradientLongTrans = vec2<f32>(dOpacityDLongitudinal, 0.0);
   let opacityGradient = select(opacityGradientLongTrans.yx, opacityGradientLongTrans, majorIsX);
-  // q=1 is the connected Brush contour. sqrt(q) is squared distance in its
-  // quartic shape coordinates, giving a finite zero derivative at the center.
+  // q=1 is the connected Brush contour. sqrt(q) is implicit contour progress,
+  // with a finite zero derivative at the center.
   let radialProgress = clamp(sqrt(max(q, 0.0)), 0.0, 1.0);
   let dRadialProgressDq = select(
     0.0,

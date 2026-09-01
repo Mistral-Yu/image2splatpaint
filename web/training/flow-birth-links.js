@@ -100,6 +100,48 @@
     return key >>> 0;
   }
 
+  function brushAxis(params, row) {
+    const majorIsX = params.scale[row * 2] >= params.scale[row * 2 + 1];
+    return (params.theta[row] || 0) + (majorIsX ? 0 : Math.PI / 2);
+  }
+
+  function axialMismatch(a, b) {
+    return Math.abs(Math.sin(a - b));
+  }
+
+  function nextChainRow(params, chain, pending, windowSize = 24) {
+    const current = chain[chain.length - 1];
+    const cx = params.xy[current * 2], cy = params.xy[current * 2 + 1];
+    const currentAxis = brushAxis(params, current);
+    let previousDirection = null;
+    if (chain.length >= 2) {
+      const previous = chain[chain.length - 2];
+      previousDirection = Math.atan2(cy - params.xy[previous * 2 + 1], cx - params.xy[previous * 2]);
+    }
+    let bestIndex = 0, bestScore = Infinity, bestDistance = Infinity;
+    for (let index = 0; index < Math.min(windowSize, pending.length); index += 1) {
+      const candidate = pending[index];
+      const dx = params.xy[candidate * 2] - cx, dy = params.xy[candidate * 2 + 1] - cy;
+      const distance = Math.max(1e-6, Math.hypot(dx, dy));
+      const direction = Math.atan2(dy, dx);
+      const candidateAxis = brushAxis(params, candidate);
+      const turn = previousDirection === null ? 0 : Math.abs(Math.sin(direction - previousDirection));
+      const colorOffset = current * 3, candidateColorOffset = candidate * 3;
+      const colorDistance = Math.hypot(
+        (params.rgb[candidateColorOffset] || 0) - (params.rgb[colorOffset] || 0),
+        (params.rgb[candidateColorOffset + 1] || 0) - (params.rgb[colorOffset + 1] || 0),
+        (params.rgb[candidateColorOffset + 2] || 0) - (params.rgb[colorOffset + 2] || 0),
+      );
+      const score = distance * (1 + 1.35 * axialMismatch(currentAxis, direction)
+        + 0.85 * axialMismatch(candidateAxis, direction) + 0.9 * turn + 0.35 * colorDistance);
+      if (score < bestScore) { bestScore = score; bestIndex = index; bestDistance = distance; }
+    }
+    // Layer identity alone does not make a coherent stroke. Sparse layers can
+    // otherwise connect opposite sides of the image after compaction.
+    if (bestDistance > .18) return null;
+    return pending.splice(bestIndex, 1)[0];
+  }
+
   function localChains(params, rows, minimum, maximum) {
     const byLayer = new Map();
     for (const row of rows) {
@@ -108,21 +150,73 @@
       byLayer.get(layer).push(row);
     }
     const chains = [];
-    for (const rows of byLayer.values()) {
-      rows.sort((a, b) => mortonKey(params.xy[a * 2], params.xy[a * 2 + 1])
+    for (const layerRows of byLayer.values()) {
+      const pending = layerRows.slice().sort((a, b) => mortonKey(params.xy[a * 2], params.xy[a * 2 + 1])
         - mortonKey(params.xy[b * 2], params.xy[b * 2 + 1]));
-      for (let start = 0; start + minimum <= rows.length;) {
-        const range = Math.max(1, maximum - Math.max(3, minimum) + 1);
-        const desired = Math.max(minimum, 3 + mortonKey(
-          params.xy[rows[start] * 2], params.xy[rows[start] * 2 + 1],
-        ) % range);
-        const members = Math.min(maximum, desired, rows.length - start);
-        if (members < minimum) break;
-        chains.push(rows.slice(start, start + members));
-        start += members;
+      while (pending.length >= minimum) {
+        const seed = pending.shift();
+        const range = Math.max(1, maximum - minimum + 1);
+        const desired = minimum + mortonKey(params.xy[seed * 2], params.xy[seed * 2 + 1]) % range;
+        const members = Math.min(maximum, desired, pending.length + 1);
+        const chain = [seed];
+        while (chain.length < members && pending.length) {
+          const next = nextChainRow(params, chain, pending);
+          if (next === null) break;
+          chain.push(next);
+        }
+        if (chain.length >= minimum) chains.push(chain);
       }
     }
     return chains;
+  }
+
+  function orderedGroup(graph, group) {
+    const groupSet = new Set(group);
+    const endpoint = group.find((node) =>
+      [...(graph.nodes.get(node) || [])].filter((other) => groupSet.has(other)).length <= 1,
+    ) || group[0];
+    const ordered = [];
+    let previous = null, current = endpoint;
+    while (current !== undefined && ordered.length < group.length) {
+      ordered.push(current);
+      const next = [...(graph.nodes.get(current) || [])]
+        .find((node) => node !== previous && groupSet.has(node) && !ordered.includes(node));
+      previous = current;current = next;
+    }
+    return ordered;
+  }
+
+  function chainDiagnostics(graph, packed, params, image, fixedCount) {
+    const rowOfNode = new Map(graph.rows.map((node, row) => [node, row]));
+    const histogram = {};
+    const spans = [], arcHeights = [];
+    const dx = Math.max(1, image.width - 1) / 2, dy = Math.max(1, image.height - 1) / 2;
+    for (const group of packed.groups) {
+      histogram[group.length] = (histogram[group.length] || 0) + 1;
+      const ordered = orderedGroup(graph, group);
+      const points = ordered.map((node) => {
+        const row = rowOfNode.get(node);
+        return [params.xy[row * 2] * dx, params.xy[row * 2 + 1] * dy];
+      });
+      if (points.length < 2) continue;
+      const a = points[0], b = points[points.length - 1], vx = b[0] - a[0], vy = b[1] - a[1];
+      const span = Math.hypot(vx, vy);spans.push(span);
+      let height = 0;
+      if (span > 1e-5) for (const point of points.slice(1, -1)) {
+        height = Math.max(height, Math.abs(vx * (point[1] - a[1]) - vy * (point[0] - a[0])) / span);
+      }
+      arcHeights.push(height);
+    }
+    const mean = values => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+    return {
+      linked_ratio: packed.linkedCount / Math.max(1, params.count - fixedCount),
+      group_count: packed.groups.length,
+      group_size_histogram: histogram,
+      mean_group_size: mean(packed.groups.map(group => group.length)),
+      mean_chain_span_px: mean(spans),
+      mean_arc_height_px: mean(arcHeights),
+      max_arc_height_px: arcHeights.length ? Math.max(...arcHeights) : 0,
+    };
   }
 
   const restoreShader = `
@@ -154,8 +248,8 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
       this.neighbors = null;
       this.frozen = null;
       this.baseMinorScaleByNode = new Map();
-      // The initial trainable paint already represents visible strokes. Pair
-      // spatially local roots so curvature and pressure are present before the
+      // The initial trainable paint already represents visible strokes. Build
+      // same-layer, direction-guided roots so curvature and pressure are present before the
       // first split, instead of leaving the complete P1 cohort as isolated dabs.
       const initialRows = Array.from({length: params.count - this.fixedCount},
         (_, index) => this.fixedCount + index);
@@ -214,7 +308,6 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
       // along a stroke instead of turning every lineage into uniformly thin
       // dots by the 8192-Splat stage.
       for (const event of events) {
-        if (!event.linked) continue;
         const inherited = this.baseMinorScaleByNode.get(event.parent);
         if (inherited) this.baseMinorScaleByNode.set(event.child, inherited);
       }
@@ -259,16 +352,13 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
         const p = { ...params };
         for (const key of ["xy", "scale", "theta", "rgb", "opacity", "depthOrder", "detailTags", "brushTaper", "virtualDepth"]) if (p[key]) p[key] = p[key].slice();
         await r.readTrainedColors(p);
-        // Residual reseeds and overflow children have no ancestry edge. At each
-        // structural boundary, assign those isolated dabs to deterministic,
-        // same-layer, spatially local 3–9 member chains. This keeps the detail
-        // cohort predominantly curve-owned instead of letting unlinked
-        // micro-dabs overwhelm the painterly stroke hierarchy.
-        const isolatedRows = [];
-        for (let row = this.fixedCount; row < params.count; row += 1) {
-          if (this.graph.nodes.get(this.graph.rows[row])?.size === 0) isolatedRows.push(row);
-        }
-        this.graph.seedChains(localChains(p, isolatedRows,
+        // Rebuild only at structural boundaries. Split/clone children are
+        // reinserted into direction- and color-compatible chains instead of
+        // accumulating as isolated round dots or ancestry-only fragments.
+        const trainableRows = Array.from({length: params.count - this.fixedCount},
+          (_, index) => this.fixedCount + index);
+        this.graph.resetEdges(trainableRows);
+        this.graph.seedChains(localChains(p, trainableRows,
           this.graph.minMembers, this.graph.maxMembers));
         for (const edge of this.graph.pack(() => true, { includeDormant: true }).edges) {
           const key = `${edge.nodeA}:${edge.nodeB}`;
@@ -295,25 +385,12 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
         const rowOfNode = new Map(this.graph.rows.map((node, row) => [node, row]));
         const widthTargets = new Float32Array(params.count);
         for (const group of this.packed.groups) {
-          const groupSet = new Set(group);
           // Every dab in one stroke bends to the same side. Hashing each node
           // independently made neighboring control dabs alternate left/right,
           // cancelling the visible arc into a nearly straight or vibrating row.
           const groupRoot = Math.min(...group);
           const groupBendSign = ((Math.imul(groupRoot, 2654435761) >>> 0) & 1) ? -1 : 1;
-          const endpoint = group.find((node) =>
-            [...(this.graph.nodes.get(node) || [])].filter((other) => groupSet.has(other)).length <= 1,
-          ) || group[0];
-          const ordered = [];
-          let previous = null;
-          let current = endpoint;
-          while (current !== undefined && ordered.length < group.length) {
-            ordered.push(current);
-            const next = [...(this.graph.nodes.get(current) || [])]
-              .find((node) => node !== previous && groupSet.has(node) && !ordered.includes(node));
-            previous = current;
-            current = next;
-          }
+          const ordered = orderedGroup(this.graph, group);
           ordered.forEach((node, index) => {
             const row = rowOfNode.get(node);
             if (row === undefined) return;
@@ -341,7 +418,9 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
           this.neighbors?.destroy();
           this.neighbors = r.device.createBuffer({ size: Math.max(16, data.byteLength), usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
         }
-        r.device.queue.writeBuffer(this.neighbors, 0, data);this.dirty = false;
+        r.device.queue.writeBuffer(this.neighbors, 0, data);
+        this.lastDiagnostics = chainDiagnostics(this.graph, this.packed, p, image, this.fixedCount);
+        this.dirty = false;
       }
       r.device.queue.writeBuffer(this.uniform, 0, new Float32Array([
         (image.width - 1) / 2, (image.height - 1) / 2, params.discreteLayerCount || 8, PAINTERLY_PIGMENT_WEIGHT,
@@ -388,6 +467,7 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
       });
       return { path: "shared-dab-birth-links", actual_optimizer: "shared-exact-backward-adam", strength: this.strength,
         linked_dabs: packed.linkedCount, edges: packed.edges.length, groups: packed.groups.map(group => group.length),
+        ...(this.lastDiagnostics || {}),
         linked_splats_min: this.graph.minMembers, linked_splats_max: this.graph.maxMembers,
         fixed_backcoat_count: this.fixedCount, extra_gradient_passes: this.passes, lineage_readback_bytes: this.readbackBytes, events: this.events };
     }
@@ -395,6 +475,7 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
 
   global.Image2SplatPaintFlowBirthLinks = Object.freeze({
     selectedPath, selectedLinkedSplatRange, initialize, configure,
+    _test: Object.freeze({ localChains, chainDiagnostics }),
     async create(renderer, params) {
       const [math, Graph] = classicDependencies();
       return new Runtime(renderer, params, math, Graph);

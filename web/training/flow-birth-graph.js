@@ -27,6 +27,21 @@
       }
       if(chains.length)this.version++;
     }
+    resetEdges(rows=[]){
+      const ids=new Set();
+      for(const row of rows){
+        if(!Number.isInteger(row)||row<0||row>=this.rows.length)throw new Error('Invalid reset row');
+        ids.add(this.rows[row]);
+      }
+      let changed=false;
+      for(const id of ids){
+        for(const other of [...(this.nodes.get(id)||[])]){
+          this.nodes.get(other)?.delete(id);this.nodes.get(id)?.delete(other);
+          this.caps.delete([id,other].sort((a,b)=>a-b).join(':'));changed=true;
+        }
+      }
+      if(changed)this.version++;
+    }
     group(id){
       const visited=new Set(),stack=[id];
       while(stack.length){const next=stack.pop();if(visited.has(next)||!this.nodes.has(next))continue;
