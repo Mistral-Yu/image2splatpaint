@@ -754,7 +754,8 @@ function previewPaddingSpec(image, params, enabled = els.outsidePreviewToggle.ch
   let outsideX = 0;
   let outsideY = 0;
   for (let i = 0; i < params.count; i += 1) {
-    const extent = rotatedExtentAtSigma(params.scale[i * 2], params.scale[i * 2 + 1], params.theta?.[i] || 0, RENDER_SIGMA);
+    const extent = params.internalBendKey ? Image2SplatPaintInternalBend.extent(params, i)
+      : rotatedExtentAtSigma(params.scale[i * 2], params.scale[i * 2 + 1], params.theta?.[i] || 0, RENDER_SIGMA);
     outsideX = Math.max(outsideX, Math.abs(params.xy[i * 2]) + extent.x - 1);
     outsideY = Math.max(outsideY, Math.abs(params.xy[i * 2 + 1]) + extent.y - 1);
   }
@@ -802,8 +803,10 @@ function buildPreviewTileIndexData(image, params, options = {}) {
     const baseY = Math.max(0.0001, params.scale[index * 2 + 1] * scaleMultiplier / aspectStretch);
     const effectiveX = useEwa ? baseX : Math.hypot(baseX, pixelSigma);
     const effectiveY = useEwa ? baseY : Math.hypot(baseY, pixelSigma);
-    const radiusX = (RENDER_SIGMA * (c * effectiveX + s * effectiveY) + pixelPadX) * preview.scaleX;
-    const radiusY = (RENDER_SIGMA * (s * effectiveX + c * effectiveY) + pixelPadY) * preview.scaleY;
+    const ownedExtent = params.internalBendKey
+      ? Image2SplatPaintInternalBend.extent(params, index, effectiveX, effectiveY) : null;
+    const radiusX = ((ownedExtent?.x ?? RENDER_SIGMA * (c * effectiveX + s * effectiveY)) + pixelPadX) * preview.scaleX;
+    const radiusY = ((ownedExtent?.y ?? RENDER_SIGMA * (s * effectiveX + c * effectiveY)) + pixelPadY) * preview.scaleY;
     const centerX = params.xy[index * 2] * preview.scaleX;
     const centerY = params.xy[index * 2 + 1] * preview.scaleY;
     const minX = Math.max(0, Math.min(preview.width - 1, Math.floor(((centerX - radiusX) * 0.5 + 0.5) * Math.max(0, preview.width - 1))));
@@ -907,6 +910,14 @@ function constrainSplat(
 function snapshotParams(params) {
   const anisotropyLimits = anisotropyLimitsForParams(params);
   return {
+    ...(params.internalBendKey ? {internalBendKey: params.internalBendKey,
+      internalBendShapes: params.internalBendShapes.slice()} : {}),
+    ...(params.flowBirthLinksEnabled ? {
+      flowBirthLinksEnabled: true,
+      flowBirthLinkStrength: params.flowBirthLinkStrength,
+      flowBackcoatCount: params.flowBackcoatCount,
+      flowTrainingSize: params.flowTrainingSize?.slice(),
+    } : {}),
     kernelShape: normalizedKernelShape(params.kernelShape),
     rectangleTopRatio: clampNumber(
       params.rectangleTopRatio,

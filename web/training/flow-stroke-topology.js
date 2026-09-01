@@ -8,7 +8,7 @@
     frontWidthMaximumFactor: 3,
     fixedOpacity: 0.995,
     splitFraction: 0.04,
-    mergeFraction: 0.01,
+    mergeFraction: 0,
     maximumSplitsPerEvent: 24,
     maximumMergesPerEvent: 6,
     splitApplyUntil: 0.75,
@@ -822,34 +822,13 @@
     const p012 = mixPoint(p01, p12, 0.5);
     const p123 = mixPoint(p12, p23, 0.5);
     const middle = mixPoint(p012, p123, 0.5);
-    const swap = hash01((Number(stroke.random) || 0) + (Number(stroke.topology_generation) || 0)) > 0.5;
-    const widthFactors = swap ? [0.78, 1.15] : [1.15, 0.78];
-    const pigmentFactors = swap ? [1.035, 0.985] : [0.985, 1.035];
-    // A connected half split and a full-length parallel split both preserve too
-    // much parent coverage and converge toward a smooth fill. Separate the two
-    // half strokes slightly around their join so the topology event leaves a
-    // visible fork/gap while keeping both original endpoints anchored.
-    const tangent = normalize([p123[0] - p012[0], p123[1] - p012[1]]);
-    const sideSign = hash01((Number(stroke.random) || 0) * 1.414213562 + 0.37) > 0.5 ? 1 : -1;
-    const normal = [-tangent[1] * sideSign, tangent[0] * sideSign];
-    const separation = Math.max(0.55, Math.min(3.5, Number(stroke.half_width_px) * 0.48));
-    const offset = (value, amount) => [
-      value[0] + normal[0] * amount,
-      value[1] + normal[1] * amount,
-    ];
+    const widthFactors = [0.85, 0.85];
+    const pigmentFactors = [1, 1];
+    // Refinement, not decorative forking: keep the learned curve and pigment.
+    // The two children can then optimize independently against the image loss.
     const geometries = [
-      [
-        p0,
-        offset(p01, separation * 0.18),
-        offset(p012, separation * 0.82),
-        offset(middle, separation * 0.68),
-      ],
-      [
-        offset(middle, -separation * 0.68),
-        offset(p123, -separation * 0.82),
-        offset(p23, -separation * 0.18),
-        p3,
-      ],
+      [p0, p01, p012, middle],
+      [middle, p123, p23, p3],
     ];
     const generation = (Number(stroke.topology_generation) || 0) + 1;
     const parentStateId = topologyStateId(stroke) || `source:${stroke.topology_source_index}`;
@@ -879,7 +858,7 @@
         paint_linear_b: clamp01(Number(stroke.paint_linear_b) * pigmentFactors[child]),
         random: fract((Number(stroke.random) || 0) + 0.271828 * (child + 1)),
         topology_generation: generation,
-        topology_kind: "split-fork",
+        topology_kind: "split",
         topology_split_child: child,
         topology_state_id: `${parentStateId}/split:${generation}:${child}`,
         topology_target_half_width_px: targetWidth,
@@ -895,6 +874,68 @@
       createChild(geometries[0], 0),
       createChild(geometries[1], 1),
     ];
+  }
+
+  function cloneResidualStroke(parent, image, rendered, event, serial, options) {
+    if (!(image?.rgb instanceof Float32Array) || !(rendered instanceof Float32Array)) return null;
+    if (!(options.maximumTotalMovementPx > 0)) return null;
+    const center = cubicPoint(parent, 0.5);
+    const radius = Math.min(options.maximumTotalMovementPx,
+      Math.max(1, Number(parent.half_width_px) * 1.2));
+    let best = null;
+    let bestGain = 0;
+    for (let direction = 0; direction < 8; direction += 1) {
+      const angle = (direction / 8 + hash01(event * 131 + serial) * 0.125) * Math.PI * 2;
+      const x = clamp(center[0] + Math.cos(angle) * radius, 0, image.width - 1);
+      const y = clamp(center[1] + Math.sin(angle) * radius, 0, image.height - 1);
+      let candidate = translateStroke(scaleStrokeAroundCenter(parent, 0.9), x - center[0], y - center[1]);
+      const color = [0, 0, 0];
+      const targetSamples = [];
+      let residual = 0;
+      for (const t of [0.1, 0.3, 0.5, 0.7, 0.9]) {
+        const p = cubicPoint(candidate, t);
+        const pixel = Math.round(clamp(p[1], 0, image.height - 1)) * image.width
+          + Math.round(clamp(p[0], 0, image.width - 1));
+        const rgb = [0, 1, 2].map((c) => signalSrgbToLinear(image.rgb[pixel * 3 + c]));
+        targetSamples.push(rgb);
+        for (let c = 0; c < 3; c += 1) {
+          color[c] += rgb[c] / 5;
+          residual += Math.abs(rgb[c] - rendered[pixel * 4 + c]) / 15;
+        }
+      }
+      const pigmentError = targetSamples.reduce((sum, rgb) => sum
+        + rgb.reduce((s, value, c) => s + Math.abs(value - color[c]), 0) / 15, 0);
+      const gain = residual - pigmentError;
+      if (gain <= bestGain) continue;
+      bestGain = gain;
+      const width = Math.max(0.65, parent.half_width_px * 0.85);
+      candidate = { ...candidate, half_width_px: width,
+        topology_target_half_width_px: width, topology_curriculum_length_scale: 1,
+        paint_linear_r: color[0], paint_linear_g: color[1], paint_linear_b: color[2],
+        opacity: fixedStrokeOpacity(options),
+        topology_kind: "clone", topology_birth_event: event,
+        topology_generation: (parent.topology_generation || 0) + 1,
+        topology_state_id: `${topologyStateId(parent)}/clone:${event}:${serial}`,
+        topology_origin_center_x: x, topology_origin_center_y: y,
+      };
+      best = withDerivedGeometry(candidate);
+    }
+    // This is a local residual/pigment proposal gate, not a claim of a full
+    // composited-loss acceptance test. Subsequent GPU updates fit the child.
+    return bestGain > options.minimumMoveGain ? best : null;
+  }
+
+  function growthLayerTargets(plan, count) {
+    const present = [0, 1, 2].filter((layer) => plan.some((s) => s.layer === layer));
+    const weight = [0.2, 0.4, 0.4];
+    const sum = present.reduce((total, layer) => total + weight[layer], 0);
+    const targets = [0, 0, 0];
+    let remaining = count;
+    present.forEach((layer, index) => {
+      targets[layer] = index === present.length - 1 ? remaining : Math.round(count * weight[layer] / sum);
+      remaining -= targets[layer];
+    });
+    return targets;
   }
 
   function summarizeDistribution(plan) {
@@ -1051,7 +1092,7 @@
       plan: curriculum.plan,
       nextSourceIndex: count,
       eventIndex: 0,
-      totals: { splits: 0, merges: 0, sourceAdded: count, residualMoves: 0 },
+      totals: { splits: 0, clones: 0, pruned: 0, merges: 0, sourceAdded: count, residualMoves: 0 },
       initialDistribution: summarizeDistribution(curriculum.plan),
       initialCurriculum: {
         progress: curriculum.progress,
@@ -1073,7 +1114,12 @@
         normalized.curriculumProgress,
       )
       : null;
-    const requestedTarget = Math.max(1, Math.min(referencePlan.length, Math.round(targetCount)));
+    const requestedTarget = Math.max(1, Math.round(targetCount));
+    const measured = options.contributionMax instanceof Float32Array
+      && options.contributionMax.length === state.plan.length ? options.contributionMax : null;
+    const visibilityById = new Map(state.plan.map((s, i) => [topologyStateId(s), measured ? {
+      max: measured[i],
+    } : null]));
     let plan = state.plan.map((stroke, index) => {
       const prepared = clampStrokeToMovementLimit(
         removePaintCurriculum(strokeFromParams(stroke, params, index), normalized),
@@ -1084,6 +1130,27 @@
         opacity: fixedStrokeOpacity(normalized),
       }, normalized.textureGuide);
     });
+    const originalCount = plan.length;
+    let pruned = 0;
+    let removedContributionBound = 0;
+    if (measured && normalized.curriculumProgress >= 0.2 && state.eventIndex % 3 === 2) {
+      plan = plan.filter((stroke) => {
+        const visibility = visibilityById.get(topologyStateId(stroke));
+        const invisible = visibility && Number.isFinite(visibility.max) && visibility.max >= 0
+          && visibility.max <= 1e-6;
+        // Protect the fixed coverage substrate, young rows, and a whole-event
+        // linear-RGB bound. A parent's max includes ALL its linked dabs.
+        if (invisible && stroke.underpaint_splat !== true && stroke.layer < 3
+            && state.eventIndex - (stroke.topology_birth_event || 0) >= 2
+            && pruned < Math.max(1, Math.floor(originalCount * 0.1))
+            && removedContributionBound + visibility.max <= 1e-4) {
+          pruned += 1;
+          removedContributionBound += visibility.max;
+          return false;
+        }
+        return true;
+      });
+    }
     const residualScores = plan.map((stroke) => sampleResidual(
       stroke,
       image,
@@ -1091,7 +1158,6 @@
       residualEvidence,
     ));
     const textureScores = plan.map((stroke) => clamp01(stroke.texture_score ?? 1));
-    const originalCount = plan.length;
     const growthSlots = Math.max(0, requestedTarget - originalCount);
 
     const mergeBudget = Math.min(
@@ -1166,7 +1232,7 @@
           normalized.maximumSplitsPerEvent,
           Math.max(0, Math.round(originalCount * normalized.splitFraction)),
           Math.max(0, requestedTarget - plan.length),
-          Math.max(0, Math.round(growthSlots * 0.45) + mergePairs.length),
+          Math.max(0, Math.round((growthSlots + pruned) * 0.6) + mergePairs.length),
         )
       : 0;
     const splitScores = plan.map((stroke, index) => {
@@ -1188,10 +1254,16 @@
     const spatialCellSize = Math.max(24, Math.min(Number(image?.width) || 256, Number(image?.height) || 256) / 8);
     const splitCellCounts = new Map();
     const splitIndices = new Set();
+    const layerTargets = growthLayerTargets(plan, requestedTarget);
+    const layerCounts = [0, 0, 0];
+    plan.forEach((stroke) => { if (stroke.layer < 3) layerCounts[stroke.layer] += 1; });
     for (const candidate of splitScores) {
       if (splitIndices.size >= splitBudget) break;
       const stroke = plan[candidate.index];
-      if (candidate.arc < Math.max(6, Number(stroke.half_width_px) * 3)) continue;
+      if (layerCounts[stroke.layer] >= layerTargets[stroke.layer]) continue;
+      const visibility = visibilityById.get(topologyStateId(stroke));
+      if (visibility && visibility.max <= 1e-6) continue;
+      if (candidate.residual < 0.005 || candidate.arc < Math.max(5, Number(stroke.half_width_px) * 1.5)) continue;
       const center = cubicPoint(stroke, 0.5);
       const key = `${Math.floor(center[0] / spatialCellSize)},${Math.floor(center[1] / spatialCellSize)}`;
       const splitCellCapacity = normalized.textureGuidedAllocation
@@ -1201,29 +1273,48 @@
       if (splitCellCount >= splitCellCapacity) continue;
       splitCellCounts.set(key, splitCellCount + 1);
       splitIndices.add(candidate.index);
+      layerCounts[stroke.layer] += 1;
     }
     if (splitIndices.size > 0) {
       plan = plan.flatMap((stroke, index) => (
-        splitIndices.has(index) ? splitStroke(stroke, normalized) : [stroke]
+        splitIndices.has(index) ? splitStroke(stroke, normalized).map((child) => ({
+          ...child, topology_birth_event: state.eventIndex + 1,
+        })) : [stroke]
       ));
     }
 
     let nextSourceIndex = state.nextSourceIndex;
     let sourceAdded = 0;
-    while (plan.length < requestedTarget && nextSourceIndex < referencePlan.length) {
-      plan.push(annotateTextureGuide(
-        varyStroke(referencePlan[nextSourceIndex], nextSourceIndex, normalized),
-        normalized.textureGuide,
-      ));
-      nextSourceIndex += 1;
-      sourceAdded += 1;
-    }
-    while (plan.length < requestedTarget && plan.length > 0) {
-      const sourceIndex = plan.length - 1;
-      const source = plan[sourceIndex];
-      const children = splitStroke(source, normalized);
-      plan[sourceIndex] = annotateTextureGuide(children[0], normalized.textureGuide);
-      plan.push(annotateTextureGuide(children[1], normalized.textureGuide));
+    // No future source-curve catalogue. Grow only from the optimized live set.
+    const parents = plan.map((stroke) => ({ stroke,
+      score: sampleResidual(stroke, image, renderedLinearRgba, residualEvidence),
+      visible: visibilityById.get(topologyStateId(stroke))?.max ?? 1,
+    })).filter((entry) => entry.visible > 1e-6)
+      .sort((a, b) => b.score - a.score);
+    let clones = 0;
+    const perParent = new Map();
+    while (plan.length < requestedTarget && parents.length > 0) {
+      // Penalize repeatedly used parents rather than cloning one high residual
+      // indefinitely. Layer stays inherited; no automatic front promotion.
+      let selected = null;
+      let best = -1;
+      for (const entry of parents) {
+        if (layerCounts[entry.stroke.layer] >= layerTargets[entry.stroke.layer]) continue;
+        const value = (entry.score + 0.002) / (1 + (perParent.get(entry.stroke) || 0));
+        if (value > best) { selected = entry; best = value; }
+      }
+      if (!selected) break;
+      const serial = perParent.get(selected.stroke) || 0;
+      perParent.set(selected.stroke, serial + 1);
+      const child = cloneResidualStroke(selected.stroke, image, renderedLinearRgba,
+        state.eventIndex + 1, clones, normalized);
+      if (!child) {
+        parents.splice(parents.indexOf(selected), 1);
+        continue;
+      }
+      plan.push(annotateTextureGuide(child, normalized.textureGuide));
+      layerCounts[child.layer] += 1;
+      clones += 1;
     }
     if (plan.length > requestedTarget) plan = plan.slice(0, requestedTarget);
 
@@ -1241,12 +1332,15 @@
       normalized.curriculumProgress,
       normalized,
     );
-    plan = curriculum.plan;
+    plan = curriculum.plan.sort((a, b) => a.layer - b.layer);
 
     const event = {
       event: state.eventIndex + 1,
       count_before: originalCount,
       count_after: plan.length,
+      clone_count: clones,
+      pruned_count: pruned,
+      removed_contribution_bound: removedContributionBound,
       split_count: splitIndices.size,
       split_enabled: splitEnabled,
       split_apply_until: normalized.splitApplyUntil,
@@ -1273,6 +1367,8 @@
       eventIndex: state.eventIndex + 1,
       totals: {
         splits: state.totals.splits + splitIndices.size,
+        clones: (state.totals.clones || 0) + clones,
+        pruned: (state.totals.pruned || 0) + pruned,
         merges: state.totals.merges + mergePairs.length,
         sourceAdded: state.totals.sourceAdded + sourceAdded,
         residualMoves: (state.totals.residualMoves || 0) + placement.movedCount,

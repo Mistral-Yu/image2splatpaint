@@ -153,6 +153,53 @@ class WebGpuPreview {
     );
   }
 
+  createKernelBindGroup(pipeline, descriptor) {
+    return this.ownedBendSession
+      ? this.ownedBendSession.createBindGroup(this, pipeline, descriptor)
+      : this.device.createBindGroup(descriptor);
+  }
+
+  createTrainingShaders(options) {
+    return this.ownedBendSession
+      ? this.ownedBendSession.training(Image2SplatPaintTrainingPipelineShaders, this, options)
+      : Image2SplatPaintTrainingPipelineShaders.create.call(this, options);
+  }
+
+  createTileShader(options) {
+    return this.ownedBendSession
+      ? this.ownedBendSession.tile(Image2SplatPaintTilePipelineShader, options)
+      : Image2SplatPaintTilePipelineShader.create(options);
+  }
+
+  resetKernelPipelines() {
+    destroyBuffers(this.vertexBuffer);
+    this.vertexBuffer = null;
+    for (const key of Object.keys(this)) {
+      if (key === "pipeline" || key.endsWith("Pipeline") || key.startsWith("compiled")) this[key] = null;
+    }
+  }
+
+  releaseInternalBendIfUnused() {
+    if (!this.ownedBendSession || this.trainState || this.resultRenderState) return;
+    this.ownedBendSession.dispose();
+    this.ownedBendSession = null;
+    this.internalBendKey = null;
+    this.resetKernelPipelines();
+  }
+
+  configureInternalBend(params) {
+    const key = params.internalBendKey || null;
+    if ((this.internalBendKey || null) === key) return;
+    if (this.trainState || this.resultRenderState) throw new Error("Release the previous render surfaces before switching bend kernels");
+    this.releaseInternalBendIfUnused();
+    this.resetKernelPipelines();
+    if (!key) return;
+    const session = Image2SplatPaintInternalBend.createSession(params);
+    session.attach(this);
+    this.ownedBendSession = session;
+    this.internalBendKey = key;
+  }
+
   configureExperimentalPerformance(performance = performanceVariants()) {
     const opacityAwareSupportMode = performance.opacityAwareSupportMode === "aggressive"
       ? "aggressive"
@@ -308,7 +355,7 @@ class WebGpuPreview {
     const state = this.trainState;
     if (!state?.bindGroupCacheEnabled) {
       if (state?.bindGroupCacheStats) state.bindGroupCacheStats.misses += 1;
-      return this.device.createBindGroup({
+      return this.createKernelBindGroup(pipeline, {
         layout: pipeline.getBindGroupLayout(0),
         entries: entriesFactory(),
       });
@@ -318,7 +365,7 @@ class WebGpuPreview {
       state.bindGroupCacheStats.hits += 1;
       return cached;
     }
-    const bindGroup = this.device.createBindGroup({
+    const bindGroup = this.createKernelBindGroup(pipeline, {
       layout: pipeline.getBindGroupLayout(0),
       entries: entriesFactory(),
     });
@@ -346,7 +393,9 @@ class WebGpuPreview {
   }
 
   ensurePipeline(count) {
-    const shader = Image2SplatPaintPreviewShaders.renderPreview();
+    const shader = this.ownedBendSession
+      ? this.ownedBendSession.preview(Image2SplatPaintPreviewShaders)
+      : Image2SplatPaintPreviewShaders.renderPreview();
     const module = this.device.createShaderModule({ code: shader });
     this.pipeline = this.device.createRenderPipeline({
       layout: "auto",
@@ -413,7 +462,7 @@ class WebGpuPreview {
     try {
       this.device.queue.writeBuffer(configBuffer, 0, config);
       const front = this.trainState.front;
-      const bindGroup = this.device.createBindGroup({
+      const bindGroup = this.createKernelBindGroup(this.adaptiveGridInitializationPipeline, {
         layout: this.adaptiveGridInitializationPipeline.getBindGroupLayout(0),
         entries: [
           { binding: 0, resource: { buffer: configBuffer } },
@@ -605,7 +654,8 @@ class WebGpuPreview {
 
   resultRenderMemorySnapshot() {
     const buffers = this.resultRenderState?.buffers || [];
-    const bytes = buffers.reduce((total, buffer) => total + Math.max(0, Number(buffer?.size) || 0), 0);
+    const ownedBytes = this.ownedBendSession && !this.trainState ? this.ownedBendSession.count * 8 : 0;
+    const bytes = buffers.reduce((total, buffer) => total + Math.max(0, Number(buffer?.size) || 0), ownedBytes);
     return { activeBytes: bytes, reservedBytes: bytes };
   }
 
@@ -626,10 +676,14 @@ class WebGpuPreview {
   }
 
   disposeResultRenderState() {
-    if (!this.resultRenderState) return;
+    if (!this.resultRenderState) {
+      this.releaseInternalBendIfUnused();
+      return;
+    }
     this.resultRenderState.smallFirstOrderCache = null;
     destroyBuffers(...this.resultRenderState.buffers);
     this.resultRenderState = null;
+    this.releaseInternalBendIfUnused();
     updateGpuMemoryStatus();
   }
 
@@ -763,6 +817,7 @@ class WebGpuPreview {
 
   async uploadResultRenderState(params) {
     if (!params?.count) return false;
+    this.configureInternalBend(params);
     const allocation = this.resultRenderAllocationPlan(params.count * (16 * 3 + 4) + 8);
     if (!allocation.within_budget) {
       if (state.metrics) {
@@ -845,6 +900,7 @@ class WebGpuPreview {
   }
 
   async render(image, params, sourceBuffers = null, targetView = null, options = {}) {
+    this.configureInternalBend(params);
     this.ensurePipeline(params.count);
     const preview = previewPaddingSpec(image, params, options.outside ?? this.runtime.outsidePreviewEnabled());
     const presentingToCanvas = !targetView;
@@ -1064,7 +1120,7 @@ class WebGpuPreview {
         resultState.previewUniformWrites =
           (resultState.previewUniformWrites || 0) + 1;
         if (!resultState.previewBindGroup || resultState.previewPipeline !== this.pipeline) {
-          resultState.previewBindGroup = this.device.createBindGroup({
+          resultState.previewBindGroup = this.createKernelBindGroup(this.pipeline, {
             layout: this.pipeline.getBindGroupLayout(0),
             entries: [
               { binding: 0, resource: { buffer: uniformBuffer } },
@@ -1094,7 +1150,7 @@ class WebGpuPreview {
         uniformBuffer = makeBuffer(this.device, uniform, GPUBufferUsage.UNIFORM);
         buffers.push(uniformBuffer);
       }
-      bindGroup ||= this.device.createBindGroup({
+      bindGroup ||= this.createKernelBindGroup(this.pipeline, {
         layout: this.pipeline.getBindGroupLayout(0),
         entries: [
           { binding: 0, resource: { buffer: uniformBuffer } },
@@ -1255,7 +1311,7 @@ class WebGpuPreview {
         size: bytes,
         usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
       });
-      const bindGroup = this.device.createBindGroup({
+      const bindGroup = this.createKernelBindGroup(this.presentedStatePackPipeline, {
         layout: this.presentedStatePackPipeline.getBindGroupLayout(0),
         entries: [
           { binding: 0, resource: { buffer: this.trainState.pixelStateBuffer } },
@@ -1347,7 +1403,7 @@ class WebGpuPreview {
       kind: this.trainState.pixelStateKind || "full",
     });
     this.device.queue.writeBuffer(this.trainState.presentConfigBuffer, 0, new Uint32Array([width, height, 0, 0]));
-    const bindGroup = this.device.createBindGroup({
+    const bindGroup = this.createKernelBindGroup(this.presentPipeline, {
       layout: this.presentPipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.trainState.presentConfigBuffer } },
@@ -1392,6 +1448,13 @@ class WebGpuPreview {
   }
 
   async ensureRenderGradientPipelines() {
+    const protectedPrefix = this.trainState?.flowBackcoatCount || 0;
+    if (this.compiledProtectedPrefix !== protectedPrefix) {
+      this.renderGradientPipeline = null;
+      this.parallelRenderGradientPipeline = null;
+      this.exactOptimizerPipeline = null;
+      this.trainState?.bindGroupCache?.clear();
+    }
     const legacyGradientSupported = Number(this.device.limits?.maxStorageBuffersPerShaderStage || 8) >= 9;
     const segmentedExactBackwardEnabled = Boolean(this.trainState?.segmentedExactBackward?.enabled);
     const fixedPointExactGradientEnabled = Boolean(this.trainState?.fixedPointExactGradient?.enabled);
@@ -1463,11 +1526,12 @@ class WebGpuPreview {
       virtualOrderPenaltyShader,
       brushLocalColorFlowShader,
       optimizerShader,
-    } = Image2SplatPaintTrainingPipelineShaders.create.call(this, {
+    } = this.createTrainingShaders({
       fixedPointExactGradientEnabled,
       inverseScaleOptimizationEnabled,
       optimizerStatsDeclaration,
       segmentedExactBackwardEnabled,
+      protectedPrefix,
     });
     const renderModule = this.device.createShaderModule({ code: renderShader });
     const ssimModule = this.device.createShaderModule({ code: ssimShader });
@@ -1568,6 +1632,7 @@ class WebGpuPreview {
     this.compiledSegmentedExactBackward = segmentedExactBackwardEnabled;
     this.compiledFixedPointExactGradient = fixedPointExactGradientEnabled;
     this.compiledInverseScaleOptimization = inverseScaleOptimizationEnabled;
+    this.compiledProtectedPrefix = protectedPrefix;
   }
 
   async ensureTrainingResidualMapPipeline() {
@@ -1592,7 +1657,7 @@ class WebGpuPreview {
       await this.prepareTileLists(image, params, { sync: false });
     }
     await this.refreshRenderState(image, params, { computeSsim: false });
-    const bindGroup = this.device.createBindGroup({
+    const bindGroup = this.createKernelBindGroup(this.trainingResidualMapPipeline, {
       layout: this.trainingResidualMapPipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.trainState.configBuffer } },
@@ -1900,7 +1965,7 @@ class WebGpuPreview {
             { binding: 8, resource: { buffer: outputBuffer } },
           ];
         if (hiddenRgbEnabled) entries.push({ binding: 9, resource: { buffer: hiddenRgbBuffer } });
-        const bindGroup = this.device.createBindGroup({
+        const bindGroup = this.createKernelBindGroup(overlapMetricsPipeline, {
           layout: overlapMetricsPipeline.getBindGroupLayout(0),
           entries,
         });
@@ -2109,7 +2174,7 @@ class WebGpuPreview {
     }
     const front = this.trainState.front;
     const renderChoice = this.renderStatePipelineChoice();
-    const renderBindGroup = this.device.createBindGroup({
+    const renderBindGroup = this.createKernelBindGroup(renderChoice.pipeline, {
       layout: renderChoice.pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.trainState.configBuffer } },
@@ -2156,7 +2221,7 @@ class WebGpuPreview {
           [this.ssimBackwardHorizontalPipeline, ssimFilterEntries],
           [this.ssimBackwardVerticalPipeline, ssimFullEntries],
           [this.alphaSsimTilePipeline, ssimFullEntries],
-        ].map(([pipeline, entries]) => this.device.createBindGroup({
+        ].map(([pipeline, entries]) => this.createKernelBindGroup(pipeline, {
           layout: pipeline.getBindGroupLayout(0),
           entries: entries(),
         }))
@@ -2359,7 +2424,7 @@ class WebGpuPreview {
     const lossBuffer = this.device.createBuffer({ size: outputBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
     const readBuffer = this.device.createBuffer({ size: outputBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     try {
-      const bindGroup = this.device.createBindGroup({
+      const bindGroup = this.createKernelBindGroup(this.pixelMetricsPipeline, {
         layout: this.pixelMetricsPipeline.getBindGroupLayout(0),
         entries: [
           { binding: 0, resource: { buffer: this.trainState.configBuffer } },
@@ -2522,7 +2587,7 @@ class WebGpuPreview {
   async computeVirtualCameraViewMetrics(image, params, view, outputBuffer, readBuffer) {
     await this.refreshRenderState(image, params, { view });
     const partialCount = Math.ceil(image.width / 8) * Math.ceil(image.height / 8);
-    const bindGroup = this.device.createBindGroup({
+    const bindGroup = this.createKernelBindGroup(this.virtualCameraMetricsPipeline, {
       layout: this.virtualCameraMetricsPipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.trainState.configBuffer } },
@@ -2716,7 +2781,8 @@ class WebGpuPreview {
   }
 
   async ensureDensityPipelines() {
-    if (this.growSelectPipeline && this.distributionOffsetPipeline && this.residualTileOffsetPipeline && this.relocationApplyPipeline && this.finalBrushRepairPipeline && this.phase45RegionTelemetryPipeline && this.phase45RegionFinalizePipeline && this.phase45DonorSafetyPipeline && this.structureAllocationCollectPipeline) {
+    const protectedPrefix = this.trainState?.flowBackcoatCount || 0;
+    if (this.compiledDensityProtectedPrefix === protectedPrefix && this.growSelectPipeline && this.distributionOffsetPipeline && this.residualTileOffsetPipeline && this.relocationApplyPipeline && this.finalBrushRepairPipeline && this.phase45RegionTelemetryPipeline && this.phase45RegionFinalizePipeline && this.phase45DonorSafetyPipeline && this.structureAllocationCollectPipeline) {
       await this.ensureOptimizerResetPipeline();
       return;
     }
@@ -2735,7 +2801,7 @@ class WebGpuPreview {
         ],
       });
     }
-    const shader = Image2SplatPaintDensityShader.create();
+    const shader = Image2SplatPaintDensityShader.create({ protectedPrefix });
     const module = this.device.createShaderModule({ code: shader });
     const info = await module.getCompilationInfo();
     const errors = info.messages.filter((message) => message.type === "error");
@@ -2781,6 +2847,7 @@ class WebGpuPreview {
       make("phase45_evaluate_donor_safety"),
       make("collect_structure_allocation_counts"),
     ]);
+    this.compiledDensityProtectedPrefix = protectedPrefix;
     await this.ensureOptimizerResetPipeline();
   }
 
@@ -2846,6 +2913,7 @@ class WebGpuPreview {
     }
 
     this.disposeTrainState();
+    this.configureInternalBend(params);
     const allocatedResources = [];
     const track = (resource) => {
       allocatedResources.push(resource);
@@ -2890,6 +2958,7 @@ class WebGpuPreview {
       width: image.width,
       height: image.height,
       count: params.count,
+      flowBackcoatCount: params.flowBirthLinksEnabled ? (params.flowBackcoatCount || 0) : 0,
       capacity: bufferCapacity,
       front: 0,
       bindGroupCacheEnabled: performanceVariants().bindGroupCache,
@@ -3427,6 +3496,7 @@ class WebGpuPreview {
       ),
     };
     this.trainState.count = targetCount;
+    if (this.flowBirthLinks) await this.flowBirthLinks.grow(oldCount, targetCount);
     this.lastTrainStats = {
       ...(this.lastTrainStats || {}),
       gpu_densify: true,
@@ -3686,6 +3756,7 @@ class WebGpuPreview {
       relocation_queue_wait_wall_ms: queueWaitWallMs,
       relocation_profiled: Boolean(relocationProfile),
     };
+    if (this.flowBirthLinks) await this.flowBirthLinks.relocate(params.count);
     return true;
   }
 
@@ -3787,6 +3858,7 @@ class WebGpuPreview {
       active_count: params.count,
       mid_training_overdensity_correction: report,
     };
+    if (this.flowBirthLinks) await this.flowBirthLinks.relocate(params.count);
     return report;
   }
 
@@ -3966,6 +4038,9 @@ class WebGpuPreview {
     if (!trainState) throw new Error("Compaction requires active WebGPU training buffers.");
     const oldCount = trainState.count;
     const newCount = keepIndices.length;
+    for (let i = 0; i < (this.flowBirthLinks?.fixedCount || 0); i++) {
+      if (keepIndices[i] !== i) throw new Error("Compaction must preserve the Flow backcoat prefix.");
+    }
     if (newCount <= 0 || newCount >= oldCount) return { compacted: false, oldCount, newCount: oldCount, gpu_ms: 0 };
     await this.ensureCompactionPipelines();
     const started = performance.now();
@@ -4023,7 +4098,7 @@ class WebGpuPreview {
       outputColor = createOutput(newCount * 16);
       outputAdam = createOutput(newCount * 96);
       outputStats = createOutput(newCount * 2 * 16);
-      const parameterBindGroup = this.device.createBindGroup({
+      const parameterBindGroup = this.createKernelBindGroup(this.compactionParamPipeline, {
         layout: this.compactionParamPipeline.getBindGroupLayout(0),
         entries: [
           { binding: 0, resource: { buffer: configBuffer } },
@@ -4036,7 +4111,7 @@ class WebGpuPreview {
           { binding: 7, resource: { buffer: outputColor } },
         ],
       });
-      const stateBindGroup = this.device.createBindGroup({
+      const stateBindGroup = this.createKernelBindGroup(this.compactionStatePipeline, {
         layout: this.compactionStatePipeline.getBindGroupLayout(0),
         entries: [
           { binding: 0, resource: { buffer: configBuffer } },
@@ -4078,6 +4153,7 @@ class WebGpuPreview {
       if (validationError || oomError) throw validationError || oomError;
       if (this.trainState !== trainState) throw new Error("Training state changed during GPU compaction.");
       trainState.count = newCount;
+      this.flowBirthLinks?.compact(keepIndices);
       trainState.tileReady = false;
       trainState.bindGroupCache?.clear?.();
       return {
@@ -4260,6 +4336,7 @@ class WebGpuPreview {
       ...this.trainState.xyBuffers,
       ...this.trainState.transformBuffers,
       ...this.trainState.colorBuffers,
+      ...(this.flowBirthLinks?.buffers() || []),
     ].filter(Boolean))];
   }
 
@@ -4282,11 +4359,15 @@ class WebGpuPreview {
     const observedTileReferences = Number(state.metrics?.tile_counters?.total ?? this.trainState.tileIndexInitialReferences ?? 0);
     const activeTileBytes = Math.min(tileReservedBytes, Math.max(0, observedTileReferences) * 4);
     const activeBytes = Math.min(reservedBytes, fixedBytes + capacityBytes * activeRatio + activeTileBytes);
-    return { activeBytes, reservedBytes };
+    const ownedBytes = this.ownedBendSession ? this.ownedBendSession.count * 8 : 0;
+    return { activeBytes: activeBytes + ownedBytes, reservedBytes: reservedBytes + ownedBytes };
   }
 
   disposeTrainState() {
     if (!this.trainState) {
+      for (const buffer of this.flowBirthLinks?.buffers() || []) buffer.destroy();
+      this.flowBirthLinks = null;
+      this.releaseInternalBendIfUnused();
       updateGpuMemoryStatus();
       return;
     }
@@ -4296,11 +4377,14 @@ class WebGpuPreview {
     }
     this.trainState.profileQuerySet?.destroy();
     this.trainState = null;
+    this.flowBirthLinks = null;
+    this.releaseInternalBendIfUnused();
     updateGpuMemoryStatus();
   }
 
   async readTrainedColors(params) {
     if (!this.trainState || this.trainState.count !== params.count) return;
+    this.flowBirthLinks?.restoreNow();
     const front = this.trainState.front;
     const xyBytes = params.count * 4 * 4;
     const transformBytes = params.count * 4 * 4;

@@ -58,15 +58,19 @@ test("Flow Rectangle seeds reuse BSP and preserve counts, pigment and the normal
   assert.match(runtime, /const representation = "curve-splat-chain"/);
 });
 
-test("Rectangle seed mode is opt-in, locked during training, and does not call the Rectangle optimizer", async () => {
+test("Flow retires Source-guided curves and can explicitly select the shared dab optimizer", async () => {
   const html = await read("web/index.html");
   const controls = await read("web/ui/training-controls.js");
   const runtime = await read("web/training/flow-splat-fusion.js");
-  assert.match(html, /value="source-guided" selected/);
-  assert.match(html, /value="rectangle-seeds"/);
-  assert.match(controls, /flowSplatFusionInitialization\.disabled = state\.running \|\| !flowSelected/);
-  assert.match(runtime, /regionSeedInitializer: rectangleSeeds \? flowRectangleSeedCandidates : undefined/);
+  assert.ok(!html.includes('value="source-guided"'));
+  assert.ok(!html.includes('flowSplatFusionInitialization'));
+  assert.ok(!controls.includes('flowSplatFusionInitialization'));
+  assert.match(runtime, /regionSeedInitializer: flowRectangleSeedCandidates/);
+  assert.match(runtime, /createAdaptiveBrushSeeds\(trainingImage/);
+  assert.match(runtime, /flowBirthLinked/);
+  assert.match(runtime, /trainGaussianAlgorithm\(false, run\)/);
+  assert.doesNotMatch(runtime, /createFlowPaintReference\(/);
   assert.doesNotMatch(runtime, /initRectangles\(|initOpaqueLayeredPaint\(/);
-  assert.match(runtime, /rectangleSeeds \? 3 : 0\.5/);
+  assert.ok(!runtime.includes('rectangleSeeds ?'));
   assert.match(runtime, /geometry_rms_px: stageResult\.metadata\.control_point_rms_drift_px/);
 });

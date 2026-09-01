@@ -21,8 +21,9 @@ function renderSplatInspector() {
     control.disabled = disabled || !effectsEnabled;
   }
   for (const control of [els.splatShapeGaussian, els.splatShapeRectangle, els.splatShapeOpaqueBrush]) {
-    control.disabled = disabled || !effectsEnabled;
+    control.disabled = disabled || !effectsEnabled || Boolean(state.params?.internalBendKey);
   }
+  if (state.params?.internalBendKey) els.splatKernelFalloff.disabled = true;
   els.splatAlphaBackground.disabled = disabled;
   updateSplatShapeControls();
   document.documentElement.dataset.splatsInspectionReady = String(current);
@@ -32,7 +33,7 @@ function renderSplatInspector() {
   const adjustment = state.metrics?.post_train_adjustments;
   els.splatsMeta.textContent = `${state.params.count.toLocaleString()} splats · step ${state.metrics.steps_done}`;
   els.splatAdjustStatus.textContent = !effectsEnabled
-    ? "Effects off · trained Gaussian preview."
+    ? state.params?.internalBendKey ? "Effects off · trained internal-bend Brush preview." : "Effects off · trained Gaussian preview."
     : state.adjustingSplats
       ? "Updating the preview..."
       : adjustment
@@ -73,6 +74,7 @@ function updateSplatShapeControls() {
 
 function setSplatPreviewShape(shape) {
   if (trainingLifecycleInputLocked()) return;
+  if (state.params?.internalBendKey) return;
   state.splatPreviewShape = shape === "opaque-brush"
     ? "opaque-brush"
     : normalizedKernelShape(shape);
@@ -239,7 +241,7 @@ function splatAlphaRenderOptions() {
     opacityMultiplier: adjustments.opacityMultiplier,
     splatScaleMultiplier: adjustments.splatScaleMultiplier,
     localAspectRatio: adjustments.localAspectRatio,
-    splatShape: effectsEnabled
+    splatShape: state.params?.internalBendKey ? "opaque-brush" : effectsEnabled
       ? state.splatPreviewShape === "rectangle" && trainedShape === "box"
         ? "box"
         : state.splatPreviewShape

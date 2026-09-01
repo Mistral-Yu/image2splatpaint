@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import test from "node:test";
+import vm from "node:vm";
+import { createHash } from "node:crypto";
 import { releaseArtifactFiles, sourceJavaScriptFiles } from "../release-manifest.mjs";
 
 test("release and source manifests contain unique existing files", async () => {
@@ -31,24 +33,48 @@ test("every local app script is shipped and critical classic-script order is sta
   assert.ok(indexOf("app.js") < indexOf("ui/controls.js"));
 });
 
-test("training WGSL declaration block remains byte-stable", async () => {
-  const source = await readFile(new URL("../web/gpu/shaders/training-pipelines.js", import.meta.url), "utf8");
-  const begin = "    // BEGIN BYTE-STABLE TRAINING SHADER DECLARATIONS\n";
-  const end = "    // END BYTE-STABLE TRAINING SHADER DECLARATIONS";
-  const block = source.slice(source.indexOf(begin) + begin.length, source.indexOf(end));
-  // Intentional Rectangle orientation-tolerance addition; other WGSL stays frozen.
-  assert.equal(block.length, 150371);
-  const { createHash } = await import("node:crypto");
-  assert.equal(createHash("sha256").update(block).digest("hex"), "6e6c2973e28f3c5d28085d19202de80909d58c1090c4d821d8ddda108acae3c1");
+async function loadShaderFactories() {
+  const context = vm.createContext({ ILLUSTRATIVE_OIL_WGSL: "IO", VIRTUAL_TILT_WGSL: "VT",
+    RECTANGLE_TRAPEZOID_WGSL: "RT", MONOCHROME_LAB_L_WGSL: "ML",
+    residualDestinationOracleRequested: () => false, residualTileCdfEnabled: () => true });
+  for (const file of ["core/config.js", "gpu/shaders/training-pipelines.js", "gpu/shaders/density-pipelines.js"]) {
+    vm.runInContext(await readFile(new URL(`../web/${file}`, import.meta.url), "utf8"), context);
+  }
+  return context;
+}
+const shaderHash = source => createHash("sha256").update(source).digest("hex");
+
+test("generated default training WGSL stays byte-identical to the pre-Flow Baseline", async () => {
+  const context = await loadShaderFactories();
+  const options = { fixedPointExactGradientEnabled: false, inverseScaleOptimizationEnabled: false,
+    optimizerStatsDeclaration: "OS", segmentedExactBackwardEnabled: false };
+  const create = extra => context.Image2SplatPaintTrainingPipelineShaders.create.call(
+    { subgroupExactBackwardEnabled: false, quadExactBackwardEnabled: false }, { ...options, ...extra });
+  const baseline = create({});
+  // Captured by executing the archived pre-change factories with these exact
+  // constants. Test generated WGSL, not raw JS interpolation source.
+  const expected = {
+    renderShader: "f00d4bf9558b7d826a5aee7f856cb69e68887fba53b4fd47465aefd3b826e50b",
+    ssimShader: "1156d4732a843250e6fbbfc1efcf7a0d83c42cd7a6ce25e2cb37e99df814eeaf",
+    lossGradientShader: "4f9db93b1436b37beb1cce5ce3947f66c1ffbdda71a96af1eecaf6cc0873b5da",
+    exactBackwardShader: "e06a9574868fb9cf02d41eae6addf21ebe3a262c0d9c79738f9e900ec9a66fd9",
+    segmentedReferenceShader: "f5ff80932f5b9c0cc37b0900a0a5b5145003cd5e37ef66becd087df346039b89",
+    segmentedGradientReduceShader: "4c6c41cea082babc5a83970c04afae4aca45517b280e977fa64318be7443930b",
+    exactBackwardTelemetryShader: "b18c6c6a6ebd00f6cb51411354d92f87f1c6e1e680aabbfbb756e8104ee3620e",
+    virtualOrderPenaltyShader: "05e12ec4c403471df52106811dd8dcd168cceaac389554848e84b6d1ea53cd4b",
+    brushLocalColorFlowShader: "139cd2b701583b5ae2fc522eea24b34ef9ad43299507fea1eae9242257b99d73",
+    optimizerShader: "7eb63ede3b949204a1a1101df4af165f91c7fbe246b16636a3da73fd2b2a2f6b",
+  };
+  for (const [key, hash] of Object.entries(expected)) assert.equal(shaderHash(baseline[key]), hash, key);
+  const protectedFlow = create({ protectedPrefix: 26 });
+  assert.deepEqual(Object.keys(baseline).filter(key => baseline[key] !== protectedFlow[key]), ["optimizerShader"]);
+  assert.match(protectedFlow.optimizerShader, /if \(g < 26u\) \{ return; \}/);
 });
 
-test("density WGSL literal remains byte-stable", async () => {
-  const source = await readFile(new URL("../web/gpu/shaders/density-pipelines.js", import.meta.url), "utf8");
-  const tick = String.fromCharCode(96);
-  const shader = source.slice(source.indexOf(`return ${tick}`) + 8, source.lastIndexOf(`${tick};`));
-  assert.equal(shader.length, 87425);
-  const { createHash } = await import("node:crypto");
-  assert.equal(createHash("sha256").update(shader).digest("hex"), "516f7109af923d68b066d8714b48146f4112919370f4283cfbb6248ec0d9483e");
+test("generated default density WGSL stays byte-identical to the pre-Flow Baseline", async () => {
+  const context = await loadShaderFactories();
+  assert.equal(shaderHash(context.Image2SplatPaintDensityShader.create()),
+    "8aba275932268b28cc6a56352e5e2b8cd8d8c61f339ecdb8c37df92cfdb87dd7");
 });
 
 test("Pages workflow uses tracked source, contract, build, and release gates", async () => {
@@ -212,8 +238,10 @@ test("Flow Brush Fusion is the third public Algorithm and legacy Brush is a Rect
   assert.match(integration, /balanced-physical-brush-width-families/);
   assert.doesNotMatch(integration, /half_width_px: Math\.max\(0\.25, Number\(stroke\.half_width_px\) \* strokeWidthScale\)/);
   assert.match(integration, /frontWidthLearningScale,/);
-  assert.match(integration, /"adaptive-brush-dab-texture-guided"/);
-  assert.match(integration, /: "adaptive-baseline"/);
+  assert.match(integration, /"residual-split-clone-visible-prune-texture-guided"/);
+  assert.match(integration, /: "residual-split-clone-visible-prune"/);
+  assert.match(integration, /flow_topology_clone_count/);
+  assert.match(integration, /flow_topology_pruned_count/);
   assert.doesNotMatch(integration, /flow-adaptive-topology/);
   assert.match(integration, /flow-residual-priority-tiles/);
   assert.match(integration, /flow_tile_list_update: "growth-boundary-only"/);

@@ -1,4 +1,12 @@
 class WebGpuOptimizerRuntime {
+  async prepareFlowBirthLinks(image, params) {
+    if (!params.flowBirthLinksEnabled) return;
+    this.flowBirthLinks ||= params.internalBendKey
+      ? new Image2SplatPaintInternalBend.FixedCountBendRuntime(this, params)
+      : await Image2SplatPaintFlowBirthLinks.create(this, params);
+    await this.flowBirthLinks.prepare(image, params);
+  }
+
   async ensureOptimizerResetPipeline() {
     if (this.optimizerResetPipeline && this.optimizerSourceResetPipeline) return;
     const shader = Image2SplatPaintOptimizerResetShader.create();
@@ -44,6 +52,7 @@ class WebGpuOptimizerRuntime {
     gofDensity = false,
   } = {}) {
     await this.ensureRenderGradientPipelines();
+    if (params.flowBirthLinksEnabled && !batchEncoder) await this.prepareFlowBirthLinks(image, params);
     if (params.discreteLayersEnabled) await this.ensureDiscreteLayerPipelines();
     const variants = phase33Variants();
     const phase37 = phase37Variants();
@@ -630,6 +639,7 @@ class WebGpuOptimizerRuntime {
           colorFlowPass.end();
         }
         if (applyOptimizer) {
+          this.flowBirthLinks?.encode(encoder, params);
           const optimizerPass = encoder.beginComputePass(this.profilePassDescriptor(profileSample, "optimizer"));
           optimizerPass.setPipeline(this.exactOptimizerPipeline);
           optimizerPass.setBindGroup(0, exactOptimizerBindGroup);
@@ -690,6 +700,7 @@ class WebGpuOptimizerRuntime {
           profileSample.queryCount * 8,
         );
       }
+      if (applyOptimizer) this.flowBirthLinks?.restore(encoder, this.trainState.front);
       if (!batchEncoder) {
         this.device.queue.submit([encoder.finish()]);
         if (profileSample) profileEncodeSubmitMs = performance.now() - profileWallStarted;
@@ -1066,6 +1077,7 @@ class WebGpuOptimizerRuntime {
   async trainStepsGpu(image, params, learningRates, steps, { virtualCameraSampling = null } = {}) {
     const batchSteps = steps.slice(0, MAX_TRAIN_BATCH_SIZE);
     if (batchSteps.length === 0) return null;
+    if (params.flowBirthLinksEnabled) await this.prepareFlowBirthLinks(image, params);
     const encoder = this.device.createCommandEncoder();
     const virtualCameraSamples = [];
     this.device.pushErrorScope("validation");

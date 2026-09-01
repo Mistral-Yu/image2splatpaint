@@ -1,5 +1,6 @@
 (function installDensityShaderFactory(global) {
-  function create() {
+  function create({ protectedPrefix = 0 } = {}) {
+    protectedPrefix = Math.max(0, Math.floor(Number(protectedPrefix) || 0));
     return `
 @group(0) @binding(0) var<storage, read> config: array<f32>;
 @group(0) @binding(1) var<storage, read> targetRgb: array<f32>;
@@ -881,7 +882,7 @@ fn phase45_evaluate_donor_safety(@builtin(global_invocation_id) id: vec3u) {
   let count = u32(config[2]);
   let capacity = u32(config[10]);
   if (g >= count || config[45] <= 0.5) { return; }
-  let width = u32(config[0]);
+${protectedPrefix ? `  if (g < ${protectedPrefix}u) { atomicStore(&control[phase45_donor_base(capacity) + g], 0u); return; }\n` : ""}  let width = u32(config[0]);
   let height = u32(config[1]);
   let grid = active_region_grid();
   let uv = clamp(xy[g].center * 0.5 + 0.5, vec2<f32>(0.0), vec2<f32>(0.999999));
@@ -968,7 +969,7 @@ fn build_distribution(@builtin(global_invocation_id) id: vec3u) {
   let capacity = u32(config[10]);
   let g = id.x;
   if (g >= count) { return; }
-  let adc = is_adc_step(u32(config[4])) || u32(config[11]) == 3u;
+${protectedPrefix ? `  if (g < ${protectedPrefix}u) { atomicStore(&control[cdf_base(capacity) + g], bitcast<u32>(0.0)); return; }\n` : ""}  let adc = is_adc_step(u32(config[4])) || u32(config[11]) == 3u;
   if (adc && config[45] > 0.5) {
     // Product over-density donors are write destinations in the following
     // pass. Exclude them from the read-only source distribution so multiple
@@ -1045,10 +1046,10 @@ fn pick_source(seedIndex: u32, count: u32, adc: bool) -> u32 {
   let capacity = u32(config[10]);
   let cdfBase = capacity * 2u + EVENT_SLOTS;
   let total = bitcast<f32>(atomicLoad(&control[cdfBase + capacity]));
-  if (total <= 0.00000001) { return seedIndex % max(count, 1u); }
+  if (total <= 0.00000001) { return ${protectedPrefix ? `${protectedPrefix}u + seedIndex % max(count - ${protectedPrefix}u, 1u)` : "seedIndex % max(count, 1u)"}; }
   let step = config[4];
   let sample = hash_unit(f32(seedIndex) * 13.0 + step * 0.31 + select(17.0, 41.0, adc)) * total;
-  var low = 0u;
+  var low = ${protectedPrefix}u;
   var high = count;
   loop {
     if (low >= high) { break; }
@@ -1213,7 +1214,7 @@ fn select_grow(@builtin(global_invocation_id) id: vec3u) {
   // Residual CDF sampling can repeatedly miss a persistent wrong broad parent.
   // Probe one deterministic current row per requested child and prefer it only
   // when the full front/size/contribution/image-mismatch profile qualifies.
-  let probeSource = (local * 2654435761u + step * 2246822519u) % oldCount;
+  let probeSource = ${protectedPrefix ? `${protectedPrefix}u + (local * 2654435761u + step * 2246822519u) % (oldCount - ${protectedPrefix}u)` : "(local * 2654435761u + step * 2246822519u) % oldCount"};
   let probeParentProfile = harmful_rectangle_parent_profile(
     probeSource,
     u32(config[0]),
@@ -1625,7 +1626,7 @@ fn select_relocation(@builtin(global_invocation_id) id: vec3u) {
   let capacity = u32(config[10]);
   let adcRecycle = u32(config[11]) == 3u;
   if (g >= count) { return; }
-  let t = transform[g];
+${protectedPrefix ? `  if (g < ${protectedPrefix}u) { return; }\n` : ""}  let t = transform[g];
   let c = color[g];
   let st = stats[g];
   let signal = normalized_stats(g);
@@ -1723,7 +1724,7 @@ fn apply_relocation(@builtin(global_invocation_id) id: vec3u) {
   let stageMinScale = vec2<f32>(max(${MIN_SPLAT_SCALE}, config[60]));
   let baseScaleFloor = baseScale * clamp(config[61], 0.0, 1.0);
   if (g >= count) { return; }
-  let encoded = atomicLoad(&control[capacity + g]);
+${protectedPrefix ? `  if (g < ${protectedPrefix}u) { return; }\n` : ""}  let encoded = atomicLoad(&control[capacity + g]);
   if ((encoded & SOURCE_MASK) == 0u) { return; }
   let source = (encoded & SOURCE_MASK) - 1u;
   let selectionMode = encoded >> 30u;
@@ -1876,7 +1877,7 @@ fn apply_relocation(@builtin(global_invocation_id) id: vec3u) {
 @compute @workgroup_size(64)
 fn apply_final_brush_repair(@builtin(global_invocation_id) id: vec3u) {
   let g = id.x;
-  let count = u32(config[2]);
+${protectedPrefix ? `  if (g < ${protectedPrefix}u) { return; }\n` : ""}  let count = u32(config[2]);
   let capacity = u32(config[10]);
   if (
     g >= count ||

@@ -12,7 +12,12 @@ function currentFlowPngResult() {
 }
 
 function pngExportSourceImage() {
-  return currentFlowPngResult()?.image || state.image;
+  const flow = currentFlowPngResult();
+  if (flow) return flow.image;
+  if (state.params?.flowBirthLinksEnabled && state.params.flowTrainingSize) {
+    return { ...state.image, width: state.params.flowTrainingSize[0], height: state.params.flowTrainingSize[1] };
+  }
+  return state.image;
 }
 
 function pngExportFrameSpec(image = pngExportSourceImage()) {
@@ -84,7 +89,7 @@ function currentSplatPngSpec() {
       ? "rectangle"
       : "gaussian";
   return {
-    filename: `image2splatpaint-splats-${shape}.png`,
+    filename: state.params?.flowBirthLinksEnabled ? "image2splatpaint-flow-brush-fusion.png" : `image2splatpaint-splats-${shape}.png`,
     shape,
     renderOptions,
   };
@@ -228,10 +233,11 @@ async function makeSplatPreviewPngBlob() {
     throw new Error("No trained splat result to export.");
   }
   const spec = currentSplatPngSpec();
-  const exportFrame = pngExportFrameSpec(state.image);
+  const sourceImage = pngExportSourceImage();
+  const exportFrame = pngExportFrameSpec(sourceImage);
   const renderImage = exportFrame.mode === "training"
-    ? state.image
-    : { ...state.image, width: exportFrame.width, height: exportFrame.height };
+    ? sourceImage
+    : { ...sourceImage, width: exportFrame.width, height: exportFrame.height };
   const displayParams = state.params;
   const renderBuffers = state.webgpu.renderer.currentResultBuffers(displayParams);
   const capture = await state.webgpu.renderer.captureRenderedRgba(
@@ -369,6 +375,7 @@ function parameterArrayBytes(params) {
     params.depthOrder,
     params.virtualDepth,
     params.brushTaper,
+    params.internalBendShapes,
     params.detailTags,
     params.bg,
   ]) {

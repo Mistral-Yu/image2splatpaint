@@ -135,15 +135,15 @@ function flowRectangleSeedCandidates(image, count, layerIndex, seed) {
 
 async function trainFlowSplatFusion(run) {
   const algorithm = selectedAlgorithm();
+  if (algorithm.capabilities.internalBend) return trainInternalBend(run);
+  if (algorithm.capabilities.flowBirthLinked) return trainGaussianAlgorithm(false, run);
   const compatibilityCurveAlias = algorithm.id === CURVE_SPLAT_CHAIN_ALGORITHM_ID;
   if (algorithm.id !== FLOW_SPLAT_FUSION_ALGORITHM_ID && !compatibilityCurveAlias) {
     throw new Error(`Flow-stroke trainer does not match selected algorithm: ${algorithm.id}`);
   }
   assertTrainingRun(run);
   const sourceImage = state.image;
-  const rectangleSeeds = trainingUiAdapter.controls.flowSplatFusionInitialization.value === "rectangle-seeds";
-  const flowInitialization = rectangleSeeds ? "rectangle-seeds" : "source-guided";
-  trainingUiAdapter.controls.flowSplatFusionInitialization.value = flowInitialization;
+  const flowInitialization = "adaptive-rectangle-seeds";
   document.documentElement.dataset.flowInitialization = flowInitialization;
   const flowQaParams = new URLSearchParams(location.search);
   const allowedFlowStrokeTextures = ["baseline", "fine-bristles", "brush-dabs"];
@@ -168,11 +168,10 @@ async function trainFlowSplatFusion(run) {
     && trainingUiAdapter.controls.flowSplatFusionVariableLinks.checked;
   document.documentElement.dataset.flowEdgeGuidedAccents = String(flowEdgeGuidedAccents);
   trainingUiAdapter.controls.flowSplatFusionStrokeTexture.value = flowStrokeTexture;
-  // Adaptive split/merge is the product Baseline. The retired fixed-plan path
-  // is preserved only in the local archive, not as a runtime mode.
+  // Adaptive growth starts from a small seed set, not a future curve catalogue.
   const flowTopologyMode = flowTextureGuidedDabs
-    ? "adaptive-brush-dab-texture-guided"
-    : "adaptive-baseline";
+    ? "residual-split-clone-visible-prune-texture-guided"
+    : "residual-split-clone-visible-prune";
   const flowPaintCurriculum = flowQaParams.has("flow-paint-curriculum")
     ? flowQaParams.get("flow-paint-curriculum") !== "0"
     : trainingUiAdapter.controls.flowSplatFusionPaintCurriculum.checked;
@@ -309,18 +308,19 @@ async function trainFlowSplatFusion(run) {
   const trainingImage = width === sourceImage.width && height === sourceImage.height
     ? sourceImage
     : { ...sourceImage, ...resizeFloatImageBilinear(sourceImage, width, height) };
-  const unscaledReference = Image2SplatPaintFlowPaintReference.createFlowPaintReference(trainingImage, {
+  const initialParentCount = Math.max(1, Math.round(detailParentBudget * 0.2));
+  const unscaledReference = Image2SplatPaintFlowPaintReference.createAdaptiveBrushSeeds(trainingImage, {
     seed: 240825,
     strength: 1,
     profile: "connected-ribbon-v1",
-    maxStrokes: detailParentBudget,
+    count: initialParentCount,
     minimumStrokes: 1,
     includeStrokePlan: true,
     planOnly: true,
     maximumRibbonArcFraction: maximumRibbonArcPercent / 100,
     textureGuidedAllocation: flowTextureGuidedDabs,
     edgeGuidedAccents: flowEdgeGuidedAccents,
-    regionSeedInitializer: rectangleSeeds ? flowRectangleSeedCandidates : undefined,
+    regionSeedInitializer: flowRectangleSeedCandidates,
   });
   // Stroke width is a global ceiling for topology-level parent widths. It must
   // not multiply every generated stroke before the per-layer width range is
@@ -330,7 +330,7 @@ async function trainFlowSplatFusion(run) {
   const reference = unscaledReference;
   if (variableBrushDabs) {
     reference.strokePlan = Image2SplatPaintFlowRibbonTrainer.allocateBrushDabCounts(
-      reference.strokePlan, detailSplatBudget, true,
+      reference.strokePlan, detailSplatBudget, false,
     ).plan;
   }
   // Standard and Fine use anisotropic Gaussian Splats. Brush dabs keeps the
@@ -341,7 +341,7 @@ async function trainFlowSplatFusion(run) {
   const countDetailSplats = (plan) => variableBrushDabs
     ? plan.reduce((sum, stroke) => sum + stroke.brush_dab_count, 0)
     : plan.length * splatsPerChain;
-  const detailPhysicalSplatCount = countDetailSplats(reference.strokePlan);
+  const detailPhysicalSplatCount = variableBrushDabs ? detailSplatBudget : detailParentBudget * splatsPerChain;
   const displayedSplatCount = underpaintSplatBudget + detailPhysicalSplatCount;
   const primitiveLabel = "splats";
   const chainQuadBackward = flowQaParams.get("chain-quad-backward") !== "0";
@@ -390,20 +390,11 @@ async function trainFlowSplatFusion(run) {
   const flowStrokeMotionCoherence = readFlowQaNumber(
     "flow-motion-coherence", strokeOptimizationProfile.strokeMotionCoherence, 0, 1,
   );
-  const cumulativeLayerParents = [];
-  let cumulativeParents = 0;
-  for (const layer of reference.metadata.layers) {
-    cumulativeParents += Math.max(0, Math.round(Number(layer.accepted) || 0));
-    if (cumulativeParents > 0) cumulativeLayerParents.push(cumulativeParents);
-  }
-  if (cumulativeLayerParents.at(-1) !== reference.strokePlan.length) {
-    cumulativeLayerParents.push(reference.strokePlan.length);
-  }
-  const broadParentCount = cumulativeLayerParents[0] || reference.strokePlan.length;
+  const broadParentCount = reference.strokePlan.length;
   const growthSchedule = buildFlowProgressiveGrowthSchedule(
     requestedIterationLimit,
     broadParentCount,
-    reference.strokePlan.length,
+    detailParentBudget,
   );
   const iterations = growthSchedule.plannedIterations;
   const progressiveParentCounts = growthSchedule.parentCounts;
@@ -456,7 +447,7 @@ async function trainFlowSplatFusion(run) {
     algorithm: algorithm.id,
     algorithm_label: algorithm.label,
     backend: algorithm.backend,
-    initialization: rectangleSeeds ? "rectangle-bsp-flow-curves" : "three-layer flow-field Gaussian Splat chains",
+    initialization: "rectangle-bsp-short-cubic-seeds",
     steps_requested: iterations,
     steps_done: 0,
     num_gaussians: initialDisplayedSplatCount,
@@ -524,12 +515,15 @@ async function trainFlowSplatFusion(run) {
     flow_scale_matched_residual_repaint: scaleMatchedResidualRepaint,
     flow_initial_width_percent_range: [initialWidthMinimumPercent, initialWidthMaximumPercent],
     flow_topology_split_count: 0,
+    flow_topology_clone_count: 0,
+    flow_topology_pruned_count: 0,
     flow_topology_split_fraction: flowTopologyOptions.splitFraction,
     flow_topology_maximum_splits_per_event: flowTopologyOptions.maximumSplitsPerEvent,
     flow_topology_split_apply_until: flowTopologyOptions.splitApplyUntil,
     flow_topology_merge_count: 0,
     flow_topology_residual_move_count: 0,
-    flow_topology_source_added_count: flowTopologyState?.totals.sourceAdded || 0,
+    flow_initial_seed_count: broadParentCount,
+    flow_topology_source_added_count: 0,
     flow_topology_events: [],
     flow_residual_priority_tile_sampling: flowResidualPriorityTileSampling,
     flow_tile_list_update: "growth-boundary-only",
@@ -580,6 +574,8 @@ async function trainFlowSplatFusion(run) {
     scaleMatchedResidualRepaint,
   );
   document.documentElement.dataset.flowTopologySplitCount = "0";
+  document.documentElement.dataset.flowTopologyCloneCount = "0";
+  document.documentElement.dataset.flowTopologyPrunedCount = "0";
   document.documentElement.dataset.flowTopologyMergeCount = "0";
   document.documentElement.dataset.flowTopologyResidualMoveCount = "0";
   document.documentElement.dataset.flowResidualPriorityTileSampling = String(
@@ -736,11 +732,19 @@ async function trainFlowSplatFusion(run) {
           previousStage?.trainingState.renderedLinearRgba,
           detailParentCount,
           reference.strokePlan,
-          { ...flowTopologyOptions, curriculumProgress },
+          { ...flowTopologyOptions, curriculumProgress,
+            contributionMax: previousStage?.trainingState.contributionMax?.subarray(
+              previousStage.metadata.underpaint_parent_count,
+            ) },
         );
         state.metrics.flow_topology_split_count = flowTopologyState.totals.splits;
         state.metrics.flow_topology_merge_count = flowTopologyState.totals.merges;
-        state.metrics.flow_topology_source_added_count = flowTopologyState.totals.sourceAdded;
+        state.metrics.flow_topology_clone_count = flowTopologyState.totals.clones;
+        state.metrics.flow_topology_pruned_count = flowTopologyState.totals.pruned;
+        document.documentElement.dataset.flowTopologyCloneCount = String(flowTopologyState.totals.clones);
+        document.documentElement.dataset.flowTopologyPrunedCount = String(flowTopologyState.totals.pruned);
+        state.metrics.flow_topology_source_added_count = Math.max(0,
+          flowTopologyState.totals.sourceAdded - broadParentCount);
         state.metrics.flow_topology_residual_move_count = flowTopologyState.totals.residualMoves;
         state.metrics.flow_topology_events = flowTopologyState.events.slice();
         document.documentElement.dataset.flowTopologySplitCount = String(
@@ -789,12 +793,13 @@ async function trainFlowSplatFusion(run) {
       setTrainingMessage(
         `Training ${algorithm.label}: width P${widthTraining.phase}, growth ${stage + 1} / ${progressiveParentCounts.length}, ` +
         `${stagePhysicalSplatCount.toLocaleString()} Splats` +
-        `, split ${flowTopologyState.totals.splits} / merge ${flowTopologyState.totals.merges}` +
+        `, split ${flowTopologyState.totals.splits} / clone ${flowTopologyState.totals.clones}` +
+        ` / prune ${flowTopologyState.totals.pruned}` +
         ` / move ${flowTopologyState.totals.residualMoves}, ` +
         `width ${(currentCurriculum.curriculum_mean_half_width_px * 2).toFixed(1)}px...`,
       );
       const stagePositionLearningRate = flowPositionLearningRate * (
-        1 + (rectangleSeeds ? 3 : 0.5) * (1 - curriculumProgress) ** 0.8
+        1 + 3 * (1 - curriculumProgress) ** 0.8
       );
       const stageMovementLimit = flowMaxPositionDelta > 0
         ? Math.min(flowMaxPositionDelta, Math.max(0.5, residualMovePerStagePx * 2))
@@ -849,6 +854,8 @@ async function trainFlowSplatFusion(run) {
         background_exposure: stageResult.metadata.coverage_stats.background_exposure_count,
         zero_transmittance_pixels: stageResult.metadata.coverage_stats.zero_transmittance_count,
         splat_count: stagePhysicalSplatCount,
+        near_invisible_detail_strokes: stageResult.trainingState.contributionMax
+          .subarray(rearPlan.length).filter((mass) => mass <= 1e-6).length,
       });
       document.documentElement.dataset.flowOptimizerTrace = JSON.stringify(optimizerTrace);
       assertTrainingRun(run);
@@ -946,8 +953,14 @@ async function trainFlowSplatFusion(run) {
       initialWidthMaximumPercent,
     ];
     result.metadata.flow_topology_split_count = flowTopologyState?.totals.splits || 0;
+    result.metadata.flow_topology_clone_count = flowTopologyState?.totals.clones || 0;
+    result.metadata.flow_topology_pruned_count = flowTopologyState?.totals.pruned || 0;
+    result.metadata.flow_pruning_scope = "whole-linked-brush-stroke; fixed-backcoat-protected";
+    result.metadata.flow_pruning_max_contribution = 1e-6;
     result.metadata.flow_topology_merge_count = flowTopologyState?.totals.merges || 0;
-    result.metadata.flow_topology_source_added_count = flowTopologyState?.totals.sourceAdded || 0;
+    result.metadata.flow_initial_seed_count = broadParentCount;
+    result.metadata.flow_topology_source_added_count = Math.max(0,
+      (flowTopologyState?.totals.sourceAdded || 0) - broadParentCount);
     result.metadata.flow_topology_residual_move_count = flowTopologyState?.totals.residualMoves || 0;
     const acceptedMoveDistance = flowTopologyState.events.reduce(
       (sum, event) => sum + event.residual_move_count * event.residual_move_mean_px, 0,

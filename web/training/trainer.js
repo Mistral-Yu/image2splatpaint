@@ -523,6 +523,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
     state.params.discreteLayersEnabled = true;
     state.params.discreteLayerMoveRadius = LAYERED_OPAQUE_BRUSH_LAYER_MOVE_RADIUS;
   }
+  Image2SplatPaintFlowBirthLinks.configure(state.params);
   state.params.virtualDepthEnabled = Boolean(runVirtualCameraSampling.enabled && runVirtualCameraSampling.boundedDepth);
   state.params.virtualCameraSamplingEnabled = Boolean(runVirtualCameraSampling.enabled);
   state.params.virtualDepthThickness = runVirtualCameraSampling.depthThickness;
@@ -2024,6 +2025,10 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         run.metrics.gpu_training_memory.peak_reserved_bytes,
         Math.round(memoryBeforeRelease.reservedBytes),
       );
+    }
+    if (runOwnsGlobalState && renderer?.flowBirthLinks) {
+      state.metrics.flow_birth_links = renderer.flowBirthLinks.summary();
+      state.metrics.flow_training_path = "birth-linked";
     }
     renderer?.disposeTrainState();
     const memoryAfterRelease = renderer?.trainingMemorySnapshot?.() || { activeBytes: 0, reservedBytes: 0 };

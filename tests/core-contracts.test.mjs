@@ -749,7 +749,7 @@ test("adaptive Flow stroke topology varies initialization and performs bounded s
   const referencePlan = Array.from({ length: 32 }, (_, index) => stroke(index));
   const topology = context.Image2SplatPaintFlowStrokeTopology;
   assert.equal(topology.constants.splitFraction, 0.04);
-  assert.equal(topology.constants.mergeFraction, 0.01);
+  assert.equal(topology.constants.mergeFraction, 0);
   assert.equal(topology.constants.maximumSplitsPerEvent, 24);
   assert.equal(topology.constants.splitApplyUntil, 0.75);
   const initialized = topology.initialize(referencePlan, 8, {
@@ -869,13 +869,14 @@ test("adaptive Flow stroke topology varies initialization and performs bounded s
   assert.equal(evolved.plan.length, 16);
   assert.ok(evolved.totals.splits >= 1);
   assert.ok(evolved.totals.merges >= 1);
-  assert.ok(evolved.totals.sourceAdded > initialized.totals.sourceAdded);
+  assert.equal(evolved.totals.sourceAdded, initialized.totals.sourceAdded);
+  assert.ok(evolved.totals.clones > 0);
   assert.equal(evolved.events.length, 1);
   assert.equal(evolved.events[0].count_after, 16);
   assert.ok(Number.isFinite(evolved.events[0].residual_move_count));
   assert.ok(Number.isFinite(evolved.events[0].curriculum_mean_arc_px));
   assert.ok(Number.isFinite(evolved.events[0].distribution.center_displacement_px.mean));
-  assert.ok(evolved.plan.filter((item) => item.topology_kind === "split-fork").length >= 2);
+  assert.ok(evolved.plan.filter((item) => item.topology_kind === "split").length >= 2);
   assert.ok(evolved.plan.every((item) => (
     Number.isFinite(item.start_x + item.end_y + item.half_width_px + item.opacity)
     && item.half_width_px >= 0.55

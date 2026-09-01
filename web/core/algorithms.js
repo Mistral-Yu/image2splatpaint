@@ -28,6 +28,20 @@ function selectedAlgorithm() {
   const id = document.querySelector("#algorithmSelect")?.value || PLANAR_GAUSSIAN_ALGORITHM_ID;
   const algorithm = ALGORITHM_REGISTRY[id];
   if (!algorithm) throw new Error(`Algorithm is not available: ${id}`);
+  if (id === FLOW_SPLAT_FUSION_ALGORITHM_ID && Image2SplatPaintFlowBirthLinks.selectedPath() === "internal-bend") {
+    return {...algorithm, initialize: Image2SplatPaintInternalBend.initialize, backend: "shared-brush-webgpu",
+      capabilities: {...algorithm.capabilities, kernelShape: "opaque-brush", opaqueLayeredPaint: true,
+        minimumOpacity: true, requiresLayerOrder: true, internalBend: true}};
+  }
+  if (id === FLOW_SPLAT_FUSION_ALGORITHM_ID && Image2SplatPaintFlowBirthLinks.selectedPath() === "birth-linked") {
+    return {
+      ...algorithm,
+      initialize: Image2SplatPaintFlowBirthLinks.initialize,
+      backend: "shared-brush-webgpu",
+      capabilities: { ...algorithm.capabilities, kernelShape: "opaque-brush", opaqueLayeredPaint: true,
+        minimumOpacity: true, requiresLayerOrder: true, configurableLayerCount: true, contributionCleanup: true, flowBirthLinked: true },
+    };
+  }
   return algorithm;
 }
 
@@ -236,6 +250,7 @@ function configurePaintKernel(config, params = state.params) {
   config[127] = shape === "rectangle"
     ? normalizedRectangleOrientationTolerance(params?.rectangleOrientationTolerance) * Math.PI / 200
     : 0;
+  if (params?.internalBendKey) config[54] = 0; // Fixed layer ownership; rawDepth learns bend only.
   return config;
 }
 

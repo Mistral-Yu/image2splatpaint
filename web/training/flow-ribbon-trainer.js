@@ -1611,6 +1611,44 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 `;
 
+  // Full-frame topology evidence. Sum consecutive dabs' T_before * alpha
+  // per parent and pixel; no opacity/area/gradient visibility surrogate.
+  const CONTRIBUTION_WGSL = String.raw`
+@group(0) @binding(0) var<uniform> config: Config;
+@group(0) @binding(1) var<storage, read> params: array<f32>;
+@group(0) @binding(2) var<storage, read> tile_offsets: array<u32>;
+@group(0) @binding(3) var<storage, read> tile_indices: array<u32>;
+@group(0) @binding(4) var<storage, read_write> contribution: array<atomic<u32>>;
+${COMMON_WGSL}
+fn record_contribution(stroke: u32, mass: f32) {
+  // Nonnegative float bits preserve ordering. No integer quantization: even
+  // a contribution far below one pixel remains nonzero in the pruning metric.
+  atomicMax(&contribution[stroke], bitcast<u32>(max(0.0, mass)));
+}
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= config.width || id.y >= config.height) { return; }
+  let tile = (id.y / ${TILE_SIZE}u) * config.tile_cols + id.x / ${TILE_SIZE}u;
+  let pixel = vec2<f32>(f32(id.x) + 0.5, f32(id.y) + 0.5);
+  var transmittance = 1.0;
+  var previous = config.stroke_count;
+  var mass = 0.0;
+  for (var cursor = tile_offsets[tile]; cursor < tile_offsets[tile + 1u]; cursor += 1u) {
+    let candidate = tile_indices[cursor];
+    let stroke = select(candidate, candidate / config.sample_count, config.representation > 0.5);
+    if (stroke != previous) {
+      if (previous < config.stroke_count) { record_contribution(previous, mass); }
+      mass = 0.0;
+      previous = stroke;
+    }
+    let evaluated = evaluate_candidate(candidate, pixel);
+    mass += transmittance * evaluated.alpha;
+    transmittance *= 1.0 - evaluated.alpha;
+  }
+  if (previous < config.stroke_count) { record_contribution(previous, mass); }
+}
+`;
+
   const BACKWARD_WGSL = String.raw`
 @group(0) @binding(0) var<uniform> config: Config;
 @group(0) @binding(1) var<storage, read> params: array<f32>;
@@ -2432,6 +2470,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 
   function makeBindGroups(device, pipelines, buffers) {
     return {
+      contribution: device.createBindGroup({
+        layout: pipelines.contribution.getBindGroupLayout(0),
+        entries: [buffers.config, buffers.params, buffers.tileOffsets, buffers.tileIndices,
+          buffers.contribution].map((buffer, binding) => (
+          { binding, resource: { buffer } }
+        )),
+      }),
       forward: device.createBindGroup({
         layout: pipelines.forward.getBindGroupLayout(0),
         entries: [
@@ -2832,6 +2877,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         params: finalParams.slice(),
         topologyParams: paramsWithoutPhaseLift(finalParams, data.widthPhaseLifts),
         renderedLinearRgba: rendered.slice(),
+        contributionMax: optimizerState?.contributionMax?.slice() || null,
         firstMoment: optimizerState?.firstMoment?.slice() || new Float32Array(
           data.strokeCount * PARAM_STRIDE,
         ),
@@ -2881,6 +2927,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
       rendered: createBuffer(device, "Flow ribbon rendered", data.width * data.height * 16, U.STORAGE | U.COPY_SRC),
       logTransmittance: createBuffer(device, "Flow ribbon log transmittance", data.width * data.height * 4, U.STORAGE),
       gradients: createBuffer(device, "Flow ribbon gradients", data.strokeCount * GRAD_STRIDE * 4, U.STORAGE | U.COPY_DST),
+      contribution: createBuffer(device, "Flow visible contribution", data.strokeCount * 4,
+        U.STORAGE | U.COPY_DST | U.COPY_SRC),
       firstMoment: createBuffer(
         device,
         "Flow ribbon Adam m",
@@ -2906,16 +2954,25 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         U.COPY_DST | U.MAP_READ,
       ),
     };
-    const pipelines = {
-      forward: await createComputePipeline(device, "Flow ribbon forward", FORWARD_WGSL),
-      backward: await createComputePipeline(
-        device,
-        chainQuadBackward ? "Curve chain quad backward" : "Flow ribbon backward",
-        chainQuadBackward ? CHAIN_QUAD_BACKWARD_WGSL : BACKWARD_WGSL,
-      ),
-      update: await createComputePipeline(device, "Flow ribbon update", UPDATE_WGSL),
-    };
-    const bindGroups = makeBindGroups(device, pipelines, buffers);
+    let pipelines;
+    let bindGroups;
+    try {
+      pipelines = {
+        contribution: await createComputePipeline(device, "Flow visible contribution", CONTRIBUTION_WGSL),
+        forward: await createComputePipeline(device, "Flow ribbon forward", FORWARD_WGSL),
+        backward: await createComputePipeline(
+          device,
+          chainQuadBackward ? "Curve chain quad backward" : "Flow ribbon backward",
+          chainQuadBackward ? CHAIN_QUAD_BACKWARD_WGSL : BACKWARD_WGSL,
+        ),
+        update: await createComputePipeline(device, "Flow ribbon update", UPDATE_WGSL),
+      };
+      bindGroups = makeBindGroups(device, pipelines, buffers);
+    } catch (error) {
+      Object.values(buffers).forEach((buffer) => buffer.destroy());
+      device.destroy();
+      throw error;
+    }
     const startedAt = performance.now();
     let completedIterations = 0;
     let stopped = false;
@@ -2985,6 +3042,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         usage: U.COPY_DST | U.MAP_READ,
       });
       if (options.returnTrainingState) {
+        finalEncoder.clearBuffer(buffers.contribution);
+        encodeForward(finalEncoder, pipelines.contribution, bindGroups.contribution, data);
+        finalReadbacks.contribution = device.createBuffer({
+          label: "Flow contribution readback", size: data.strokeCount * 4,
+          usage: U.COPY_DST | U.MAP_READ,
+        });
         finalReadbacks.firstMoment = device.createBuffer({
           label: "Flow ribbon Adam m readback",
           size: data.strokeCount * PARAM_STRIDE * 4,
@@ -3010,6 +3073,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
       );
       finalEncoder.copyBufferToBuffer(buffers.params, 0, finalReadbacks.params, 0, data.params.byteLength);
       if (options.returnTrainingState) {
+        finalEncoder.copyBufferToBuffer(buffers.contribution, 0, finalReadbacks.contribution, 0,
+          data.strokeCount * 4);
         finalEncoder.copyBufferToBuffer(
           buffers.firstMoment,
           0,
@@ -3040,6 +3105,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
       ];
       if (options.returnTrainingState) {
         mapRequests.push(
+          finalReadbacks.contribution.mapAsync(global.GPUMapMode.READ),
           finalReadbacks.firstMoment.mapAsync(global.GPUMapMode.READ),
           finalReadbacks.secondMoment.mapAsync(global.GPUMapMode.READ),
           finalReadbacks.adamSteps.mapAsync(global.GPUMapMode.READ),
@@ -3049,6 +3115,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
       const rendered = new Float32Array(finalReadbacks.rendered.getMappedRange().slice(0));
       const finalParams = new Float32Array(finalReadbacks.params.getMappedRange().slice(0));
       const finalOptimizerState = options.returnTrainingState ? {
+        contributionMax: new Float32Array(finalReadbacks.contribution.getMappedRange().slice(0)),
         firstMoment: new Float32Array(finalReadbacks.firstMoment.getMappedRange().slice(0)),
         secondMoment: new Float32Array(finalReadbacks.secondMoment.getMappedRange().slice(0)),
         adamSteps: new Uint32Array(finalReadbacks.adamSteps.getMappedRange().slice(0)),

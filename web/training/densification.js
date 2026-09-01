@@ -729,6 +729,12 @@ function growParamPlaceholders(params, targetCount) {
   }
   return {
     kernelShape: normalizedKernelShape(params.kernelShape),
+    ...(params.flowBirthLinksEnabled ? {
+      flowBirthLinksEnabled: true,
+      flowBirthLinkStrength: params.flowBirthLinkStrength,
+      flowBackcoatCount: params.flowBackcoatCount,
+      flowTrainingSize: params.flowTrainingSize?.slice(),
+    } : {}),
     rectangleTopRatio: clampNumber(
       params.rectangleTopRatio,
       MIN_RECTANGLE_TOP_RATIO,
@@ -990,6 +996,7 @@ function hardZeroContributionPlan(
   const removalMask = new Uint8Array(count);
   let candidateCount = 0;
   for (let index = 0; index < count; index += 1) {
+    if (index < (params.flowBackcoatCount || 0)) continue;
     const observed = Math.max(0, Number(importanceData.observedCoverage[index]) || 0);
     const integratedInfluence = Math.max(0, Number(importanceData.integratedInfluence[index]) || 0);
     if (
@@ -1019,6 +1026,7 @@ function hardZeroContributionPlan(
   }
   let thresholdQuota = selectedCount - selectedBeforeThreshold;
   for (let index = 0; index < count; index += 1) {
+    if (index < (params.flowBackcoatCount || 0)) continue;
     const observed = Math.max(0, Number(importanceData.observedCoverage[index]) || 0);
     const integratedInfluence = Math.max(0, Number(importanceData.integratedInfluence[index]) || 0);
     if (
@@ -1104,6 +1112,7 @@ function currentContributionCompactionPlan(
   let selectedNearZero = 0;
   let nearZeroDetailProtected = 0;
   for (let index = 0; index < count; index += 1) {
+    if (index < (params.flowBackcoatCount || 0)) continue;
     const observed = Math.max(0, Number(importanceData.observedCoverage[index]) || 0);
     const influence = Math.max(0, Number(importanceData.integratedInfluence[index]) || 0);
     if (removeMask[index]) continue;

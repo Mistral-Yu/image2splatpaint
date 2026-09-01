@@ -62,15 +62,21 @@ reload, so save PNG or PLY results you want to keep.
 | `Flow Brush Fusion` | Curved strokes fused from compact Brush Splats | PNG | No |
 | `GS Virtual Camera Sampling` | Thin-depth 3DGS-style training from front and virtual teachers | PNG and standard 3DGS PLY | Yes |
 
-All four choices run locally with WebGPU. Planar, Rectangle, and Virtual Camera
-share the main splat optimizer; Flow uses a differentiable curved-stroke
-optimizer. `Rectangle Splats` keeps the former Brush path as its `Illustrative
+All four choices run locally with WebGPU and share the main splat optimizer by
+default. `Rectangle Splats` keeps the former Brush path as its `Illustrative
 Brush` shape. `GS Virtual Camera Sampling` is the only mode that enables
 virtual-camera teachers and the `Tilt` tab.
 
-Flow retains optimizer history as strokes grow. Balanced/Free motion alternate
-four shape updates with one color update. `Backcoat size variation` defaults to
-40%; use 0% for uniform cells. Both keep the opaque coverage backcoat.
+Flow's default `Shared dabs + birth links` learns each Brush's position, size,
+and rotation. Split/clone ancestry preserves soft 3–9-dab groups; unrelated
+births remain independent. The fixed coverage backcoat is protected from
+growth, relocation, and pruning. `Initial splats` counts trainable dabs;
+`Max splats` includes the backcoat. `Iterations` counts actual optimizer updates.
+Neither public path traces source curves. `Backcoat size variation` defaults to
+40%; 0% uses uniform cells.
+
+`Single-Splat internal bend (experimental)` instead learns a curve inside each
+Splat at a fixed count, with 20/40/40 layers and no fusion or density changes.
 
 The selector configures the next run. Once a result exists, Export eligibility
 and Tilt availability stay bound to that completed result until Reset, Clear,

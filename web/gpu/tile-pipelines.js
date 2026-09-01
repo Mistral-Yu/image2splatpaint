@@ -178,7 +178,7 @@ fn sort_tiles(
   }
 }
 `;
-    const shader = Image2SplatPaintTilePipelineShader.create({
+    const shader = this.createTileShader({
       opacitySupportDeclaration,
       opacitySupportFunction,
       paintSupportFunctions,

@@ -132,7 +132,10 @@ els.flowSplatBackcoatSizeVariation.addEventListener("input", publishState);
 els.flowSplatBackcoatFromP1.addEventListener("change", publishState);
 els.flowSplatFusionStrokeOptimization.addEventListener("change", publishState);
 els.flowSplatFusionStrokeTexture.addEventListener("change", publishState);
-els.flowSplatFusionInitialization.addEventListener("change", publishState);
+els.flowTrainingPath.addEventListener("change", () => {
+  syncAlgorithmRequirements();
+  publishState();
+});
 els.flowSplatFusionPaintCurriculum.addEventListener("change", () => {
   syncAlgorithmRequirements();
   publishState();

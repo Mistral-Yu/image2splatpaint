@@ -1328,6 +1328,53 @@
     return pathLength;
   }
 
+  // Rectangle-like regional seeds only. No source-field tracing or future
+  // stroke catalogue: these four collinear controls are optimized as a cubic.
+  function createAdaptiveBrushSeeds(image, options = {}) {
+    const { width, height } = validateImage(image);
+    const count = Math.max(1, Math.round(options.count || 1));
+    const analysis = makeAnalysis(image, width, height, {
+      textureGuide: options.textureGuidedAllocation === true,
+      edgeGuidedAccents: options.edgeGuidedAccents === true,
+    });
+    const maximumArc = Math.min(width, height) * (options.maximumRibbonArcFraction || 0.1);
+    const seeds = options.regionSeedInitializer(image, count, 0, options.seed || 240825);
+    const strokePlan = seeds.map((seed, index) => {
+      const halfLength = Math.min(maximumArc / 2, Math.max(1, seed.halfLength));
+      const color = [0, 0, 0];
+      sampleLinearRgb(analysis, width, height, seed.x, seed.y, color);
+      const controls = [-1, -1 / 3, 1 / 3, 1].map((t) => [
+        seed.x + seed.directionX * halfLength * t,
+        seed.y + seed.directionY * halfLength * t,
+      ]);
+      const pixel = Math.round(seed.y) * width + Math.round(seed.x);
+      // Interleave depth across the image; no layer receives only one region.
+      const layer = index % 5 === 0 ? 0 : index % 5 < 3 ? 1 : 2;
+      return {
+        center_x: seed.x, center_y: seed.y,
+        start_x: controls[0][0], start_y: controls[0][1],
+        control_1_x: controls[1][0], control_1_y: controls[1][1],
+        control_2_x: controls[2][0], control_2_y: controls[2][1],
+        end_x: controls[3][0], end_y: controls[3][1],
+        path_length_px: halfLength * 2, half_width_px: seed.halfWidth,
+        opacity: 0.995, layer, random: seed.random,
+        texture_score: analysis.textureGuide?.score[pixel] ?? 1,
+        edge_score: analysis.textureGuide?.edgeScore[pixel] ?? 0,
+        dab_visibility_score: analysis.textureGuide?.dabVisibility[pixel] ?? 1,
+        dark_flat_score: analysis.textureGuide?.darkFlat[pixel] ?? 0,
+        paint_linear_r: color[0], paint_linear_g: color[1], paint_linear_b: color[2],
+      };
+    }).sort((a, b) => a.layer - b.layer);
+    return { strokePlan, textureGuide: analysis.textureGuide, metadata: {
+      maximum_ribbon_arc_px: maximumArc, capped_ribbon_count: 0,
+      maximum_final_ribbon_arc_px: Math.max(...strokePlan.map((s) => s.path_length_px)),
+      texture_guide: analysis.textureGuide?.summary || null,
+      mean_parent_texture_score: strokePlan.reduce((sum, s) => sum + s.texture_score, 0) / strokePlan.length,
+      mean_parent_edge_score: strokePlan.reduce((sum, s) => sum + s.edge_score, 0) / strokePlan.length,
+      dark_flat_parent_fraction: strokePlan.filter((s) => s.dark_flat_score >= 0.6).length / strokePlan.length,
+    } };
+  }
+
   function createFlowPaintReference(image, options = {}) {
     const { width, height } = validateImage(image);
     const profile = referenceProfile(options);
@@ -1547,6 +1594,7 @@
   }
 
   global.Image2SplatPaintFlowPaintReference = Object.freeze({
+    createAdaptiveBrushSeeds,
     createFlowPaintReference,
     createSplatUnderpaintPlan,
     buildTextureGuide,

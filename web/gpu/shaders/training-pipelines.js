@@ -4,7 +4,9 @@
     inverseScaleOptimizationEnabled,
     optimizerStatsDeclaration,
     segmentedExactBackwardEnabled,
+    protectedPrefix = 0,
   }) {
+    protectedPrefix = Math.max(0, Math.floor(Number(protectedPrefix) || 0));
     // BEGIN BYTE-STABLE TRAINING SHADER DECLARATIONS
     const optimizerStatsUpdate = `adam[g] = opt;
   let previous = stats[g];
@@ -2212,7 +2214,7 @@ fn apply_optimizer(
   miscSum: vec4<f32>,
   densitySum: vec4<f32>,
 ) {
-  let capacity = u32(cfg(28u));
+${protectedPrefix ? `  if (g < ${protectedPrefix}u) { return; }\n` : ""}  let capacity = u32(cfg(28u));
   let gradCenter = geomSum.xy;
   let gradLogScale = geomSum.zw;
   let gradColor = appearanceSum.xyz;
