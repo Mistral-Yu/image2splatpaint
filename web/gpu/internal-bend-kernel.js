@@ -2,7 +2,7 @@
 // Signal-sRGB; positions and scales use the existing NDC image coordinates.
 (() => {
 // CPU reference only. Signal-sRGB; positions/scales are NDC, not metric units.
-const EXTENT=1.5, BEND_RANGE=1.2;
+const EXTENT=1.5, BEND_RANGE=1.6;
 const FAMILIES=Object.freeze([
   Object.freeze({length:.90,width:.94,shoulder:.10,bias:.02,fixedBend:.025}),
   Object.freeze({length:1,width:.82,shoulder:.17,bias:-.025,fixedBend:.055}),
@@ -54,7 +54,9 @@ function conservativeBounds(row,feather=.18) {
   const f=FAMILIES[row.family],L=row.axis===0?row.sx:row.sy,W=row.axis===0?row.sy:row.sx;
   const limit=(1+feather)**.25,tMax=f.length*limit;
   const maxH=Math.max(f.length*f.length/3,Math.abs(f.length*f.length/3-tMax*tMax));
-  const widthBound=f.width*(1+f.shoulder*limit**2+Math.abs(f.bias)*limit)*limit;
+  // The owned footprint adds a pressure envelope to the accepted Brush body.
+  // 1.18 bounds its widest center/side bias without narrowing tile coverage.
+  const widthBound=1.18*f.width*(1+f.shoulder*limit**2+Math.abs(f.bias)*limit)*limit;
   const fixedBound=f.fixedBend*limit*(1+limit**2);
   const long=EXTENT*L*tMax,trans=EXTENT*(W*(widthBound+fixedBound)+Math.abs(BEND_RANGE*(row.amount-.5))*L*maxH);
   const ex=row.axis===0?long:trans,ey=row.axis===0?trans:long,c=Math.abs(Math.cos(row.theta)),s=Math.abs(Math.sin(row.theta));
@@ -89,19 +91,34 @@ fn owned_brush_sample_cs(delta:vec2<f32>, c:f32, s:f32, scale:vec2<f32>, amount:
   if (ownedU2*ownedU2>=1.0+feather) {
     return OwnedBrushSample(0.0,vec2<f32>(0.0),vec2<f32>(0.0),0.0,0.0);
   }
-  let b=1.2*(amount-0.5);let bendProfile=owned_bend_profile(t,ell,family);
+  let b=1.6*(amount-0.5);let bendProfile=owned_bend_profile(t,ell,family);
   let h=bendProfile.x;let dh=bendProfile.y;
   let shift=b*ratio*h;
-  let warped=n-select(vec2<f32>(shift,0.0),vec2<f32>(0.0,shift),axisX);
+  // A curved Splat also carries a smooth pressure profile. Broad rear marks
+  // vary gently; middle and accent marks taper more strongly toward their
+  // ends. The learned bend scalar adds a small asymmetric pressure component,
+  // so curvature and width can evolve together without another GPU buffer.
+  let pressureShoulder=select(select(0.20,0.38,family>0.5),0.54,family>1.5);
+  let pressureBias=0.22*(amount-0.5);
+  let pressure=max(0.34,1.0-pressureShoulder*ownedU2+pressureBias*ownedU);
+  let dPressureDt=(-2.0*pressureShoulder*ownedU+pressureBias)/ell;
+  let dPressureAmount=0.22*ownedU;
+  let transverse=select(n.x,n.y,axisX);
+  let warpedTransverse=(transverse-shift)/pressure;
+  let warped=select(vec2<f32>(warpedTransverse,t),vec2<f32>(t,warpedTransverse),axisX);
   let base=illustrative_oil_kernel_sample(warped,axisX,feather,family,
     0.0,false,false,1.0,1.0,1.0,1.0,1.0,1.0);
-  let gm=select(base.gradient.x,base.gradient.y,axisX);
-  let slope=-gm*b*ratio*dh;
-  let g=base.gradient+select(vec2<f32>(0.0,slope),vec2<f32>(slope,0.0),axisX);
-  let gr=g/(1.5*scale); let aspect=-gm*shift;
+  let baseLong=select(base.gradient.y,base.gradient.x,axisX);
+  let baseTransverse=select(base.gradient.x,base.gradient.y,axisX);
+  let gTransverse=baseTransverse/pressure;
+  let dWarpDt=-b*ratio*dh/pressure-warpedTransverse*dPressureDt/pressure;
+  let gLong=baseLong+baseTransverse*dWarpDt;
+  let g=select(vec2<f32>(gTransverse,gLong),vec2<f32>(gLong,gTransverse),axisX);
+  let gr=g/(1.5*scale); let aspect=-gTransverse*shift;
   let logs=-g*n+select(vec2<f32>(-aspect,aspect),vec2<f32>(aspect,-aspect),axisX);
+  let dWarpAmount=-1.6*ratio*h/pressure-warpedTransverse*dPressureAmount/pressure;
   return OwnedBrushSample(base.kernel,vec2<f32>(-c*gr.x+s*gr.y,-s*gr.x-c*gr.y),logs,
-    gr.x*r.y-gr.y*r.x,-gm*1.2*ratio*h);
+    gr.x*r.y-gr.y*r.x,baseTransverse*dWarpAmount);
 }
 `;
 }
@@ -192,7 +209,7 @@ fn owned_local_bounds(scale:vec2<f32>,amount:f32,shape:vec2<u32>,feather:f32)->v
  let fixedBound=fixed*limit*(1.0+limit*limit);
  let L=select(scale.y,scale.x,axisX);let W=select(scale.x,scale.y,axisX);
  let longitudinal=1.5*L*tMax;
- let transverse=1.5*(W*(widthBound+fixedBound)+abs(1.2*(amount-0.5))*L*maxH);
+ let transverse=1.5*(W*(1.18*widthBound+fixedBound)+abs(1.6*(amount-0.5))*L*maxH);
  return select(vec2<f32>(transverse,longitudinal),vec2<f32>(longitudinal,transverse),axisX);
 }`;
 function adaptTileShader(source) {

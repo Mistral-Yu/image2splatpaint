@@ -92,7 +92,8 @@ struct Radius {r:f32,logs:vec2<f32>,theta:f32,direction:vec2<f32>,valid:f32};
 @group(0) @binding(2) var<storage,read> transforms:array<vec4<f32>>;
 @group(0) @binding(3) var<storage,read_write> gradients:array<atomic<${fixed?'i32':'u32'}>>;
 @group(0) @binding(4) var<storage,read> neighbors:array<vec4<f32>>;
-${fixed?'@group(0) @binding(5) var<storage,read_write> control:array<atomic<u32>>;':''}
+@group(0) @binding(5) var<storage,read> colors:array<vec4<f32>>;
+${fixed?'@group(0) @binding(6) var<storage,read_write> control:array<atomic<u32>>;':''}
 fn load(index:u32)->f32{return ${fixed?`f32(atomicLoad(&gradients[index]))/${fixedScale}.0`:'bitcast<f32>(atomicLoad(&gradients[index]))'};}
 fn add(index:u32,value:f32){
 ${fixed?`let raw=i32(round(clamp(value*${fixedScale}.0,-2147483000.0,2147483000.0)));
@@ -142,20 +143,59 @@ fn layer(row:u32)->f32{return floor(clamp(fract(transforms[row].w)/.24,0.0,.9999
 fn birth_links(@builtin(global_invocation_id) id:vec3<u32>){
   let row=id.x;if(row>=u32(options.runtime.x)||!safe_branch(row)){return;}
   var center=vec2<f32>(0.0);var logs=vec2<f32>(0.0);var theta=0.0;
+  var tangentGradient=0.0;var tangentCount=0.0;var signedTargetWidth=0.0;
+  var neighborCenter0=vec2<f32>(0.0);var neighborCenter1=vec2<f32>(0.0);var neighborCount=0u;
+  var pigmentGradient=vec3<f32>(0.0);var pigmentCount=0.0;
   for(var k=0u;k<2u;k++){
     let link=neighbors[row*2u+k];let other=i32(link.x);if(other<0||u32(other)>=u32(options.runtime.x)){continue;}
     if(layer(row)!=layer(u32(other))||!safe_branch(u32(other))){continue;}
     let q=(positions[u32(other)].center-positions[row].center)*options.geometry.xy;
     let distance=length(q);if(distance<1e-5){continue;}let n=q/distance;
+    let ndcDirection=vec2<f32>(n.x/options.geometry.x,n.y/options.geometry.y);
+    let targetAngle=atan2(ndcDirection.y,ndcDirection.x);
+    let major=transforms[row].x>=transforms[row].y;
+    let axisAngle=transforms[row].z+select(1.57079632679,0.0,major);
+    tangentGradient+=0.5*sin(2.0*(axisAngle-targetAngle));tangentCount+=1.0;
+    pigmentGradient+=colors[row].rgb-colors[u32(other)].rgb;pigmentCount+=1.0;
+    if(signedTargetWidth==0.0&&link.w!=0.0){signedTargetWidth=link.w;}
+    if(neighborCount==0u){neighborCenter0=positions[u32(other)].center;}
+    else if(neighborCount==1u){neighborCenter1=positions[u32(other)].center;}
+    neighborCount+=1u;
     let a=radius(row,n);let b=radius(u32(other),-n);if(a.valid<.5||b.valid<.5){continue;}
     let gap=distance-a.r-b.r;let cap=max(0.0,link.y);let normalization=max(.1,link.z);
     let e=(gap-clamp(gap,-cap,0.0))/normalization;let f=e/sqrt(1.0+e*e)/normalization;
     let gs=a.direction-b.direction;let gd=f*(n-(gs-n*dot(gs,n))/distance);
     center-=gd*options.geometry.xy;logs-=a.logs*f;theta-=a.theta*f;
   }
+  if(tangentCount>0.0){theta+=options.runtime.z*tangentGradient/tangentCount;}
+  let targetWidth=abs(signedTargetWidth);
+  if(targetWidth>0.0){
+    let t=transforms[row];let minorIsX=t.x<=t.y;
+    let widthGradient=options.runtime.w*clamp(log(max(.0001,min(t.x,t.y))/targetWidth),-.7,.7);
+    logs+=select(vec2<f32>(0.0,widthGradient),vec2<f32>(widthGradient,0.0),minorIsX);
+  }
+  if(neighborCount>=2u&&targetWidth>0.0){
+    let chord=(neighborCenter1-neighborCenter0)*options.geometry.xy;
+    let chordLength=length(chord);
+    if(chordLength>1.0){
+      let tangent=chord/chordLength;let normal=vec2<f32>(-tangent.y,tangent.x);
+      let midpoint=0.5*(neighborCenter0+neighborCenter1)*options.geometry.xy;
+      let centerPx=positions[row].center*options.geometry.xy;
+      let signedDistance=dot(centerPx-midpoint,normal);
+      let widthPx=1.5*targetWidth*min(options.geometry.x,options.geometry.y);
+      let direction=select(-1.0,1.0,signedTargetWidth>0.0);
+      let desired=direction*min(0.20*chordLength,max(1.0,0.9*widthPx));
+      let curvatureGradient=(signedDistance-desired)/max(1.0,chordLength*chordLength);
+      center+=12.0*curvatureGradient*normal*options.geometry.xy;
+    }
+  }
   let multiplier=options.runtime.y*max(.01,load(row*16u+9u));
   add(row*16u,center.x*multiplier);add(row*16u+1u,center.y*multiplier);
   add(row*16u+2u,logs.x*multiplier);add(row*16u+3u,logs.y*multiplier);add(row*16u+8u,theta*multiplier);
+  if(pigmentCount>0.0){
+    let pigment=options.geometry.w*pigmentGradient/pigmentCount;
+    add(row*16u+4u,pigment.x*multiplier);add(row*16u+5u,pigment.y*multiplier);add(row*16u+6u,pigment.z*multiplier);
+  }
 }
 `;
   }

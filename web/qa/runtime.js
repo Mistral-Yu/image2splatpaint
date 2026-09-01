@@ -515,6 +515,7 @@ if (QA_RUNTIME_ENABLED) window.__flatPhotoTest = {
       training_residual_map: m.training_residual_map ? structuredClone(m.training_residual_map) : null,
       param_delta: m.param_delta,
       fusion_events: m.fusion_events,
+      flow_birth_links: m.flow_birth_links ? structuredClone(m.flow_birth_links) : null,
       refine_events: m.fusion_refine_events,
       relocation_events: m.fusion_refine_events,
       webgpu_relocation_requested: Boolean(m.webgpu_relocation_requested),

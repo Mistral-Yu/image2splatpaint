@@ -1144,6 +1144,22 @@ test("Single-Splat internal bend grows the real active count through P1/P2/P3", 
     [...bendContext.Image2SplatPaintInternalBend.normalizeControlPointConfig(3, "50").positions],
     [0.25, 0.5, 0.75],
   );
+  const activeRows = bendContext.Image2SplatPaintInternalBend.initializeRows(
+    new Float32Array(32 * 24 * 3).fill(0.5), 32, 24, 128,
+  );
+  assert.deepEqual(
+    [0, 1, 2].map((family) => activeRows.filter((row) => row.family === family).length),
+    [25, 51, 52],
+  );
+  assert.ok(activeRows.slice(25).every((row) => row.amount !== 0.5));
+  const capacityRows = bendContext.Image2SplatPaintInternalBend.capacityCatalog(
+    new Float32Array(32 * 24 * 3).fill(0.5), 32, 24, activeRows, 8192,
+  );
+  assert.equal(capacityRows.length, 8192);
+  assert.deepEqual(
+    capacityRows.slice(0, activeRows.length).map((row) => row.family),
+    activeRows.map((row) => row.family),
+  );
   const kernelContext = vm.createContext({Array, Float32Array, Map, Math, Number, Object, Set, Uint32Array});
   kernelContext.globalThis = kernelContext;
   vm.runInContext(kernel, kernelContext);
@@ -1170,6 +1186,15 @@ test("Single-Splat internal bend grows the real active count through P1/P2/P3", 
   assert.match(runtime, /harmfulRectangleParentSplitEnabled: frontFootprintRefinement\.enabled/);
   assert.match(runtime, /surfaceLayerPriorEnabled: surfaceLayerPrior\.enabled/);
   assert.match(runtime, /discreteLayersEnabled: layerSettings\.enabled/);
+  assert.match(links, /baseMinorScaleByNode/);
+  assert.match(links, /seedChains\(localChains/);
+  assert.match(links, /const isolatedRows = \[\]/);
+  assert.match(links, /baseMinorScaleByNode\.get\(event\.parent\)/);
+  assert.match(links, /train\.colorBuffers\[front\]/);
+  assert.match(links, /PAINTERLY_LINK_STRENGTH = 0\.03/);
+  assert.match(links, /PAINTERLY_PIGMENT_WEIGHT = 10/);
+  assert.match(links, /PAINTERLY_TANGENT_WEIGHT, PAINTERLY_WIDTH_WEIGHT/);
+  assert.match(links, /groupBendSign \* this\.baseMinorScaleByNode\.get\(node\)/);
   assert.match(trainer, /front_footprint_refinement_v2/);
   assert.match(trainer, /surfaceLayerSortAtStep/);
   assert.match(trainer, /phaseRelativeScaleGuard/);

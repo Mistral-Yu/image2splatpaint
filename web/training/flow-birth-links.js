@@ -1,4 +1,8 @@
 (function installFlowBirthLinks(global) {
+  const PAINTERLY_LINK_STRENGTH = 0.03;
+  const PAINTERLY_PIGMENT_WEIGHT = 10;
+  const PAINTERLY_TANGENT_WEIGHT = 6;
+  const PAINTERLY_WIDTH_WEIGHT = 2;
   function classicDependencies() {
     const math = global.Image2SplatPaintBrushSupport;
     const Graph = global.Image2SplatPaintFlowBirthGraph?.BirthGraph;
@@ -43,7 +47,7 @@
       params.count = count;
     }
     params.flowBirthLinksEnabled = true;
-    params.flowBirthLinkStrength = 0.01;
+    params.flowBirthLinkStrength = PAINTERLY_LINK_STRENGTH;
     params.flowLinkedSplatMin = linkedSplats.min;
     params.flowLinkedSplatMax = linkedSplats.max;
     params.flowBackcoatCount = fixedCount;
@@ -85,6 +89,42 @@
     params.opacity.fill(opacity);
   }
 
+  function mortonKey(x, y) {
+    const qx = Math.max(0, Math.min(1023, Math.round((x + 1) * 511.5)));
+    const qy = Math.max(0, Math.min(1023, Math.round((y + 1) * 511.5)));
+    let key = 0;
+    for (let bit = 0; bit < 10; bit += 1) {
+      key |= ((qx >>> bit) & 1) << (bit * 2);
+      key |= ((qy >>> bit) & 1) << (bit * 2 + 1);
+    }
+    return key >>> 0;
+  }
+
+  function localChains(params, rows, minimum, maximum) {
+    const byLayer = new Map();
+    for (const row of rows) {
+      const layer = Math.max(0, Math.round((params.depthOrder?.[row] || 0) * 32));
+      if (!byLayer.has(layer)) byLayer.set(layer, []);
+      byLayer.get(layer).push(row);
+    }
+    const chains = [];
+    for (const rows of byLayer.values()) {
+      rows.sort((a, b) => mortonKey(params.xy[a * 2], params.xy[a * 2 + 1])
+        - mortonKey(params.xy[b * 2], params.xy[b * 2 + 1]));
+      for (let start = 0; start + minimum <= rows.length;) {
+        const range = Math.max(1, maximum - Math.max(3, minimum) + 1);
+        const desired = Math.max(minimum, 3 + mortonKey(
+          params.xy[rows[start] * 2], params.xy[rows[start] * 2 + 1],
+        ) % range);
+        const members = Math.min(maximum, desired, rows.length - start);
+        if (members < minimum) break;
+        chains.push(rows.slice(start, start + members));
+        start += members;
+      }
+    }
+    return chains;
+  }
+
   const restoreShader = `
 struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
 @group(0) @binding(0) var<storage,read> fixed:array<Frozen>;
@@ -113,6 +153,18 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
       this.uniform = null;
       this.neighbors = null;
       this.frozen = null;
+      this.baseMinorScaleByNode = new Map();
+      // The initial trainable paint already represents visible strokes. Pair
+      // spatially local roots so curvature and pressure are present before the
+      // first split, instead of leaving the complete P1 cohort as isolated dabs.
+      const initialRows = Array.from({length: params.count - this.fixedCount},
+        (_, index) => this.fixedCount + index);
+      this.graph.seedChains(localChains(params, initialRows,
+        this.graph.minMembers, this.graph.maxMembers));
+      for (let row = this.fixedCount; row < params.count; row += 1) {
+        this.baseMinorScaleByNode.set(this.graph.rows[row], Math.max(1e-5,
+          Math.min(params.scale[row * 2], params.scale[row * 2 + 1])));
+      }
       if (this.fixedCount) {
         const p = packPositions(params), t = packTransforms(params), c = packColors(params);
         const data = new Float32Array(this.fixedCount * 12);
@@ -157,6 +209,15 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
         if ((mode === 1 || mode === 2) && parent < this.fixedCount) throw new Error("Flow growth selected a fixed backcoat parent.");
       }
       const events = this.graph.grow(oldCount, words, state.metrics.steps_done || 0);
+      // A split reduces the child's physical scale. Keep the original stroke
+      // pressure envelope as the width target so repeated growth adds detail
+      // along a stroke instead of turning every lineage into uniformly thin
+      // dots by the 8192-Splat stage.
+      for (const event of events) {
+        if (!event.linked) continue;
+        const inherited = this.baseMinorScaleByNode.get(event.parent);
+        if (inherited) this.baseMinorScaleByNode.set(event.child, inherited);
+      }
       this.events.push({ kind: "grow", step: state.metrics.steps_done, births: events.length,
         linked: events.filter(event => event.linked).length, count: newCount });
       this.dirty = true;this.restoreNow();
@@ -176,6 +237,10 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
 
     compact(keep) {
       this.graph.compact(keep);this.dirty = true;
+      const alive = new Set(this.graph.rows);
+      for (const node of this.baseMinorScaleByNode.keys()) {
+        if (!alive.has(node)) this.baseMinorScaleByNode.delete(node);
+      }
       this.events.push({ kind: "compact", step: state.metrics.steps_done, count: keep.length });
     }
 
@@ -194,6 +259,17 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
         const p = { ...params };
         for (const key of ["xy", "scale", "theta", "rgb", "opacity", "depthOrder", "detailTags", "brushTaper", "virtualDepth"]) if (p[key]) p[key] = p[key].slice();
         await r.readTrainedColors(p);
+        // Residual reseeds and overflow children have no ancestry edge. At each
+        // structural boundary, assign those isolated dabs to deterministic,
+        // same-layer, spatially local 3–9 member chains. This keeps the detail
+        // cohort predominantly curve-owned instead of letting unlinked
+        // micro-dabs overwhelm the painterly stroke hierarchy.
+        const isolatedRows = [];
+        for (let row = this.fixedCount; row < params.count; row += 1) {
+          if (this.graph.nodes.get(this.graph.rows[row])?.size === 0) isolatedRows.push(row);
+        }
+        this.graph.seedChains(localChains(p, isolatedRows,
+          this.graph.minMembers, this.graph.maxMembers));
         for (const edge of this.graph.pack(() => true, { includeDormant: true }).edges) {
           const key = `${edge.nodeA}:${edge.nodeB}`;
           if (this.graph.caps.has(key)) continue;
@@ -216,12 +292,50 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
           includeDormant: this.graph.minMembers <= 2,
         });
         const data = new Float32Array(params.count * 8), slots = new Uint8Array(params.count);
+        const rowOfNode = new Map(this.graph.rows.map((node, row) => [node, row]));
+        const widthTargets = new Float32Array(params.count);
+        for (const group of this.packed.groups) {
+          const groupSet = new Set(group);
+          // Every dab in one stroke bends to the same side. Hashing each node
+          // independently made neighboring control dabs alternate left/right,
+          // cancelling the visible arc into a nearly straight or vibrating row.
+          const groupRoot = Math.min(...group);
+          const groupBendSign = ((Math.imul(groupRoot, 2654435761) >>> 0) & 1) ? -1 : 1;
+          const endpoint = group.find((node) =>
+            [...(this.graph.nodes.get(node) || [])].filter((other) => groupSet.has(other)).length <= 1,
+          ) || group[0];
+          const ordered = [];
+          let previous = null;
+          let current = endpoint;
+          while (current !== undefined && ordered.length < group.length) {
+            ordered.push(current);
+            const next = [...(this.graph.nodes.get(current) || [])]
+              .find((node) => node !== previous && groupSet.has(node) && !ordered.includes(node));
+            previous = current;
+            current = next;
+          }
+          ordered.forEach((node, index) => {
+            const row = rowOfNode.get(node);
+            if (row === undefined) return;
+            if (!this.baseMinorScaleByNode.has(node)) {
+              this.baseMinorScaleByNode.set(node, Math.max(1e-5,
+                Math.min(p.scale[row * 2], p.scale[row * 2 + 1])));
+            }
+            const progress = ordered.length > 1 ? index / (ordered.length - 1) : .5;
+            // Narrow ends and a broad body make each linked group read as one
+            // pressure-varying stroke, while retaining the parent's scale family.
+            const pressure = .75 + .85 * Math.pow(Math.sin(Math.PI * progress), .8);
+            // Preserve a stable bend side across compaction by encoding the
+            // stable node's sign in the otherwise-positive width target.
+            widthTargets[row] = groupBendSign * this.baseMinorScaleByNode.get(node) * pressure;
+          });
+        }
         for (let i = 0; i < params.count * 2; i++) data[i * 4] = -1;
         for (const edge of this.packed.edges) {
           const cap = this.graph.caps.get(`${edge.nodeA}:${edge.nodeB}`);
           if (!cap) continue;
-          data.set([edge.b, cap.capPx, cap.normalization, 0], edge.a * 8 + slots[edge.a]++ * 4);
-          data.set([edge.a, cap.capPx, cap.normalization, 0], edge.b * 8 + slots[edge.b]++ * 4);
+          data.set([edge.b, cap.capPx, cap.normalization, widthTargets[edge.a]], edge.a * 8 + slots[edge.a]++ * 4);
+          data.set([edge.a, cap.capPx, cap.normalization, widthTargets[edge.b]], edge.b * 8 + slots[edge.b]++ * 4);
         }
         if (!this.neighbors || this.neighbors.size < data.byteLength) {
           this.neighbors?.destroy();
@@ -230,8 +344,9 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
         r.device.queue.writeBuffer(this.neighbors, 0, data);this.dirty = false;
       }
       r.device.queue.writeBuffer(this.uniform, 0, new Float32Array([
-        (image.width - 1) / 2, (image.height - 1) / 2, params.discreteLayerCount || 8, 0,
-        params.count, this.strength, 0, 0, settings.widthStart, settings.widthEnd, settings.widthTaperEnabled ? 1 : 0, 1 - settings.feather,
+        (image.width - 1) / 2, (image.height - 1) / 2, params.discreteLayerCount || 8, PAINTERLY_PIGMENT_WEIGHT,
+        params.count, this.strength, PAINTERLY_TANGENT_WEIGHT, PAINTERLY_WIDTH_WEIGHT,
+        settings.widthStart, settings.widthEnd, settings.widthTaperEnabled ? 1 : 0, 1 - settings.feather,
       ]));
     }
 
@@ -239,7 +354,8 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
       if (!this.strength || !this.packed?.edges.length) return;
       if (this.packed.count !== params.count) throw new Error("Flow neighbor buffer is stale.");
       const r = this.renderer, train = r.trainState, front = train.front;
-      const buffers = [this.uniform, train.xyBuffers[front], train.transformBuffers[front], train.exactGradientBuffer, this.neighbors];
+      const buffers = [this.uniform, train.xyBuffers[front], train.transformBuffers[front], train.exactGradientBuffer,
+        this.neighbors, train.colorBuffers[front]];
       if (this.fixed) buffers.push(train.fixedPointGradientControlBuffer);
       this.dispatch(encoder, this.pipeline, buffers, Math.ceil(params.count / 64), "flow-birth-links");this.passes++;
     }

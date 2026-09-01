@@ -10,6 +10,23 @@
       if(count<this.rows.length)throw new Error('Shrinking requires explicit compaction mapping');
       while(this.rows.length<count)this.rows.push(this.newNode());
     }
+    seedChains(chains=[]){
+      const claimed=new Set();
+      for(const chain of chains){
+        if(!Array.isArray(chain)||chain.length<2||chain.length>this.maxMembers)throw new Error('Invalid initial chain');
+        for(const row of chain){
+          if(!Number.isInteger(row)||row<0||row>=this.rows.length||claimed.has(row)
+            ||this.nodes.get(this.rows[row]).size>0)throw new Error('Invalid initial chain row');
+          claimed.add(row);
+        }
+        for(let i=1;i<chain.length;i++){
+          const a=this.rows[chain[i-1]],b=this.rows[chain[i]];
+          if(this.nodes.get(a).size>=2||this.nodes.get(b).size>=2)throw new Error('Initial chain branches');
+          this.nodes.get(a).add(b);this.nodes.get(b).add(a);
+        }
+      }
+      if(chains.length)this.version++;
+    }
     group(id){
       const visited=new Set(),stack=[id];
       while(stack.length){const next=stack.pop();if(visited.has(next)||!this.nodes.has(next))continue;
@@ -35,7 +52,7 @@
         if((mode===1||mode===2)&&(parentRow<0||parentRow>=oldCount))throw new Error('GPU grow source outside old active rows');
       }
       this.ensureCount(oldCount+words.length);
-      const usedParents=new Set(),events=[];
+      const usedParents=new Set(),events=[],overflowByStroke=new Map();
       for(let local=0;local<words.length;local++){
         const word=words[local]>>>0,mode=word>>>30,parentRow=(word&0x3fffffff)-1,childRow=oldCount+local;
         if(mode!==1&&mode!==2)continue; // Mode zero is residual reseeding, not ancestry.
@@ -43,8 +60,23 @@
         const event={step,kind:mode===1?'split':'clone',parent,child,parentRow,childRow,linked:false};
         if(!usedParents.has(parent)&&this.nodes.get(parent).size<2&&this.group(parent).length<this.maxMembers){
           this.nodes.get(parent).add(child);this.nodes.get(child).add(parent);event.linked=true;usedParents.add(parent);
+        }else{
+          // A full stroke can continue producing useful split/clone children.
+          // Keep siblings from that same lineage as a new local stroke fragment
+          // instead of discarding their curve identity and leaving thin dots.
+          const sourceRoot=Math.min(...this.group(parent));
+          if(!overflowByStroke.has(sourceRoot))overflowByStroke.set(sourceRoot,[]);
+          overflowByStroke.get(sourceRoot).push(event);
         }
         this.births.push(event);events.push(event);
+      }
+      for(const overflow of overflowByStroke.values()){
+        for(let start=0;start+this.minMembers<=overflow.length;start+=this.maxMembers){
+          const chain=overflow.slice(start,Math.min(overflow.length,start+this.maxMembers));
+          if(chain.length<this.minMembers)break;
+          this.seedChains([chain.map(event=>event.childRow)]);
+          chain.forEach(event=>{event.linked=true;});
+        }
       }
       this.version++;return events;
     }

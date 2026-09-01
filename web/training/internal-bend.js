@@ -34,11 +34,27 @@ function initialize(target,width,height,count=512,seed=20260831) {
       const y=clamp(-1+2*(Math.floor(i/cols)+.5+(rng()-.5)*.45)/nr,-1,1);
       const p=(Math.round((y+1)*(height-1)/2)*width+Math.round((x+1)*(width-1)/2))*3;
       const size=.8+.4*rng(),sx=2/cols*size*(layer===0?1.10:.95),sy=2/nr*size*(layer===0?1.10:.32+.18*rng());
-      rows.push({x,y,sx,sy,theta:layer===0?0:rng()*Math.PI,amount:.5,
-        axis:0,family:layer===0?0:1,layer,locked:layer===0,rgb:Array.from(target.slice(p,p+3))});
+      // The coverage layer stays straight. Visible paint starts with a bounded,
+      // deterministic arc in both directions so the optimizer does not need to
+      // escape the zero-curvature saddle before a curved footprint is visible.
+      const bendMagnitude=layer===0?0:(layer===1?.15:.22)+rng()*(layer===1?.12:.16);
+      const amount=layer===0?.5:.5+(rng()<.5?-bendMagnitude:bendMagnitude);
+      rows.push({x,y,sx,sy,theta:layer===0?0:rng()*Math.PI,amount,
+        axis:0,family:layer,layer,locked:layer===0,rgb:Array.from(target.slice(p,p+3))});
     }
   }
   return rows;
+}
+function capacityCatalog(target, width, height, activeRows, capacity, seed = 20260831) {
+  const safeCapacity = Math.max(activeRows.length, Math.round(capacity));
+  if (safeCapacity === activeRows.length) return activeRows.slice();
+  // Capacity metadata must begin with the exact active family/bend catalog.
+  // Rebuilding the full 8192-row catalog and copying its prefix made a
+  // 128-Splat start entirely family 0, erasing the intended 20/40/40 hierarchy.
+  return [
+    ...activeRows,
+    ...initialize(target, width, height, safeCapacity - activeRows.length, seed ^ 0x9e3779b9),
+  ];
 }
 // Backcoat protection only. No graph, connections, fusion or topology changes.
 const shader=`struct Frozen{p:vec4<f32>,t:vec4<f32>,c:vec4<f32>};
@@ -65,11 +81,7 @@ let generation = 0;
 function initializeParams(image, count, capacity = count) {
   const rows = initialize(image.rgb, image.width, image.height, count);
   const safeCapacity = Math.max(count, Math.round(capacity));
-  const catalog = initialize(image.rgb, image.width, image.height, safeCapacity);
-  for (let i = 0; i < rows.length; i++) {
-    rows[i].axis = catalog[i].axis;
-    rows[i].family = catalog[i].family;
-  }
+  const catalog = capacityCatalog(image.rgb, image.width, image.height, rows, safeCapacity);
   const p = initLayeredOpaqueBrush(image, count);
   const fixedBackcoatCount = Math.floor(count * .2);
   const brushMinAspectRatio = selectedBrushMinAspectRatio();
@@ -124,7 +136,7 @@ function initializeParams(image, count, capacity = count) {
     const sy = i < fixedBackcoatCount ? Math.min(row.sy, maximumPlanarScale) : row.sy;
     p.xy.set([row.x, row.y], i * 2); p.scale.set([sx, sy], i * 2);
     p.theta[i] = row.theta; p.rgb.set(row.rgb, i * 3); p.opacity[i] = .995;
-    p.brushTaper[i] = .5; p.detailTags[i] = 1; p.depthOrder[i] = row.layer / 3;
+    p.brushTaper[i] = row.amount; p.detailTags[i] = row.family; p.depthOrder[i] = row.layer / 3;
   });
   return p;
 }
@@ -179,6 +191,6 @@ function extent(params, index, sx, sy) {
 }
 
 globalThis.Image2SplatPaintInternalBend = Object.freeze({initializeRows: initialize, initialize: initializeParams,
-  normalizeControlPointConfig, selectedControlPointConfig,
+  normalizeControlPointConfig, selectedControlPointConfig, capacityCatalog,
   growParams, compactParams, FixedCountBendRuntime, createSession, extent});
 })();

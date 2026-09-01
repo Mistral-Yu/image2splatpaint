@@ -69,6 +69,27 @@ test("Birth-linked stroke range delays continuity until Min and stops linking at
   assert.equal(graph.pack().edges.length, 3);
 });
 
+test("Birth-linked strokes can seed local P1 chains before growth", async () => {
+  const BirthGraph = await loadBirthGraph();
+  const graph = new BirthGraph(8, { minMembers: 2, maxMembers: 5 });
+  graph.seedChains([[1, 2], [4, 5]]);
+  const packed = graph.pack();
+  assert.equal(packed.edges.length, 2);
+  assert.deepEqual([...packed.groups].map((group) => group.length), [2, 2]);
+  assert.throws(() => graph.seedChains([[2, 3]]), /Invalid initial chain row/);
+  assert.throws(() => graph.seedChains([[6, 7, 0, 3, 4, 5]]), /Invalid initial chain/);
+});
+
+test("A full linked stroke starts a sibling curve fragment instead of isolated split dots", async () => {
+  const BirthGraph = await loadBirthGraph();
+  const graph = new BirthGraph(4, { minMembers: 2, maxMembers: 4 });
+  graph.seedChains([[0, 1, 2, 3]]);
+  const splitWords = Uint32Array.from([0, 1].map((row) => (1 << 30) | (row + 1)));
+  const events = graph.grow(4, splitWords, 50);
+  assert.ok(events.every((event) => event.linked));
+  assert.deepEqual(Array.from(graph.pack().groups, (group) => group.length).sort((a, b) => a - b), [2, 4]);
+});
+
 test("Variable tile candidates contain only active dabs, always keep three bodies, and count backcoat once", async () => {
   const { trainer, reference } = await load();
   const image = { width: 96, height: 80, rgb: new Float32Array(96 * 80 * 3).fill(0.4) };
