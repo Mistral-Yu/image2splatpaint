@@ -156,7 +156,51 @@ els.flowSplatFusionScaleMatchedResidualRepaint.addEventListener("change", publis
 els.flowSplatFusionWidthPercent.addEventListener("input", publishState);
 els.flowSplatFusionSplatSizeVariation.addEventListener("input", publishState);
 els.flowSplatFusionEdgeAccents.addEventListener("change", publishState);
-els.flowSplatFusionVariableLinks.addEventListener("change", publishState);
+function defaultInternalBendControlPointPositions(count) {
+  return Array.from({length: count}, (_, index) => 100 * (index + 1) / (count + 1));
+}
+function normalizeInternalBendControlPointUi({regenerate = false} = {}) {
+  const count = Math.max(1, Math.min(6, Math.round(
+    Number(els.flowInternalBendControlPointCount.value) || 1,
+  )));
+  els.flowInternalBendControlPointCount.value = String(count);
+  const parsed = String(els.flowInternalBendControlPointPositions.value || "")
+    .split(/[\s,;]+/)
+    .filter(Boolean)
+    .map(Number);
+  const positions = !regenerate && parsed.length === count && parsed.every(Number.isFinite)
+    ? parsed.map((value) => Math.max(0, Math.min(100, value))).sort((a, b) => a - b)
+    : defaultInternalBendControlPointPositions(count);
+  els.flowInternalBendControlPointPositions.value = positions
+    .map((value) => Number(value.toFixed(2)).toString())
+    .join(", ");
+}
+function normalizeLinkedSplatRangeUi(changed) {
+  let minimum = Math.max(2, Math.min(9, Math.round(Number(els.flowLinkedSplatMin.value) || 2)));
+  let maximum = Math.max(2, Math.min(9, Math.round(Number(els.flowLinkedSplatMax.value) || 9)));
+  if (minimum > maximum) {
+    if (changed === "min") maximum = minimum;
+    else minimum = maximum;
+  }
+  els.flowLinkedSplatMin.value = String(minimum);
+  els.flowLinkedSplatMax.value = String(maximum);
+}
+els.flowLinkedSplatMin.addEventListener("change", () => {
+  normalizeLinkedSplatRangeUi("min");
+  publishState();
+});
+els.flowLinkedSplatMax.addEventListener("change", () => {
+  normalizeLinkedSplatRangeUi("max");
+  publishState();
+});
+els.flowInternalBendControlPointCount.addEventListener("change", () => {
+  normalizeInternalBendControlPointUi({regenerate: true});
+  publishState();
+});
+els.flowInternalBendControlPointPositions.addEventListener("change", () => {
+  normalizeInternalBendControlPointUi();
+  publishState();
+});
 els.flowSplatFusionMovementLimit.addEventListener("input", publishState);
 els.currentContributionCompaction.addEventListener("change", () => {
   syncAlgorithmRequirements();

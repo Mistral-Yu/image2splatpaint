@@ -3,6 +3,26 @@
 (() => {
 const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
 function seeded(seed) {let a=seed>>>0;return ()=>{a=(Math.imul(a,1664525)+1013904223)>>>0;return a/4294967296;};}
+function defaultControlPointPositions(count) {
+  return Array.from({length: count}, (_, index) => (index + 1) / (count + 1));
+}
+function normalizeControlPointConfig(countValue, positionsValue) {
+  const count = Math.max(1, Math.min(6, Math.round(Number(countValue) || 1)));
+  const normalizedInput = Array.isArray(positionsValue);
+  const parsed = normalizedInput
+    ? positionsValue.map(Number)
+    : String(positionsValue || "").split(/[\s,;]+/).filter(Boolean).map(Number);
+  const positions = parsed.length === count && parsed.every(Number.isFinite)
+    ? parsed.map((value) => clamp(normalizedInput ? value : value / 100, 0, 1)).sort((a, b) => a - b)
+    : defaultControlPointPositions(count);
+  return Object.freeze({count, positions: Object.freeze(positions)});
+}
+function selectedControlPointConfig() {
+  return normalizeControlPointConfig(
+    els.flowInternalBendControlPointCount?.value,
+    els.flowInternalBendControlPointPositions?.value,
+  );
+}
 function initialize(target,width,height,count=512,seed=20260831) {
   const rng=seeded(seed),rows=[];
   const budgets=[Math.floor(count*.2),Math.floor(count*.4)];budgets.push(count-budgets[0]-budgets[1]);
@@ -36,7 +56,7 @@ class FixedCountBendRuntime{
  restore(encoder,front){if(!this.frozen)return;const r=this.renderer,bind=r.device.createBindGroup({layout:this.pipeline.getBindGroupLayout(0),entries:[this.frozen,r.trainState.xyBuffers[front],r.trainState.transformBuffers[front],r.trainState.colorBuffers[front]].map((buffer,binding)=>({binding,resource:{buffer}}))});const pass=encoder.beginComputePass();pass.setPipeline(this.pipeline);pass.setBindGroup(0,bind);pass.dispatchWorkgroups(Math.ceil(this.fixedCount/64));pass.end();}
  restoreNow(){if(!this.frozen)return;const r=this.renderer,e=r.device.createCommandEncoder();for(let i=0;i<r.trainState.xyBuffers.length;i++)this.restore(e,i);r.device.queue.submit([e.finish()]);}
  grow(oldCount,newCount){if(oldCount!==this.count||newCount>this.capacity)throw Error('Internal bend growth contract changed');this.count=newCount;}
- compact(){throw Error('Pruning not implemented: bend-only gate');}
+ compact(keep){this.renderer.ownedBendSession.compact(keep,this.count);this.count=keep.length;}
  relocate(){throw Error('Relocation not implemented: bend-only gate');}
  summary(){return {count:this.count,capacity:this.capacity,backcoat:this.fixedCount,fusion:false,edges:0};}
 }
@@ -51,27 +71,58 @@ function initializeParams(image, count, capacity = count) {
     rows[i].family = catalog[i].family;
   }
   const p = initLayeredOpaqueBrush(image, count);
+  const fixedBackcoatCount = Math.floor(count * .2);
+  const brushMinAspectRatio = selectedBrushMinAspectRatio();
+  const brushMaxAspectRatio = selectedBrushMaxAspectRatio();
+  const brushAspectFloors = selectedBrushAspectFloors();
+  const maximumPlanarScale = selectedLearningRates().maxPlanarScale;
+  const layerSettings = discreteLayerSettings();
+  const surfaceLayerPrior = scaleBiasedSurfaceLayerPriorSettings();
+  const frontFootprintRefinement = harmfulRectangleParentSplitSettings();
+  const controlPoints = selectedControlPointConfig();
   Object.assign(p, {
     internalBendKey: `internal-bend-${++generation}`,
     internalBendShapes: Uint32Array.from(rows.flatMap(row => [row.axis, row.family])),
     internalBendCapacity: safeCapacity,
     internalBendCapacityShapes: Uint32Array.from(catalog.flatMap(row => [row.axis, row.family])),
+    internalBendControlPoints: new Float32Array(controlPoints.positions),
     kernelShape: "opaque-brush", opaqueLayered: true,
     minimumOpacityEnabled: true, minimumOpacity: .995, maximumOpacity: .995,
     brushWidthTaperEnabled: true, brushWidthTaperStart: 1, brushWidthTaperEnd: 1,
     brushOpacityGradientEnabled: false, brushOpacityGradientStart: 1, brushOpacityGradientEnd: 1,
     brushCenterOpacityGradientMin: 1, brushCenterOpacityGradientMax: 1,
-    brushMinAspectRatio: 1, brushMaxAspectRatio: 8,
+    brushMinAspectRatio, brushMaxAspectRatio,
     virtualDepthEnabled: false, virtualCameraSamplingEnabled: false,
-    flowBirthLinksEnabled: true, flowBirthLinkStrength: 0, flowBackcoatCount: Math.floor(count * .2),
+    brushStrokePersistenceEnabled: opaqueBrushStrokePersistenceEnabled(),
+    brushRibbonAspectFloor: brushAspectFloors.ribbon,
+    brushAccentAspectFloor: brushAspectFloors.accent,
+    flowBirthLinksEnabled: true, flowBirthLinkStrength: 0, flowBackcoatCount: fixedBackcoatCount,
     flowTrainingSize: [image.width, image.height],
-    tileCullingEnabled: true, layerOrderEnabled: true, surfaceLayerPriorEnabled: false,
-    brushLocalColorFlowEnabled: false, brushStrokePersistenceEnabled: false,
-    discreteLayersEnabled: false, discreteLayerMoveRadius: 0,
+    tileCullingEnabled: true, layerOrderEnabled: true,
+    layerAwareAccumulationEnabled: layerSettings.accumulationEnabled,
+    currentVisibilityChildPolicyEnabled: layerSettings.currentVisibilityChildPolicyEnabled,
+    currentVisibilityCompactionEnabled: layerSettings.currentVisibilityCompactionEnabled,
+    discreteLayersEnabled: layerSettings.enabled,
+    discreteLayerCount: layerSettings.count,
+    discreteLayerMoveRadius: layerSettings.moveRadius,
+    surfaceLayerPriorEnabled: surfaceLayerPrior.enabled,
+    surfaceLayerPriorColorAwarePromotion: surfaceLayerPrior.colorAwarePromotion,
+    surfaceLayerPriorLayers: surfaceLayerPrior.layers,
+    surfaceLayerPriorP1Interval: surfaceLayerPrior.p1Interval,
+    surfaceLayerPriorP2Interval: surfaceLayerPrior.p2Interval,
+    surfaceLayerPriorP3Interval: surfaceLayerPrior.p3Interval,
+    surfaceLayerPriorUntilFraction: surfaceLayerPrior.untilFraction,
+    trainLayerColorGuardEnabled: trainLayerColorGuardEnabled(),
+    harmfulRectangleParentSplitEnabled: frontFootprintRefinement.enabled,
+    harmfulRectangleParentSplitTransitionOnly: false,
+    frontSplitChildrenEnabled: false,
+    brushLocalColorFlowEnabled: false,
     monochromeUnderpaintingEnabled: false, bg: new Float32Array([0, 0, 0]),
   });
   rows.forEach((row, i) => {
-    p.xy.set([row.x, row.y], i * 2); p.scale.set([row.sx, row.sy], i * 2);
+    const sx = i < fixedBackcoatCount ? Math.min(row.sx, maximumPlanarScale) : row.sx;
+    const sy = i < fixedBackcoatCount ? Math.min(row.sy, maximumPlanarScale) : row.sy;
+    p.xy.set([row.x, row.y], i * 2); p.scale.set([sx, sy], i * 2);
     p.theta[i] = row.theta; p.rgb.set(row.rgb, i * 3); p.opacity[i] = .995;
     p.brushTaper[i] = .5; p.detailTags[i] = 1; p.depthOrder[i] = row.layer / 3;
   });
@@ -91,6 +142,7 @@ function createSession(params) {
     kernel: "owned-brush-v2", fixedCount: false, virtual: false, split: true, clone: true,
     fusion: false, directionalTaper: false, opacityGradientMin: 1, opacityGradientMax: 1,
     centerOpacityMin: 1, centerOpacityMax: 1, feather: .18, coarseLoss: false,
+    controlPointPositions: Array.from(params.internalBendControlPoints || [0.5]),
   }, {storageUsage: GPUBufferUsage.STORAGE});
 }
 
@@ -101,7 +153,24 @@ function growParams(params, targetCount) {
   next.internalBendKey = params.internalBendKey;
   next.internalBendCapacity = capacity;
   next.internalBendCapacityShapes = params.internalBendCapacityShapes;
-  next.internalBendShapes = params.internalBendCapacityShapes.slice(0, targetCount * 2);
+  next.internalBendControlPoints = params.internalBendControlPoints;
+  const shapes = new Uint32Array(targetCount * 2);
+  shapes.set(params.internalBendShapes);
+  shapes.set(params.internalBendCapacityShapes.subarray(params.count * 2, targetCount * 2), params.count * 2);
+  next.internalBendShapes = shapes;
+  return next;
+}
+
+function compactParams(params, keepIndices) {
+  const next = compactSplatParams(params, keepIndices);
+  const shapes = new Uint32Array(keepIndices.length * 2);
+  for (let target = 0; target < keepIndices.length; target += 1) {
+    const source = keepIndices[target];
+    shapes[target * 2] = params.internalBendShapes[source * 2];
+    shapes[target * 2 + 1] = params.internalBendShapes[source * 2 + 1];
+  }
+  next.internalBendShapes = shapes;
+  next.internalBendControlPoints = params.internalBendControlPoints;
   return next;
 }
 
@@ -110,5 +179,6 @@ function extent(params, index, sx, sy) {
 }
 
 globalThis.Image2SplatPaintInternalBend = Object.freeze({initializeRows: initialize, initialize: initializeParams,
-  growParams, FixedCountBendRuntime, createSession, extent});
+  normalizeControlPointConfig, selectedControlPointConfig,
+  growParams, compactParams, FixedCountBendRuntime, createSession, extent});
 })();

@@ -911,10 +911,13 @@ function snapshotParams(params) {
   const anisotropyLimits = anisotropyLimitsForParams(params);
   return {
     ...(params.internalBendKey ? {internalBendKey: params.internalBendKey,
-      internalBendShapes: params.internalBendShapes.slice()} : {}),
+      internalBendShapes: params.internalBendShapes.slice(),
+      internalBendControlPoints: params.internalBendControlPoints?.slice()} : {}),
     ...(params.flowBirthLinksEnabled ? {
       flowBirthLinksEnabled: true,
       flowBirthLinkStrength: params.flowBirthLinkStrength,
+      flowLinkedSplatMin: params.flowLinkedSplatMin,
+      flowLinkedSplatMax: params.flowLinkedSplatMax,
       flowBackcoatCount: params.flowBackcoatCount,
       flowTrainingSize: params.flowTrainingSize?.slice(),
     } : {}),

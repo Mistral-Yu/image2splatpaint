@@ -148,7 +148,7 @@ export async function verifyRelease(sitePath) {
   check("live quality metrics are default-off", liveMetricsInput.includes('type="checkbox"') && !/\bchecked(?:\s|=|>)/i.test(liveMetricsInput), failures);
   check("app exposes exactly four public algorithms", JSON.stringify(algorithmValues) === JSON.stringify(expectedAlgorithms), failures);
   check(
-    "Flow Brush Fusion supports PNG export",
+    "Curved Brush Splats supports PNG export",
     /\[FLOW_SPLAT_FUSION_ALGORITHM_ID\][^]*exports: Object\.freeze\(\["png"\]\)[^]*png: true/.test(app) &&
       webHtml.includes("pngExportResolution") &&
       webHtml.includes("pngExportLongSide"),

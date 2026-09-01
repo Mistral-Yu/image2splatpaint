@@ -11,6 +11,12 @@ async function load() {
   return { trainer: context.Image2SplatPaintFlowRibbonTrainer,
     reference: context.Image2SplatPaintFlowPaintReference };
 }
+
+async function loadBirthGraph() {
+  const context = vm.createContext({ Int32Array, Set, Map });
+  vm.runInContext(await read("web/training/flow-birth-graph.js"), context);
+  return context.Image2SplatPaintFlowBirthGraph.BirthGraph;
+}
 const stroke = (random = 0.4) => ({
   start_x: 24, start_y: 40, control_1_x: 36, control_1_y: 28,
   control_2_x: 56, control_2_y: 48, end_x: 72, end_y: 40,
@@ -33,8 +39,34 @@ test("Variable Brush links use stable 3–9 counts and reconcile the physical bu
   const result = trainer.allocateBrushDabCounts(plan, 420, true);
   assert.equal(new Set(result.plan.map((s) => s.brush_dab_count)).size, 7);
   assert.equal(JSON.stringify(plan), baseline, "allocation must not mutate the reference");
-  assert.throws(() => trainer.allocateBrushDabCounts(plan, 209), /at least three/);
+  assert.throws(() => trainer.allocateBrushDabCounts(plan, 209), /at least 3/);
   assert.equal(trainer.allocateBrushDabCounts([], 10, true).physicalSplatCount, 0);
+  const bounded = trainer.allocateBrushDabCounts(plan, 350, true, {minimum: 4, maximum: 6});
+  assert.ok(bounded.plan.every((s) => s.brush_dab_count >= 4 && s.brush_dab_count <= 6));
+  assert.equal(bounded.physicalSplatCount, 350);
+  assert.throws(
+    () => trainer.allocateBrushDabCounts(plan, 279, false, {minimum: 4, maximum: 6}),
+    /at least 4/,
+  );
+});
+
+test("Birth-linked stroke range delays continuity until Min and stops linking at Max", async () => {
+  const BirthGraph = await loadBirthGraph();
+  const graph = new BirthGraph(1, { minMembers: 3, maxMembers: 4 });
+  const splitFrom = (row) => Uint32Array.of((1 << 30) | (row + 1));
+
+  assert.equal(graph.grow(1, splitFrom(0), 10)[0].linked, true);
+  assert.equal(graph.pack().edges.length, 0, "two members remain dormant below Min");
+  assert.equal(graph.pack(() => true, { includeDormant: true }).edges.length, 1);
+
+  assert.equal(graph.grow(2, splitFrom(1), 20)[0].linked, true);
+  assert.equal(graph.pack().edges.length, 2, "three members activate continuity");
+  assert.equal(graph.grow(3, splitFrom(2), 30)[0].linked, true);
+  assert.equal(graph.pack().edges.length, 3);
+
+  assert.equal(graph.grow(4, splitFrom(3), 40)[0].linked, false,
+    "a fifth member must not exceed Max");
+  assert.equal(graph.pack().edges.length, 3);
 });
 
 test("Variable tile candidates contain only active dabs, always keep three bodies, and count backcoat once", async () => {
@@ -87,7 +119,13 @@ test("P1 backcoat has the same source pigment and full-cell coverage as the fina
   assert.match(integration, /const rearPlan = finalUnderpaint.strokePlan/);
   assert.match(integration, /topologyParams.subarray\(\s*previousStage.metadata.underpaint_parent_count \* Image2SplatPaintFlowRibbonTrainer.constants.PARAM_STRIDE/);
   const html = await read("web/index.html");
-  assert.doesNotMatch(html.match(/<input id="flowSplatFusionVariableLinks"[^>]+>/)[0], /checked/);
+  assert.match(html, /id="flowLinkedSplatMin"[^>]+value="2"/);
+  assert.match(html, /id="flowLinkedSplatMax"[^>]+value="9"/);
+  assert.match(html, /id="flowInternalBendControlPointCount"[^>]+value="1"/);
+  assert.match(html, /id="flowInternalBendControlPointPositions"[^>]+value="50"/);
+  assert.doesNotMatch(html, /id="flowSplatFusionVariableLinks"/);
   assert.match(html.match(/<input id="flowSplatBackcoatFromP1"[^>]+>/)[0], /checked/);
-  assert.match(await read("web/ui/training-controls.js"), /flowSplatFusionVariableLinks.disabled = state.running \|\| !flowSelected/);
+  const controls = await read("web/ui/training-controls.js");
+  assert.match(controls, /flowLinkedSplatMin.disabled = state.running \|\| !sharedFlow \|\| internalBend/);
+  assert.match(controls, /flowInternalBendControlPointCount.disabled = state.running \|\| !internalBend/);
 });

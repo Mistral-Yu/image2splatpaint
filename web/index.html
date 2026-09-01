@@ -135,7 +135,7 @@
                   <select id="algorithmSelect" data-testid="algorithm-select">
                     <option value="planar-gaussian" selected>Planar Gaussian</option>
                     <option value="rectangle-splats">Rectangle Splats</option>
-                    <option value="flow-splat-fusion">Flow Brush Fusion</option>
+                    <option value="flow-splat-fusion">Curved Brush Splats</option>
                     <option value="gs-virtual-camera-sampling">GS Virtual Camera Sampling</option>
                   </select>
                 </label>
@@ -166,15 +166,15 @@
               </div>
 
               <details id="flowSplatFusionPanel" class="lr-panel local-flow-paint-panel" data-testid="flow-splat-fusion-panel" data-settings-order="3">
-                <summary id="flowSplatFusionPanelSummary">Flow Brush Fusion settings</summary>
+                <summary id="flowSplatFusionPanelSummary">Curved Brush settings</summary>
                 <div class="lr-body">
-                  <p id="flowSplatFusionPanelNote" class="local-flow-paint-note">Choose linked Brush dabs with growth, or an experimental single Splat with a learned internal bend. The coverage backcoat is protected.</p>
+                  <p id="flowSplatFusionPanelNote" class="local-flow-paint-note">Paint with curved Brush Splats using linked strokes or learned internal bends.</p>
                   <div class="training-grid">
-                    <label class="field-wide" title="Shared dabs learn position, size and rotation with the common Brush optimizer. Split/clone ancestry retains 3–9-dab links; unrelated residual births stay independent. Single-Splat internal bend grows from Initial to Max while learning curvature inside each Splat.">
+                    <label class="field-wide" title="Linked Brush strokes learn connected physical Brush Splats with the common optimizer. Internal-bend Brush splats learn curvature inside each individual Splat.">
                       Training path
                       <select id="flowTrainingPath">
-                        <option value="birth-linked" selected>Shared dabs + birth links</option>
-                        <option value="internal-bend">Single-Splat internal bend (experimental)</option>
+                        <option value="birth-linked" selected>Linked Brush strokes</option>
+                        <option value="internal-bend">Internal-bend Brush splats (experimental)</option>
                       </select>
                     </label>
                     <label title="Flow Brush uses compact paint bodies and middle-width marks with optional fine edge accents. Classic Gaussian preserves the previous four-Gaussian mode. Fine bristles keeps Gaussian footprints. Max splats remains the final physical-Splat budget, including variable links and the backcoat.">
@@ -245,9 +245,24 @@
                       <input id="flowSplatFusionEdgeAccents" data-testid="flow-splat-fusion-edge-accents" type="checkbox" />
                       Edge-guided fine strokes
                     </label>
-                    <label class="inline-option field-wide" title="Requires retraining. Experimental Brush-dab mode: each curve keeps 3–9 physical Splats. Seeded counts persist between optimizer updates; growth reconciles the final Max splats budget. Three body marks always preserve the curve. Off keeps the eight-dab mode. Classic Gaussian is unaffected.">
-                      <input id="flowSplatFusionVariableLinks" data-testid="flow-splat-fusion-variable-links" type="checkbox" />
-                      Variable brush links (3–9)
+                    <div id="flowLinkedSplatRange" class="paired-setting-row field-wide" role="group" aria-labelledby="flowLinkedSplatRangeHeading">
+                      <span id="flowLinkedSplatRangeHeading" class="paired-setting-heading">Splats per linked stroke</span>
+                      <label title="Minimum linked group size that contributes the continuity gradient. Groups continue growing through split/clone ancestry up to Max.">
+                        Min
+                        <input id="flowLinkedSplatMin" data-testid="flow-linked-splat-min" type="number" min="2" max="9" step="1" value="2" />
+                      </label>
+                      <label title="Maximum physical Brush Splats retained in one linked stroke. This does not change the total Max splats budget.">
+                        Max
+                        <input id="flowLinkedSplatMax" data-testid="flow-linked-splat-max" type="number" min="2" max="9" step="1" value="9" />
+                      </label>
+                    </div>
+                    <label id="flowInternalBendControlPointCountLabel" title="Number of fixed longitudinal control-point positions used by each internal-bend Brush Splat. The per-Splat bend amount remains learned by the shared optimizer.">
+                      Internal control points
+                      <input id="flowInternalBendControlPointCount" data-testid="flow-internal-bend-control-point-count" type="number" min="1" max="6" step="1" value="1" />
+                    </label>
+                    <label id="flowInternalBendControlPointPositionsLabel" title="Comma-separated control-point positions from 0 to 100% along the Splat long axis. Supply the same number of values as Internal control points. One point at 50% preserves the previous bend shape.">
+                      Control-point positions (%)
+                      <input id="flowInternalBendControlPointPositions" data-testid="flow-internal-bend-control-point-positions" type="text" inputmode="decimal" value="50" />
                     </label>
                     <label title="Controls width and length variation within the Brush family. 40% keeps a moderate distribution. With Edge-guided fine strokes on, weak edges keep the accents broader while strong contours can become thin-long. Medium marks no longer receive a second hairline shrink. 0% disables extra variation, not the underlying width families.">
                       Splat size variation (%)
@@ -819,39 +834,39 @@
     <script src="./gpu/shaders/metric-pipelines.js?v=deep-refactor-v1"></script>
     <script src="./gpu/shaders/density-pipelines.js?v=internal-bend-v3"></script>
     <script src="./gpu/shaders/compaction-pipelines.js?v=deep-refactor-v1"></script>
-    <script src="./gpu/internal-bend-kernel.js?v=internal-bend-v3"></script>
+    <script src="./gpu/internal-bend-kernel.js?v=curved-brush-controls-v1"></script>
     <script src="./gpu/renderer.js?v=internal-bend-v3"></script>
     <script src="./gpu/runtime.js?v=app-refactor-v1"></script>
     <script src="./gpu/tile-pipelines.js?v=internal-bend-v3"></script>
     <script src="./gpu/tile-runtime.js?v=app-refactor-v1"></script>
     <script src="./gpu/optimizer-runtime.js?v=internal-bend-v3"></script>
     <script src="./training/flow-paint-reference.js?v=flow-adaptive-recognition-v1"></script>
-    <script src="./training/flow-ribbon-trainer.js?v=flow-adaptive-recognition-v1"></script>
+    <script src="./training/flow-ribbon-trainer.js?v=curved-brush-controls-v1"></script>
     <script src="./training/flow-stroke-topology.js?v=flow-adaptive-recognition-v1"></script>
-    <script src="./training/flow-splat-fusion.js?v=internal-bend-v3"></script>
+    <script src="./training/flow-splat-fusion.js?v=curved-brush-controls-v1"></script>
     <script src="./training/brush-support.js?v=internal-bend-v3"></script>
     <script src="./training/flow-birth-graph.js?v=internal-bend-v3"></script>
-    <script src="./training/flow-birth-links.js?v=internal-bend-v3"></script>
-    <script src="./training/internal-bend.js?v=internal-bend-v3"></script>
-    <script src="./training/internal-bend-trainer.js?v=internal-bend-v3"></script>
+    <script src="./training/flow-birth-links.js?v=curved-brush-controls-v1"></script>
+    <script src="./training/internal-bend.js?v=curved-brush-controls-v1"></script>
+    <script src="./training/internal-bend-trainer.js?v=curved-brush-controls-v1"></script>
     <script src="./training/trainer.js?v=internal-bend-v3"></script>
     <script src="./training/metrics.js?v=app-refactor-v1"></script>
-    <script src="./training/initialization.js?v=internal-bend-v3"></script>
+    <script src="./training/initialization.js?v=curved-brush-controls-v1"></script>
     <script src="./training/initialization-runtime.js?v=rectangle-orientation-tolerance-v1"></script>
-    <script src="./training/densification.js?v=internal-bend-v3"></script>
-    <script src="./training/runtime.js?v=app-refactor-v1"></script>
+    <script src="./training/densification.js?v=curved-brush-controls-v1"></script>
+    <script src="./training/runtime.js?v=internal-bend-compaction-v1"></script>
     <script src="./core/algorithms.js?v=internal-bend-v3"></script>
-    <script src="./ui/training-controls.js?v=internal-bend-v3"></script>
-    <script src="./export/runtime.js?v=internal-bend-v3"></script>
+    <script src="./ui/training-controls.js?v=curved-brush-controls-v1"></script>
+    <script src="./export/runtime.js?v=curved-brush-controls-v1"></script>
     <script src="./export/actions.js?v=app-refactor-v1"></script>
     <script src="./ui/status.js?v=rectangle-orientation-degrees-v1"></script>
     <script src="./ui/preview.js?v=flow-splat-fusion-v1"></script>
     <script src="./ui/tilt.js?v=app-refactor-v1"></script>
     <script src="./ui/preview-runtime.js?v=app-refactor-v1"></script>
     <script src="./ui/splat-controls.js?v=internal-bend-v3"></script>
-    <script src="./app.js?v=internal-bend-v3"></script>
+    <script src="./app.js?v=curved-brush-controls-v1"></script>
     <script src="./ui/bootstrap.js?v=brush-rectangle-flow-surface-v1"></script>
     <script src="./qa/runtime.js?v=unified-flow-chain-v1"></script>
-    <script src="./ui/controls.js?v=internal-bend-v3"></script>
+    <script src="./ui/controls.js?v=curved-brush-controls-v1"></script>
   </body>
 </html>

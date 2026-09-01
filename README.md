@@ -22,7 +22,7 @@
 
 Image2SplatPaint explores image reconstruction and painterly stylization with
 trainable splats. Planar and Virtual Camera modes focus on reproduction;
-Rectangle, Illustrative Brush, and Flow Brush Fusion turn the same image into
+Rectangle, Illustrative Brush, and Curved Brush Splats turn the same image into
 layered geometric or curved paint forms.
 
 ## Quick start
@@ -59,7 +59,7 @@ reload, so save PNG or PLY results you want to keep.
 | --- | --- | --- | --- |
 | `Planar Gaussian` | Stable front-view approximation of one image | PNG and standard 3DGS PLY | No |
 | `Rectangle Splats` | Rectangle, trapezoid, triangle, or legacy Illustrative Brush shapes | PNG | No |
-| `Flow Brush Fusion` | Curved strokes fused from compact Brush Splats | PNG | No |
+| `Curved Brush Splats` | Linked or internally bent compact Brush Splats | PNG | No |
 | `GS Virtual Camera Sampling` | Thin-depth 3DGS-style training from front and virtual teachers | PNG and standard 3DGS PLY | Yes |
 
 All four choices run locally with WebGPU and share the main splat optimizer by
@@ -67,17 +67,18 @@ default. `Rectangle Splats` keeps the former Brush path as its `Illustrative
 Brush` shape. `GS Virtual Camera Sampling` is the only mode that enables
 virtual-camera teachers and the `Tilt` tab.
 
-Flow's default `Shared dabs + birth links` learns each Brush's position, size,
-and rotation. Split/clone ancestry preserves soft 3–9-dab groups; unrelated
+Curved Brush Splats' default `Linked Brush strokes` learns each Brush's position, size,
+and rotation. Split/clone ancestry preserves configurable 2–9-dab groups; unrelated
 births remain independent. The fixed coverage backcoat is protected from
 growth, relocation, and pruning. `Initial splats` counts trainable dabs;
 `Max splats` includes the backcoat. `Iterations` counts actual optimizer updates.
 Neither public path traces source curves. `Backcoat size variation` defaults to
 40%; 0% uses uniform cells.
 
-`Single-Splat internal bend (experimental)` instead learns a curve inside each
-Splat. It starts at `Initial splats` and progressively grows the active GPU set
-to `Max splats` while preserving existing optimizer history.
+`Internal-bend Brush splats (experimental)` instead learns a curve inside each
+Splat. Its shared control-point count and positions are configurable. It starts
+at `Initial splats` and progressively grows the active GPU set to `Max splats`
+while preserving existing optimizer history.
 
 The selector configures the next run. Once a result exists, Export eligibility
 and Tilt availability stay bound to that completed result until Reset, Clear,

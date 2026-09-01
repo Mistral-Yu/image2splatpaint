@@ -114,7 +114,7 @@ function updateExportPanel() {
     state.params?.kernelShape || algorithm.capabilities.kernelShape,
   );
   els.exportDescription.textContent = currentFlowPngResult()
-    ? "Flow Brush Fusion exports its final opaque painted result as PNG. PLY cannot represent the fused Brush stroke structure."
+    ? "Curved Brush Splats exports its final opaque painted result as PNG. PLY cannot represent linked or internally bent Brush stroke structure."
     : resultKernelShape === "opaque-brush"
       ? "Brush Splats export exactly as PNG. Standard Gaussian Splatting PLY cannot represent the analytic brush kernel."
       : resultKernelShape === "rectangle"
@@ -293,7 +293,7 @@ async function makeSplatPreviewPngBlob() {
 }
 
 async function makeFlowPreviewPngBlob(flowResult = currentFlowPngResult()) {
-  if (!flowResult?.image) throw new Error("No trained Flow Brush Fusion result to export.");
+  if (!flowResult?.image) throw new Error("No trained Curved Brush Splats result to export.");
   const sourceImage = flowResult.image;
   const exportFrame = pngExportFrameSpec(sourceImage);
   const sourceCanvas = document.createElement("canvas");

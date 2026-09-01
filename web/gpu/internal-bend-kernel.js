@@ -13,6 +13,43 @@ function assertRow(row) {
   for(const key of ['x','y','sx','sy','theta','amount'])if(!Number.isFinite(row[key]))throw Error('Non-finite '+key);
   if(row.sx<=0||row.sy<=0||row.amount<0||row.amount>1)throw Error('Invalid scale/bend');
 }
+function normalizedControlPointPositions(values=[.5]) {
+  const positions=Array.from(values||[],Number);
+  if(!positions.length||positions.length>6||positions.some(value=>!Number.isFinite(value)||value<0||value>1))
+    throw Error('Invalid internal bend control-point positions');
+  positions.sort((a,b)=>a-b);
+  return Object.freeze(positions);
+}
+function bendProfileWGSL(values=[.5]) {
+  const positions=normalizedControlPointPositions(values);
+  if(positions.length===1&&Math.abs(positions[0]-.5)<1e-7)return `
+fn owned_bend_profile(t:f32,ell:f32,family:f32)->vec2<f32>{
+  return vec2<f32>(ell*ell/3.0-t*t,-2.0*t);
+}`;
+  const terms=positions.map((position,index)=>{
+    const previous=index?positions[index-1]:0;
+    const next=index+1<positions.length?positions[index+1]:1;
+    const gap=Math.max(.08,Math.min(.45,.55*Math.max(.08,Math.min(position-previous,next-position))));
+    return `
+  let q${index}=(u-${position.toFixed(8)})/${gap.toFixed(8)};
+  let w${index}=exp(-0.5*q${index}*q${index});
+  let dw${index}=w${index}*(-q${index}/${gap.toFixed(8)})*du;
+  let sign${index}=select(1.0,-1.0,((u32(family)+${index}u)&1u)==1u);
+  weighted+=sign${index}*w${index}; weight+=w${index};
+  dWeighted+=sign${index}*dw${index}; dWeight+=dw${index};`;
+  }).join('');
+  return `
+fn owned_bend_profile(t:f32,ell:f32,family:f32)->vec2<f32>{
+  let safeEll=max(ell,0.000001);let u=clamp(0.5+0.5*t/safeEll,0.0,1.0);let du=0.5/safeEll;
+  var weighted=0.0;var weight=0.0;var dWeighted=0.0;var dWeight=0.0;${terms}
+  let invWeight=1.0/max(weight,0.000001);let blend=weighted*invWeight;
+  let dBlend=(dWeighted*weight-weighted*dWeight)*invWeight*invWeight;
+  let v=t/safeEll;let insideSupport=abs(v)<1.0;let envelope=select(0.0,1.0-v*v,insideSupport);
+  let dEnvelope=select(0.0,-2.0*t/(safeEll*safeEll),insideSupport);
+  let magnitude=ell*ell/3.0;
+  return vec2<f32>(magnitude*envelope*blend,magnitude*(dEnvelope*blend+envelope*dBlend));
+}`;
+}
 function conservativeBounds(row,feather=.18) {
   const f=FAMILIES[row.family],L=row.axis===0?row.sx:row.sy,W=row.axis===0?row.sy:row.sx;
   const limit=(1+feather)**.25,tMax=f.length*limit;
@@ -31,8 +68,8 @@ function ownedKernelWGSL(acceptedBrushWGSL) {
   return acceptedBrushWGSL+ownedSampleWGSL();
 }
 // Also usable after an unmodified shared shader already containing the base kernel.
-function ownedSampleWGSL() {
-  return `
+function ownedSampleWGSL(controlPointPositions=[.5]) {
+  return bendProfileWGSL(controlPointPositions)+`
 struct OwnedBrushSample {
   kernel:f32, dCenter:vec2<f32>, dLogScale:vec2<f32>, dTheta:f32, dAmount:f32,
 };
@@ -52,13 +89,14 @@ fn owned_brush_sample_cs(delta:vec2<f32>, c:f32, s:f32, scale:vec2<f32>, amount:
   if (ownedU2*ownedU2>=1.0+feather) {
     return OwnedBrushSample(0.0,vec2<f32>(0.0),vec2<f32>(0.0),0.0,0.0);
   }
-  let b=1.2*(amount-0.5); let h=ell*ell/3.0-t*t;
+  let b=1.2*(amount-0.5);let bendProfile=owned_bend_profile(t,ell,family);
+  let h=bendProfile.x;let dh=bendProfile.y;
   let shift=b*ratio*h;
   let warped=n-select(vec2<f32>(shift,0.0),vec2<f32>(0.0,shift),axisX);
   let base=illustrative_oil_kernel_sample(warped,axisX,feather,family,
     0.0,false,false,1.0,1.0,1.0,1.0,1.0,1.0);
   let gm=select(base.gradient.x,base.gradient.y,axisX);
-  let slope=gm*2.0*b*ratio*t;
+  let slope=-gm*b*ratio*dh;
   let g=base.gradient+select(vec2<f32>(0.0,slope),vec2<f32>(slope,0.0),axisX);
   let gr=g/(1.5*scale); let aspect=-gm*shift;
   let logs=-g*n+select(vec2<f32>(-aspect,aspect),vec2<f32>(aspect,-aspect),axisX);
@@ -94,12 +132,12 @@ function replaceCount(source,pattern,replacement,expected,label) {
   if(count!==expected)throw Error(`${label}: expected ${expected}, got ${count}`);
   return result;
 }
-function attach(source,{kernel=true}={}) {
+function attach(source,{kernel=true,controlPointPositions=[.5]}={}) {
   if(/@binding\(\s*10\s*\)/.test(source)||/var[^;]*ownedShapes:/.test(source))throw Error('Metadata binding collision / already adapted');
   if(!source.includes('fn illustrative_oil_kernel_sample('))throw Error('Accepted Brush body missing');
-  return source+'\n'+metadata+(kernel?ownedSampleWGSL():'');
+  return source+'\n'+metadata+(kernel?ownedSampleWGSL(controlPointPositions):'');
 }
-function adaptTrainingShaders(original) {
+function adaptTrainingShaders(original,{controlPointPositions=[.5]}={}) {
   const result={...original};
   result.renderShader=replaceFunction(original.renderShader,'training_kernel',`fn training_kernel(
  d:vec2<f32>,c:f32,s:f32,scale:vec2<f32>,packedTag:f32,amount:f32,shape:vec2<u32>
@@ -110,7 +148,7 @@ function adaptTrainingShaders(original) {
     (_,prefix)=>prefix+', ownedShapes[g])',5,'linear forward samples');
   result.renderShader=replaceCount(result.renderShader,/tileSharedPackedOrder\[j\], tileSharedTaper\[j\]\)/g,
     'tileSharedPackedOrder[j], tileSharedTaper[j], ownedShapes[tileSharedIndex[j]])',5,'cooperative forward samples');
-  result.renderShader=attach(result.renderShader);
+  result.renderShader=attach(result.renderShader,{controlPointPositions});
   result.exactBackwardShader=replaceFunction(original.exactBackwardShader,'kernel_sample',`fn kernel_sample(
  d:vec2<f32>,c:f32,s:f32,baseScale:vec2<f32>,sampleScale:vec2<f32>,includeMipGradient:bool,
  packedTag:f32,amount:f32,shape:vec2<u32>
@@ -125,11 +163,11 @@ function adaptTrainingShaders(original) {
 }`);
   result.exactBackwardShader=replaceCount(result.exactBackwardShader,/(kernel_sample\([^\n]+t\.w, rawDepth)\);/g,
     (_,prefix)=>prefix+', ownedShapes[g]);',10,'backward samples');
-  result.exactBackwardShader=attach(result.exactBackwardShader);
+  result.exactBackwardShader=attach(result.exactBackwardShader,{controlPointPositions});
   // Optimizer, alpha, loss, sorting and all other returned shader strings intact.
   return result;
 }
-function adaptPreviewShader(source) {
+function adaptPreviewShader(source,{controlPointPositions=[.5]}={}) {
   source=replaceFunction(source,'preview_kernel',`fn preview_kernel(
  d:vec2<f32>,c:f32,s:f32,scale:vec2<f32>,packedTag:f32,amount:f32,worldPoint:vec2<f32>,shape:vec2<u32>
 ) -> f32 {
@@ -138,7 +176,7 @@ function adaptPreviewShader(source) {
   source=source.replace(/xy\[i\]\.rawDepth, (p(?:00|10|01|11)?)\)/g,
     'xy[i].rawDepth, $1, ownedShapes[i])');
   if((source.match(/ownedShapes\[i\]/g)||[]).length!==5)throw Error('Preview samples changed');
-  return attach(source);
+  return attach(source,{controlPointPositions});
 }
 const boundsWGSL=`
 fn owned_local_bounds(scale:vec2<f32>,amount:f32,shape:vec2<u32>,feather:f32)->vec2<f32>{
@@ -174,10 +212,11 @@ function assertOwnedShape(row) {
 }
 
 class OwnedMetadata {
-  #rows; #buffer=null; #disposed=false;
+  #catalog; #rows; #buffer=null; #disposed=false;
   constructor(rows) {
     if(!rows.length)throw Error('Empty owned shape session');
-    this.#rows=rows.map(row=>{assertOwnedShape(row);return Object.freeze({axis:row.axis,family:row.family});});
+    this.#catalog=rows.map(row=>{assertOwnedShape(row);return Object.freeze({axis:row.axis,family:row.family});});
+    this.#rows=this.#catalog.slice();
   }
   get count(){return this.#rows.length;}
   assertCompatible(rows) {
@@ -201,6 +240,28 @@ class OwnedMetadata {
     try {new Uint32Array(buffer.getMappedRange()).set(data);buffer.unmap();}
     catch(error){buffer.destroy();throw error;}
     this.#buffer=buffer;return buffer;
+  }
+  compact(device,usage,keepIndices,oldCount) {
+    if(this.#disposed||!this.#buffer)throw Error('Owned metadata not live');
+    if(!keepIndices?.length||keepIndices.length>=oldCount||oldCount>this.count)
+      throw Error('Invalid owned metadata compaction');
+    let previous=-1;
+    const kept=[];
+    for(const index of keepIndices) {
+      if(index<=previous||index<0||index>=oldCount)throw Error('Owned metadata keep order changed');
+      kept.push(this.#rows[index]);previous=index;
+    }
+    // Active rows follow the same stable keep order as parameter compaction.
+    // Inactive capacity slots return to their deterministic catalog entry so
+    // later GPU growth can append rows without reallocating metadata.
+    const next=this.#catalog.slice();
+    for(let i=0;i<kept.length;i++)next[i]=kept[i];
+    const data=Uint32Array.from(next.flatMap(row=>[row.axis,row.family]));
+    const buffer=device.createBuffer({label:'owned-axis-family-v2-compacted',size:data.byteLength,usage,mappedAtCreation:true});
+    try {new Uint32Array(buffer.getMappedRange()).set(data);buffer.unmap();}
+    catch(error){buffer.destroy();throw error;}
+    const previousBuffer=this.#buffer;
+    this.#rows=next;this.#buffer=buffer;previousBuffer.destroy();
   }
   entries(stage,entries) {
     if(this.#disposed||!this.#buffer)throw Error('Owned metadata not live');
@@ -230,11 +291,12 @@ const pipelineStages={
 };
 
 class OwnedHostSession {
-  #metadata; #renderer=null; #closed=false; #closing=false; #storageUsage;
+  #metadata; #renderer=null; #closed=false; #closing=false; #storageUsage; #controlPointPositions;
   constructor(rows,config,{storageUsage}={}) {
     assertFixtureContract(config);
     if(storageUsage!==128)throw Error('Owned metadata requires storage-only usage');
     this.#metadata=new OwnedMetadata(rows);this.#storageUsage=storageUsage;
+    this.#controlPointPositions=normalizedControlPointPositions(config.controlPointPositions||[.5]);
   }
   get count(){return this.#metadata.count;}
   attach(renderer) {
@@ -258,15 +320,24 @@ class OwnedHostSession {
     return renderer;
   }
   assertRows(rows){this.#live();this.#metadata.assertCompatible(rows);}
+  compact(keepIndices,oldCount) {
+    const renderer=this.#live();
+    this.#metadata.compact(renderer.device,this.#storageUsage,keepIndices,oldCount);
+    renderer.trainState?.bindGroupCache?.clear?.();
+  }
   #check(source){assertStorageLimit(source,this.#live().device.limits.maxStorageBuffersPerShaderStage);return source;}
   training(factory,receiver,options) {
     this.#live(receiver);
     // The product factory reads subgroup flags from `this`; do not detach it.
-    const shaders=adaptTrainingShaders(factory.create.call(receiver,options));
+    const shaders=adaptTrainingShaders(factory.create.call(receiver,options),{
+      controlPointPositions:this.#controlPointPositions,
+    });
     this.#check(shaders.renderShader);this.#check(shaders.exactBackwardShader);
     return shaders; // All optimizer/loss strings remain unmodified.
   }
-  preview(factory){return this.#check(adaptPreviewShader(factory.renderPreview()));}
+  preview(factory){return this.#check(adaptPreviewShader(factory.renderPreview(),{
+    controlPointPositions:this.#controlPointPositions,
+  }));}
   tile(factory,options){return this.#check(adaptTileShader(factory.create(options)));}
   createBindGroup(renderer,pipeline,descriptor) {
     this.#live(renderer);

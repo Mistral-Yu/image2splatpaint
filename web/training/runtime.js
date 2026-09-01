@@ -232,7 +232,9 @@ async function applyCurrentVisibilityCompaction(step, steps, run = null) {
     state.metrics.current_visibility_compaction_events.push(report);
     return false;
   }
-  state.params = compactSplatParams(params, plan.keepIndices);
+  state.params = params.internalBendKey
+    ? Image2SplatPaintInternalBend.compactParams(params, plan.keepIndices)
+    : compactSplatParams(params, plan.keepIndices);
   updateTrainingRunOwnership(run, { params: state.params });
   if (els.tileCullingToggle.checked) {
     await awaitTrainingRun(run, renderer.prepareTileLists(state.image, state.params, { sync: true }));
@@ -310,7 +312,9 @@ async function applyCurrentContributionCompaction(step, steps, settings, run = n
     state.metrics.current_contribution_compaction_events.push(report);
     return false;
   }
-  state.params = compactSplatParams(params, plan.keepIndices);
+  state.params = params.internalBendKey
+    ? Image2SplatPaintInternalBend.compactParams(params, plan.keepIndices)
+    : compactSplatParams(params, plan.keepIndices);
   updateTrainingRunOwnership(run, { params: state.params });
   if (els.tileCullingToggle.checked) {
     await awaitTrainingRun(run, renderer.prepareTileLists(state.image, state.params, { sync: true }));

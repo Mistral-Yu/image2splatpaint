@@ -164,8 +164,15 @@ async function trainFlowSplatFusion(run) {
   const flowTextureGuidedDabs = flowBrushDabs
     && flowQaParams.get("flow-texture-guided-dabs") !== "0";
   const flowEdgeGuidedAccents = trainingUiAdapter.controls.flowSplatFusionEdgeAccents.checked;
+  const linkedSplatMinimum = Math.max(3, Math.min(9, Math.round(
+    Number(trainingUiAdapter.controls.flowLinkedSplatMin.value) || 3,
+  )));
+  const linkedSplatMaximum = Math.max(linkedSplatMinimum, Math.min(9, Math.round(
+    Number(trainingUiAdapter.controls.flowLinkedSplatMax.value) || 9,
+  )));
   const variableBrushDabs = flowBrushDabs
-    && trainingUiAdapter.controls.flowSplatFusionVariableLinks.checked;
+    && (linkedSplatMinimum !== Image2SplatPaintFlowRibbonTrainer.constants.BRUSH_DAB_SAMPLES
+      || linkedSplatMaximum !== Image2SplatPaintFlowRibbonTrainer.constants.BRUSH_DAB_SAMPLES);
   document.documentElement.dataset.flowEdgeGuidedAccents = String(flowEdgeGuidedAccents);
   trainingUiAdapter.controls.flowSplatFusionStrokeTexture.value = flowStrokeTexture;
   // Adaptive growth starts from a small seed set, not a future curve catalogue.
@@ -331,6 +338,7 @@ async function trainFlowSplatFusion(run) {
   if (variableBrushDabs) {
     reference.strokePlan = Image2SplatPaintFlowRibbonTrainer.allocateBrushDabCounts(
       reference.strokePlan, detailSplatBudget, false,
+      {minimum: linkedSplatMinimum, maximum: linkedSplatMaximum},
     ).plan;
   }
   // Standard and Fine use anisotropic Gaussian Splats. Brush dabs keeps the

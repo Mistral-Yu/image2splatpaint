@@ -5,24 +5,41 @@ const INTERNAL_BEND_GROWTH_INTERVAL = 100;
 const INTERNAL_BEND_GROWTH_APPLY_UNTIL = 0.90;
 const INTERNAL_BEND_PHASE_GROWTH_SHARES = Object.freeze([0.20, 0.40, 0.40]);
 
-function buildInternalBendGrowthSchedule(steps, initialCount, finalCount) {
+function buildInternalBendGrowthSchedule(steps, initialCount, finalCount, options = {}) {
   const safeSteps = Math.max(1, Math.round(steps));
   const start = Math.max(1, Math.min(finalCount, Math.round(initialCount)));
   const finish = Math.max(start, Math.round(finalCount));
-  if (start >= finish) return {events: [], horizonStep: 0, initialCount: start, finalCount: finish};
-  const horizonStep = Math.max(1, Math.round(safeSteps * INTERNAL_BEND_GROWTH_APPLY_UNTIL));
+  const interval = Math.max(1, Math.min(1000, Math.round(
+    Number(options.interval) || INTERNAL_BEND_GROWTH_INTERVAL,
+  )));
+  const applyUntil = Math.max(0, Math.min(1,
+    Number.isFinite(Number(options.applyUntil))
+      ? Number(options.applyUntil)
+      : INTERNAL_BEND_GROWTH_APPLY_UNTIL,
+  ));
+  const requestedShares = Array.isArray(options.phaseShares)
+    ? options.phaseShares.map((value) => Math.max(0, Number(value) || 0))
+    : [...INTERNAL_BEND_PHASE_GROWTH_SHARES];
+  const shareTotal = requestedShares.reduce((sum, value) => sum + value, 0);
+  const phaseShares = shareTotal > 0 && requestedShares.length === 3
+    ? requestedShares.map((value) => value / shareTotal)
+    : [...INTERNAL_BEND_PHASE_GROWTH_SHARES];
+  if (start >= finish) return {events: [], horizonStep: 0, initialCount: start, finalCount: finish,
+    interval, applyUntil, phaseShares};
+  if (applyUntil <= 0) return {events: [], horizonStep: 0, initialCount: start, finalCount: finish,
+    interval, applyUntil, phaseShares};
+  const horizonStep = Math.max(1, Math.round(safeSteps * applyUntil));
   const boundaries = [
     Math.max(1, Math.round(safeSteps / 3)),
     Math.max(1, Math.round(safeSteps * 2 / 3)),
     horizonStep,
   ].map((step) => Math.min(horizonStep, step));
   const due = new Set(boundaries);
-  for (let step = INTERNAL_BEND_GROWTH_INTERVAL; step <= horizonStep; step += INTERNAL_BEND_GROWTH_INTERVAL) {
+  for (let step = interval; step <= horizonStep; step += interval) {
     due.add(step);
   }
   due.add(horizonStep);
-  const cumulative = [0, INTERNAL_BEND_PHASE_GROWTH_SHARES[0],
-    INTERNAL_BEND_PHASE_GROWTH_SHARES[0] + INTERNAL_BEND_PHASE_GROWTH_SHARES[1], 1];
+  const cumulative = [0, phaseShares[0], phaseShares[0] + phaseShares[1], 1];
   const edges = [0, ...boundaries];
   const events = [...due].filter((step) => step > 0).sort((a, b) => a - b).map((step) => {
     let segment = edges.length - 2;
@@ -37,7 +54,8 @@ function buildInternalBendGrowthSchedule(steps, initialCount, finalCount) {
       : Math.max(start, Math.min(finish, Math.round(start + (finish - start) * progress)));
     return {step, targetCount, phase: segment + 1, terminal: step >= horizonStep};
   });
-  return {events, horizonStep, initialCount: start, finalCount: finish};
+  return {events, horizonStep, initialCount: start, finalCount: finish,
+    interval, applyUntil, phaseShares};
 }
 
 async function trainInternalBend(run) {
@@ -67,10 +85,41 @@ async function trainInternalBend(run) {
   els.finalSplatCount.value = String(finalCount);
   const failure = safetyFailure(computeBudgetFor(Number(els.trainSize.value), finalCount, steps), "start");
   if (failure) {setSafetyStop(failure); throw Error(`Internal bend safety guard: ${failure.reason}`);}
+  const algorithm = selectedAlgorithm();
+  const runGrowthSettings = phase39Variants();
+  const runPhase33 = phase33Variants();
+  const layerSettings = discreteLayerSettings();
+  const requestedGrowthApplyUntilFraction = runGrowthSettings.growthApplyUntilFraction;
+  const growthApplyUntilFraction = effectiveGrowthApplyUntilFraction(
+    steps,
+    requestedGrowthApplyUntilFraction,
+    layerSettings.opaqueLayered,
+    layerSettings.opaquePaintSettleFraction,
+  );
+  const configuredPhaseShares = runGrowthSettings.stageAwareGrowth
+    ? [runGrowthSettings.stageGrowthShares.p1, runGrowthSettings.stageGrowthShares.p2,
+      runGrowthSettings.stageGrowthShares.p3]
+    : [1 / 3, 1 / 3, 1 / 3];
   let params = Image2SplatPaintInternalBend.initialize(state.image, initialCount, finalCount);
-  const growthSchedule = buildInternalBendGrowthSchedule(steps, initialCount, finalCount);
+  const growthSchedule = buildInternalBendGrowthSchedule(steps, initialCount, finalCount, {
+    interval: runGrowthSettings.densifyInterval,
+    applyUntil: growthApplyUntilFraction,
+    phaseShares: configuredPhaseShares,
+  });
   const growthByStep = new Map(growthSchedule.events.map((event) => [event.step, event]));
-  const learningRates = {...selectedLearningRates(), opacity: 0};
+  const contributionCompaction = currentContributionCompactionSettings(algorithm);
+  const surfaceLayerPrior = scaleBiasedSurfaceLayerPriorSettings(algorithm);
+  const contributionScheduleSettings = {
+    ...contributionCompaction,
+    opaqueLayered: true,
+    opaquePaintSettleFraction: layerSettings.opaquePaintSettleFraction,
+    growthApplyUntilFraction,
+  };
+  const learningRates = {
+    ...selectedLearningRates(),
+    maxAnisotropy: params.brushMaxAspectRatio,
+    opacity: 0,
+  };
   const previewRefresh = selectedPreviewRefresh();
   const periodicMetrics = periodicTrainingEvaluationEnabled();
   const metricInterval = Math.max(1, Math.min(DEFAULT_MAX_METRIC_INTERVAL,
@@ -84,12 +133,55 @@ async function trainInternalBend(run) {
     initial_ssim: null, initial_global_ssim: null, initial_psnr: null,
     fusion_events: emptyFusionEvents(), learning_rates: learningRates,
     density_gpu_ms: 0, densify_events: [],
-    growth_schedule: {mode: "internal-bend-progressive", interval: INTERNAL_BEND_GROWTH_INTERVAL,
-      apply_until: INTERNAL_BEND_GROWTH_APPLY_UNTIL, phase_shares: [20, 40, 40],
+    growth_schedule: {mode: runGrowthSettings.stageAwareGrowth
+      ? "internal-bend-shared-stage-aware" : "internal-bend-shared-linear",
+      interval: growthSchedule.interval,
+      requested_apply_until: requestedGrowthApplyUntilFraction,
+      apply_until: growthSchedule.applyUntil,
+      phase_shares: growthSchedule.phaseShares.map((value) => value * 100),
+      structure_guided_allocation: runGrowthSettings.structureGuidedAllocation,
+      structure_region_grid: runGrowthSettings.structureRegionGrid,
+      signal_threshold: runGrowthSettings.growthSignalThreshold,
       event_steps: growthSchedule.events.map((event) => event.step), cap_reached_step: initialCount >= finalCount ? 0 : null},
-    internal_bend: {version: 3, fixed_count: false, progressive_count: true,
+    internal_bend: {version: 4, fixed_count: false, progressive_count: true,
       initial_count: initialCount, max_count: finalCount, backcoat: params.flowBackcoatCount,
-      phase_growth_shares: [20, 40, 40], seed: 20260831, fusion: false},
+      phase_growth_shares: growthSchedule.phaseShares.map((value) => value * 100), seed: 20260831, fusion: false,
+      contribution_compaction: contributionCompaction.enabled,
+      control_point_count: params.internalBendControlPoints.length,
+      control_point_positions: Array.from(params.internalBendControlPoints)},
+    phase_relative_scale_guard: {
+      enabled: runPhase33.phaseRelativeScaleGuard,
+      reference: "phase-start geometric-mean scale median",
+      correction: "aspect-preserving soft log-scale floor",
+      strength: DEFAULT_RELATIVE_SCALE_GUARD_STRENGTH,
+      ratios: {P1: runPhase33.p1RelativeScaleFloorRatio,
+        P2: runPhase33.p2RelativeScaleFloorRatio, P3: runPhase33.p3RelativeScaleFloorRatio},
+      events: [],
+    },
+    train_layer_color_guard: {
+      enabled: Boolean(params.trainLayerColorGuardEnabled),
+      mode: "repair-footprint-rgb-before-forward-order-change",
+    },
+    surface_layer_prior: {
+      enabled: Boolean(params.surfaceLayerPriorEnabled),
+      color_aware_promotion: params.surfaceLayerPriorColorAwarePromotion !== false,
+      layers: params.surfaceLayerPriorLayers,
+      until_step: Math.floor(steps * params.surfaceLayerPriorUntilFraction),
+      event_count: 0, phase_counts: {P1: 0, P2: 0, P3: 0}, events: [],
+    },
+    front_footprint_refinement_v2: {
+      enabled: Boolean(params.harmfulRectangleParentSplitEnabled),
+      scope: "paint growth-events; mismatch-gated split/shrink/move; same-layer children",
+      candidate_selections: 0, front_oversized_selections: 0,
+      high_contribution_selections: 0, high_deviation_selections: 0,
+      parent_replacements: 0, children_created: 0,
+    },
+    current_contribution_compaction: null,
+    current_contribution_compaction_events: [],
+    current_contribution_compaction_removed_total: 0,
+    current_contribution_compaction_deferred_count: 0,
+    current_contribution_compaction_deferred_steps: [],
+    current_contribution_compaction_settings: structuredClone(contributionCompaction),
     gpu_training_memory: {peak_active_bytes: 0, peak_reserved_bytes: 0},
   };
   for (const key of ["losses", "rgb_mse", "psnr", "alpha_losses", "alpha_ssim", "objective_losses",
@@ -131,10 +223,45 @@ async function trainInternalBend(run) {
     metrics.initial_global_ssim = metrics.latest_global_ssim;
     metrics.initial_psnr = metrics.latest_psnr;
     let retries = 0;
+    let relativeScaleGuardStage = null;
     for (let step = 1; step <= steps && !state.stopRequested;) {
       while (state.paused && !state.stopRequested) await awaitTrainingRun(run, nextFrame());
       if (state.stopRequested) break;
+      const optimizerStage = curriculumTrainingStage(
+        step,
+        steps,
+        runPhase33,
+        renderer.trainState?.coarseImage,
+        renderer.trainState?.midImage,
+      );
+      if (runPhase33.phaseRelativeScaleGuard && optimizerStage !== relativeScaleGuardStage) {
+        if (relativeScaleGuardStage !== null) {
+          await awaitTrainingRun(run, renderer.readTrainedColors(params));
+        }
+        const median = geometricMeanScaleMedian(params);
+        const ratio = stageRelativeScaleFloorRatio(optimizerStage, runPhase33);
+        const phase = optimizerStage === "coarse" ? "P1" : optimizerStage === "mid" ? "P2" : "P3";
+        renderer.trainState.phaseRelativeScaleGuard = {
+          enabled: ratio > 0,
+          stage: optimizerStage,
+          phase,
+          median,
+          ratio,
+          floor: median * ratio,
+          strength: DEFAULT_RELATIVE_SCALE_GUARD_STRENGTH,
+        };
+        metrics.phase_relative_scale_guard.events.push({
+          step, phase, splats: params.count, median, ratio, floor: median * ratio,
+        });
+        relativeScaleGuardStage = optimizerStage;
+      }
       const growthEvent = growthByStep.get(step);
+      const surfaceLayerSortAtStep = scaleBiasedSurfaceLayerSortSchedule(
+        step,
+        steps,
+        surfaceLayerPrior,
+      );
+      let growthOccurred = false;
       if (growthEvent?.targetCount > params.count) {
         const before = params.count;
         const growthStarted = performance.now();
@@ -151,6 +278,7 @@ async function trainInternalBend(run) {
         metrics.density_gpu_ms += gpuMs;
         if (!growth) throw Error("Internal bend GPU growth failed");
         if (growth.grown) {
+          growthOccurred = true;
           params = Image2SplatPaintInternalBend.growParams(params, growth.count);
           state.params = params;
           updateTrainingRunOwnership(run, {params});
@@ -165,6 +293,27 @@ async function trainInternalBend(run) {
           added: params.count - before, terminal: growthEvent.terminal,
           candidate_mass: Number.isFinite(growth.candidateMass) ? growth.candidateMass : null,
           zero_mass_fallback: Boolean(growth.zeroMassFallback), gpu_ms: gpuMs});
+        const operations = growth.operations || {};
+        const refinement = metrics.front_footprint_refinement_v2;
+        refinement.front_oversized_selections += operations.harmful_rectangle_front_oversized_selections || 0;
+        refinement.high_contribution_selections += operations.harmful_rectangle_high_contribution_selections || 0;
+        refinement.high_deviation_selections += operations.harmful_rectangle_high_deviation_selections || 0;
+        refinement.candidate_selections += operations.harmful_rectangle_candidate_selections || 0;
+        refinement.parent_replacements += operations.harmful_rectangle_parent_replacements || 0;
+        refinement.children_created += operations.harmful_rectangle_children_created || 0;
+      }
+      const periodicCompactionResetDue = currentContributionCompactionResetDue(
+        step,
+        steps,
+        contributionScheduleSettings,
+      );
+      const periodicCompactionDue = currentContributionCompactionDue(
+        step,
+        steps,
+        contributionScheduleSettings,
+      );
+      if (periodicCompactionResetDue) {
+        await awaitTrainingRun(run, renderer.resetImportanceWindowGpu(params.count));
       }
       const started = performance.now();
       await awaitTrainingRun(run, renderer.trainStepRenderGradientGpu(state.image, params, learningRates,
@@ -177,6 +326,25 @@ async function trainInternalBend(run) {
       metrics.steps_done = step;
       metrics.params_revision += 1;
       recordTrainingTiming(step, performance.now() - started);
+      if (surfaceLayerSortAtStep.due) {
+        metrics.surface_layer_prior.event_count += 1;
+        metrics.surface_layer_prior.phase_counts[surfaceLayerSortAtStep.phase] += 1;
+        if (metrics.surface_layer_prior.events.length < 64) {
+          metrics.surface_layer_prior.events.push({step, phase: surfaceLayerSortAtStep.phase});
+        }
+      }
+      if (periodicCompactionDue && !growthOccurred) {
+        await applyCurrentContributionCompaction(
+          step,
+          steps,
+          contributionCompaction,
+          run,
+        );
+        params = state.params;
+      } else if (periodicCompactionDue && growthOccurred) {
+        metrics.current_contribution_compaction_deferred_count += 1;
+        metrics.current_contribution_compaction_deferred_steps.push({step, reason: "growth"});
+      }
       if (periodicMetrics && step % metricInterval === 0) {
         await updatePreview(step, false, {readOnlyPeriodic: true, present: shouldPresentTrainingStep(step, previewRefresh)}, run);
         await awaitTrainingRun(run, nextFrame());
@@ -194,7 +362,7 @@ async function trainInternalBend(run) {
       step += 1;
     }
     metrics.stopped = state.stopRequested;
-    if (!metrics.stopped && params.count !== finalCount) {
+    if (!metrics.stopped && growthSchedule.horizonStep > 0 && params.count !== finalCount) {
       throw Error(`Internal bend growth did not reach Max splats: ${params.count} / ${finalCount}`);
     }
     metrics.final_splats = params.count;

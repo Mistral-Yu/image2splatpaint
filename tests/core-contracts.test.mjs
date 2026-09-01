@@ -1089,10 +1089,8 @@ test("compaction WGSL factories preserve generated source fingerprints", async (
 
 test("Single-Splat internal bend grows the real active count through P1/P2/P3", async () => {
   const context = vm.createContext({ Map, Math, Object });
-  vm.runInContext(
-    await readFile(new URL("../web/training/internal-bend-trainer.js", import.meta.url), "utf8"),
-    context,
-  );
+  const trainer = await readFile(new URL("../web/training/internal-bend-trainer.js", import.meta.url), "utf8");
+  vm.runInContext(trainer, context);
   const schedule = context.buildInternalBendGrowthSchedule(3000, 128, 8192);
   assert.equal(schedule.horizonStep, 2700);
   assert.equal(schedule.events[0].step, 100);
@@ -1103,10 +1101,86 @@ test("Single-Splat internal bend grows the real active count through P1/P2/P3", 
   assert.ok(schedule.events.every((event, index) => (
     index === 0 || event.targetCount >= schedule.events[index - 1].targetCount
   )));
+  const sharedSchedule = context.buildInternalBendGrowthSchedule(3000, 128, 8192, {
+    interval: 300,
+    applyUntil: 0.8,
+    phaseShares: [0.25, 0.5, 0.25],
+  });
+  assert.equal(sharedSchedule.horizonStep, 2400);
+  assert.equal(sharedSchedule.events[0].step, 300);
+  assert.deepEqual([...sharedSchedule.phaseShares], [0.25, 0.5, 0.25]);
+  assert.equal(sharedSchedule.events.at(-1).targetCount, 8192);
+  const disabledSchedule = context.buildInternalBendGrowthSchedule(3000, 128, 8192, {
+    applyUntil: 0,
+  });
+  assert.equal(disabledSchedule.horizonStep, 0);
+  assert.equal(disabledSchedule.events.length, 0);
+  const fixedCountSchedule = context.buildInternalBendGrowthSchedule(3000, 512, 512, {
+    interval: 75,
+    applyUntil: 0.7,
+    phaseShares: [0.2, 0.4, 0.4],
+  });
+  assert.equal(fixedCountSchedule.horizonStep, 0);
+  assert.equal(fixedCountSchedule.interval, 75);
+  assert.equal(fixedCountSchedule.applyUntil, 0.7);
+  assert.deepEqual([...fixedCountSchedule.phaseShares], [0.2, 0.4, 0.4]);
 
   const runtime = await readFile(new URL("../web/training/internal-bend.js", import.meta.url), "utf8");
+  const kernel = await readFile(new URL("../web/gpu/internal-bend-kernel.js", import.meta.url), "utf8");
+  const trainingRuntime = await readFile(new URL("../web/training/runtime.js", import.meta.url), "utf8");
   const controls = await readFile(new URL("../web/ui/training-controls.js", import.meta.url), "utf8");
+  const links = await readFile(new URL("../web/training/flow-birth-links.js", import.meta.url), "utf8");
+  const bendContext = vm.createContext({Array, Float32Array, Math, Number, Object, String, Uint32Array});
+  bendContext.globalThis = bendContext;
+  vm.runInContext(runtime, bendContext);
+  const defaultControlPoints = bendContext.Image2SplatPaintInternalBend
+    .normalizeControlPointConfig(1, "50");
+  assert.equal(defaultControlPoints.count, 1);
+  assert.deepEqual([...defaultControlPoints.positions], [0.5]);
+  const threeControlPoints = bendContext.Image2SplatPaintInternalBend
+    .normalizeControlPointConfig(3, "20, 50, 80");
+  assert.deepEqual([...threeControlPoints.positions], [0.2, 0.5, 0.8]);
+  assert.deepEqual(
+    [...bendContext.Image2SplatPaintInternalBend.normalizeControlPointConfig(3, "50").positions],
+    [0.25, 0.5, 0.75],
+  );
+  const kernelContext = vm.createContext({Array, Float32Array, Map, Math, Number, Object, Set, Uint32Array});
+  kernelContext.globalThis = kernelContext;
+  vm.runInContext(kernel, kernelContext);
+  const defaultBendWgsl = kernelContext.Image2SplatPaintInternalBendKernel.ownedSampleWGSL();
+  const multiBendWgsl = kernelContext.Image2SplatPaintInternalBendKernel.ownedSampleWGSL([0.25, 0.75]);
+  assert.match(defaultBendWgsl, /ell\*ell\/3\.0-t\*t,-2\.0\*t/);
+  assert.match(multiBendWgsl, /u-0\.25000000/);
+  assert.match(multiBendWgsl, /u-0\.75000000/);
+  assert.match(multiBendWgsl, /dBlend/);
   assert.match(runtime, /growParamPlaceholders\(params, targetCount\)/);
-  assert.match(runtime, /internalBendCapacityShapes\.slice\(0, targetCount \* 2\)/);
+  assert.match(runtime, /internalBendCapacityShapes\.subarray\(params\.count \* 2, targetCount \* 2\)/);
+  assert.match(runtime, /function compactParams\(params, keepIndices\)/);
+  assert.match(runtime, /ownedBendSession\.compact\(keep,this\.count\)/);
+  assert.match(kernel, /Inactive capacity slots return to their deterministic catalog entry/);
+  assert.match(trainingRuntime, /Image2SplatPaintInternalBend\.compactParams\(params, plan\.keepIndices\)/);
+  assert.doesNotMatch(trainer, /finalCompactionStep/);
+  assert.match(trainer, /params\.count !== finalCount/);
+  assert.match(trainer, /opaquePaintSettleFraction: layerSettings\.opaquePaintSettleFraction/);
+  assert.doesNotMatch(trainer, /opaquePaintSettleFraction: 1/);
+  assert.match(trainer, /currentContributionCompactionDue/);
+  assert.match(runtime, /Math\.min\(row\.sx, maximumPlanarScale\)/);
+  assert.match(runtime, /selectedBrushMinAspectRatio\(\)/);
+  assert.match(runtime, /trainLayerColorGuardEnabled: trainLayerColorGuardEnabled\(\)/);
+  assert.match(runtime, /harmfulRectangleParentSplitEnabled: frontFootprintRefinement\.enabled/);
+  assert.match(runtime, /surfaceLayerPriorEnabled: surfaceLayerPrior\.enabled/);
+  assert.match(runtime, /discreteLayersEnabled: layerSettings\.enabled/);
+  assert.match(trainer, /front_footprint_refinement_v2/);
+  assert.match(trainer, /surfaceLayerSortAtStep/);
+  assert.match(trainer, /phaseRelativeScaleGuard/);
+  assert.match(trainer, /runGrowthSettings\.densifyInterval/);
+  assert.match(trainer, /growthApplyUntilFraction/);
+  assert.match(links, /minMembers: params\.flowLinkedSplatMin \|\| 2/);
+  assert.match(links, /maxMembers: params\.flowLinkedSplatMax \|\| 9/);
+  assert.match(links, /includeDormant: this\.graph\.minMembers <= 2/);
+  assert.match(controls, /FLOW_BRUSH_DEFAULT_MIN_ASPECT_RATIO = 2\.2/);
+  assert.match(controls, /FLOW_STAGE_GROWTH_DEFAULTS = Object\.freeze\(\[20, 40, 40\]\)/);
+  assert.match(controls, /syncFlowStageGrowthDefaults\(sharedFlow\)/);
+  assert.match(controls, /els\.rectanglePaintPanel\.hidden = !rectangleAlgorithmSelected && !sharedFlow/);
   assert.doesNotMatch(controls, /state\.running \|\| internalBend \|\|/);
 });

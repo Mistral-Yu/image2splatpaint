@@ -25,26 +25,29 @@
       .reduce((mask, sample) => mask | (1 << sample), 0);
   }
 
-  function allocateBrushDabCounts(strokePlan, physicalBudget, fillBudget = false) {
+  function allocateBrushDabCounts(strokePlan, physicalBudget, fillBudget = false, options = {}) {
     const budget = Math.max(0, Math.floor(Number(physicalBudget) || 0));
-    if (strokePlan.length * 3 > budget) throw new Error("Brush chain budget needs at least three dabs per curve.");
+    const minimum = Math.max(3, Math.min(9, Math.round(Number(options.minimum) || 3)));
+    const maximum = Math.max(minimum, Math.min(9, Math.round(Number(options.maximum) || 9)));
+    if (strokePlan.length * minimum > budget) throw new Error(`Brush chain budget needs at least ${minimum} dabs per curve.`);
     const plan = strokePlan.map((stroke) => ({
       ...stroke,
-      brush_dab_count: Math.max(3, Math.min(9, Math.round(Number(stroke.brush_dab_count)
-        || (3 + Math.min(6, Math.floor(clamp01(stroke.random) * 7)))))),
+      brush_dab_count: Math.max(minimum, Math.min(maximum, Math.round(Number(stroke.brush_dab_count)
+        || (minimum + Math.min(maximum - minimum,
+          Math.floor(clamp01(stroke.random) * (maximum - minimum + 1))))))),
     }));
     let total = plan.reduce((sum, stroke) => sum + stroke.brush_dab_count, 0);
     // Seed-stable ordering, no per-update randomness. Existing counts survive
     // growth except when the final physical budget requires reconciliation.
     const order = plan.map((stroke, index) => ({ index, random: Number(stroke.random) || 0 }))
       .sort((a, b) => a.random - b.random || a.index - b.index);
-    const target = fillBudget ? Math.min(budget, plan.length * 9) : Math.min(total, budget);
+    const target = fillBudget ? Math.min(budget, plan.length * maximum) : Math.min(total, budget);
     while (total !== target) {
       for (const { index } of order) {
         if (total === target) break;
         const delta = total < target ? 1 : -1;
         const next = plan[index].brush_dab_count + delta;
-        if (next < 3 || next > 9) continue;
+        if (next < minimum || next > maximum) continue;
         plan[index].brush_dab_count = next;
         total += delta;
       }

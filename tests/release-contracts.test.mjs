@@ -115,7 +115,7 @@ test("Training actions stay on one four-column row", async () => {
   );
 });
 
-test("Flow Brush Fusion is the third public Algorithm and legacy Brush is a Rectangle shape", async () => {
+test("Curved Brush Splats is the third public Algorithm and legacy Brush is a Rectangle shape", async () => {
   const html = await readFile(new URL("../web/index.html", import.meta.url), "utf8");
   const styles = await readFile(new URL("../web/styles.css", import.meta.url), "utf8");
   const app = await readFile(new URL("../web/app.js", import.meta.url), "utf8");
@@ -130,7 +130,7 @@ test("Flow Brush Fusion is the third public Algorithm and legacy Brush is a Rect
   const ribbonTrainer = await readFile(new URL("../web/training/flow-ribbon-trainer.js", import.meta.url), "utf8");
   assert.match(
     html,
-    /value="planar-gaussian" selected>Planar Gaussian<\/option>[^]*value="rectangle-splats">Rectangle Splats<\/option>[^]*value="flow-splat-fusion">Flow Brush Fusion<\/option>[^]*value="gs-virtual-camera-sampling">GS Virtual Camera Sampling<\/option>/,
+    /value="planar-gaussian" selected>Planar Gaussian<\/option>[^]*value="rectangle-splats">Rectangle Splats<\/option>[^]*value="flow-splat-fusion">Curved Brush Splats<\/option>[^]*value="gs-virtual-camera-sampling">GS Virtual Camera Sampling<\/option>/,
   );
   assert.doesNotMatch(html, /<option value="layered-opaque-brush">/);
   assert.match(html, /id="rectanglePaintShape"[^]*value="rectangle" selected>Rectangle<\/option>[^]*value="opaque-brush">Illustrative Brush<\/option>/);
@@ -193,8 +193,12 @@ test("Flow Brush Fusion is the third public Algorithm and legacy Brush is a Rect
   assert.match(html, /value="brush-dabs" selected>Flow Brush<\/option>/);
   assert.match(html, /value="baseline">Classic Gaussian \(4-Splat\)/);
   assert.match(html, /value="fine-bristles">Fine bristles \(Gaussian\)/);
-  assert.match(controls, /Use eight dabs per curve or try variable 3–9 links/);
-  assert.match(controls, /opaque interior and feathered edges/);
+  assert.match(controls, /forms linked strokes within the selected Min\/Max group size/);
+  assert.match(html, /Paint with curved Brush Splats using linked strokes or learned internal bends/);
+  assert.match(html, /id="flowLinkedSplatMin"[^>]*value="2"/);
+  assert.match(html, /id="flowLinkedSplatMax"[^>]*value="9"/);
+  assert.match(html, /id="flowInternalBendControlPointCount"[^>]*value="1"/);
+  assert.match(html, /id="flowInternalBendControlPointPositions"[^>]*value="50"/);
   assert.match(html, /value="balanced" selected>Balanced motion/);
   assert.match(html, /id="flowSplatFusionWidthPercent"[^>]*value="300"/);
   assert.match(html, /id="flowSplatFusionSplatSizeVariation"[^>]*value="40"/);
@@ -208,7 +212,7 @@ test("Flow Brush Fusion is the third public Algorithm and legacy Brush is a Rect
   assert.doesNotMatch(controls, /syncAlgorithmTrainingPreset|>Ribbons</);
   assert.match(controls, /finalSplatCountLabel\.textContent = "Max splats"/);
   assert.match(controls, /Physical Splat budget\. Detail uses complete stroke chains/);
-  assert.match(controls, /Backcoat from P1 is on by default to fill the canvas early, but can reduce final detail quality/);
+  assert.match(controls, /The protected backcoat starts in P1|forms linked strokes within the selected Min\/Max group size/);
   assert.match(controls, /trainSize\.max = flowSelected \? "512"/);
   assert.match(integration, /trainFlowSplatFusion/);
   assert.match(integration, /: "brush-dabs";/);

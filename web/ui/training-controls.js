@@ -120,7 +120,10 @@ function setInputControlsDisabled(disabled) {
     els.flowSplatFusionWidthPercent,
     els.flowSplatFusionSplatSizeVariation,
     els.flowSplatFusionEdgeAccents,
-    els.flowSplatFusionVariableLinks,
+    els.flowLinkedSplatMin,
+    els.flowLinkedSplatMax,
+    els.flowInternalBendControlPointCount,
+    els.flowInternalBendControlPointPositions,
     els.flowSplatFusionMovementLimit,
     els.flowSplatUnderpainting,
     els.flowSplatBackcoatFromP1,
@@ -137,6 +140,37 @@ function setInputControlsDisabled(disabled) {
   }
 }
 
+const FLOW_BRUSH_DEFAULT_MIN_ASPECT_RATIO = 2.2;
+const FLOW_STAGE_GROWTH_DEFAULTS = Object.freeze([20, 40, 40]);
+
+function syncFlowBrushAspectDefaults(flowSelected) {
+  const input = els.layeredBrushMinAspectRatio;
+  const nextScope = flowSelected ? "flow" : "standard";
+  const currentScope = input.dataset.valueScope || "standard";
+  if (currentScope === nextScope) return;
+  if (currentScope === "flow") input.dataset.flowValue = input.value;
+  else input.dataset.standardValue = input.value;
+  input.value = nextScope === "flow"
+    ? input.dataset.flowValue || String(FLOW_BRUSH_DEFAULT_MIN_ASPECT_RATIO)
+    : input.dataset.standardValue || String(LIMITS.maxAnisotropyMin);
+  input.dataset.valueScope = nextScope;
+}
+
+function syncFlowStageGrowthDefaults(flowSelected) {
+  const controls = [els.stageGrowthP1, els.stageGrowthP2, els.stageGrowthP3];
+  const nextScope = flowSelected ? "flow" : "standard";
+  const currentScope = controls[0].dataset.valueScope || "standard";
+  if (currentScope === nextScope) return;
+  for (let index = 0; index < controls.length; index += 1) {
+    const control = controls[index];
+    control.dataset[`${currentScope}Value`] = control.value;
+    control.value = control.dataset[`${nextScope}Value`] || (
+      nextScope === "flow" ? String(FLOW_STAGE_GROWTH_DEFAULTS[index]) : control.defaultValue
+    );
+    control.dataset.valueScope = nextScope;
+  }
+}
+
 function syncAlgorithmRequirements() {
   const algorithm = selectedAlgorithm();
   const opaqueLayered = algorithmUsesOpaqueLayeredPaint();
@@ -148,6 +182,8 @@ function syncAlgorithmRequirements() {
   const flowSelected = algorithmUsesFlowStrokeTraining(algorithm);
   const internalBend = Boolean(algorithm.capabilities.internalBend);
   const sharedFlow = Boolean(algorithm.capabilities.flowBirthLinked || internalBend);
+  syncFlowBrushAspectDefaults(sharedFlow);
+  syncFlowStageGrowthDefaults(sharedFlow);
   if (flowSelected) {
     const budgetKey = "flow";
     const previousBudgetKey = els.flowSplatUnderpaintPercent.dataset.algorithm;
@@ -163,13 +199,13 @@ function syncAlgorithmRequirements() {
     }
   }
   document.documentElement.dataset.flowSplatFusion = String(flowSelected);
-  els.flowSplatFusionPanelSummary.textContent = "Flow Brush Fusion settings";
+  els.flowSplatFusionPanelSummary.textContent = "Curved Brush settings";
   els.flowSplatFusionPanelNote.textContent =
     internalBend
-      ? "Experimental: one independently curved Brush Splat per row. Training starts at Initial splats and grows to Max splats through P1/P2/P3 using the shared residual/structure allocator. Position, scale, rotation, RGB and internal bend learn on the shared WebGPU optimizer. Training opacity is fixed at 0.995 and aspect limits at 1–8; curve width/backcoat controls do not apply. Splats-tab opacity, size, aspect and order effects still change the preview and PNG."
+      ? "Experimental: one independently curved Brush Splat per row. Control-point positions are fixed settings while each Splat's bend amount learns with position, scale, rotation and RGB on the shared WebGPU optimizer. Training grows from Initial to Max splats through P1/P2/P3."
       : sharedFlow
-      ? "Each Brush dab learns position, scale and rotation. Accepted split/clone ancestry keeps soft 3–9-dab links; independent births remain free. Use Shared training and Brush dab settings below. The protected backcoat starts in P1, in addition to Initial splats and within Max splats. Iterations counts actual optimizer updates."
-      : "Layered curved Brush Splats with an opaque interior and feathered edges. Edge-guided fine strokes are off by default. Use eight dabs per curve or try variable 3–9 links. Training grows, moves, splits, and merges strokes. Backcoat from P1 is on by default to fill the canvas early, but can reduce final detail quality.";
+      ? "Each Brush Splat learns position, scale and rotation. Split/clone ancestry forms linked strokes within the selected Min/Max group size; independent births remain free. Shared training controls growth, structure, layers, optimizer and visibility."
+      : "Paint with curved Brush Splats using linked strokes or learned internal bends.";
   els.initialSplatCount.closest("label").classList.toggle("flow-hidden", flowSelected && !sharedFlow);
   els.initialSplatCountLabel.textContent = "Initial splats";
   els.finalSplatCountLabel.textContent = "Max splats";
@@ -210,7 +246,13 @@ function syncAlgorithmRequirements() {
   els.flowSplatFusionWidthPercent.disabled = state.running || !flowSelected;
   els.flowSplatFusionSplatSizeVariation.disabled = state.running || !flowSelected;
   els.flowSplatFusionEdgeAccents.disabled = state.running || !flowSelected;
-  els.flowSplatFusionVariableLinks.disabled = state.running || !flowSelected;
+  els.flowLinkedSplatRange.classList.toggle("flow-hidden", !sharedFlow || internalBend);
+  els.flowLinkedSplatMin.disabled = state.running || !sharedFlow || internalBend;
+  els.flowLinkedSplatMax.disabled = state.running || !sharedFlow || internalBend;
+  els.flowInternalBendControlPointCountLabel.classList.toggle("flow-hidden", !internalBend);
+  els.flowInternalBendControlPointPositionsLabel.classList.toggle("flow-hidden", !internalBend);
+  els.flowInternalBendControlPointCount.disabled = state.running || !internalBend;
+  els.flowInternalBendControlPointPositions.disabled = state.running || !internalBend;
   els.flowSplatFusionMovementLimit.disabled = state.running || !flowSelected;
   els.flowSplatUnderpainting.disabled = state.running || !flowSelected;
   els.flowSplatUnderpainting.closest("label").title = sharedFlow
@@ -222,9 +264,9 @@ function syncAlgorithmRequirements() {
     state.running || !flowSelected || !els.flowSplatUnderpainting.checked;
   els.flowSplatFusionMaxArcLabel.hidden = false;
   els.flowSplatFusionMaxArcPercent.disabled = state.running || !flowSelected;
-  els.rectanglePaintPanel.hidden = internalBend || (!rectangleAlgorithmSelected && !sharedFlow);
+  els.rectanglePaintPanel.hidden = !rectangleAlgorithmSelected && !sharedFlow;
   // Its author-level display:grid can override the browser's [hidden] rule.
-  els.rectanglePaintPanel.classList.toggle("flow-hidden", internalBend);
+  els.rectanglePaintPanel.classList.toggle("flow-hidden", false);
   els.rectanglePaintPanel.querySelector("summary").textContent = sharedFlow ? "Brush dab settings" : "Rectangle Splats settings";
   els.rectanglePaintShape.disabled = state.running || !rectangleAlgorithmSelected;
   els.rectanglePaintShape.closest("label")?.classList.toggle("flow-hidden", sharedFlow);
@@ -267,7 +309,7 @@ function syncAlgorithmRequirements() {
     els.flowSplatFusionStartingWidthDivisor, els.flowSplatFusionStartingLengthPercent, els.flowSplatFusionResidualMovePx,
     els.flowSplatFusionInitialWidthMin, els.flowSplatFusionInitialWidthMax, els.flowSplatFusionFrontWidthMax,
     els.flowSplatFusionFrontWidthLearning, els.flowSplatFusionColorAnchor, els.flowSplatFusionWidthPercent,
-    els.flowSplatFusionEdgeAccents, els.flowSplatFusionVariableLinks, els.flowSplatFusionSplatSizeVariation,
+    els.flowSplatFusionEdgeAccents, els.flowSplatFusionSplatSizeVariation,
     els.flowSplatFusionMovementLimit, els.flowSplatFusionMaxArcPercent, els.flowSplatBackcoatFromP1]) {
     control.closest("label")?.classList.toggle("flow-hidden", sharedFlow);
     if (sharedFlow) control.disabled = true;
@@ -369,12 +411,30 @@ function syncAlgorithmRequirements() {
   if (internalBend) {
     for (const control of [els.layeredBrushOpacityGradientStart, els.layeredBrushOpacityGradientEnd,
       els.layeredBrushCenterOpacityGradientMin, els.layeredBrushCenterOpacityGradientMax,
-      els.layeredBrushWidthTaperStart, els.layeredBrushWidthTaperEnd, els.layeredBrushLocalColorFlow,
-      els.layeredBrushStrokePersistence, els.layeredBrushMinAspectRatio, els.layeredBrushMaxAspectRatio,
-      els.layeredBrushRibbonAspectFloor, els.layeredBrushAccentAspectFloor]) control.disabled = true;
+      els.layeredBrushWidthTaperStart, els.layeredBrushWidthTaperEnd, els.layeredBrushLocalColorFlow]) {
+      control.disabled = true;
+    }
+    // Internal bend owns rawDepth as its bend parameter, so generic layer-order
+    // Adam and relocation-based density correction are intentionally unavailable.
+    // The remaining shared layer, visibility, optimizer and growth controls are
+    // live and must stay visible.
+    els.layerUpdateInterval.disabled = true;
+    els.layerUpdateInterval.title = "Internal-bend Brush splats keep fixed layer ownership; raw depth learns bend instead.";
+    els.growthPercentage.disabled = true;
+    els.growthPercentage.title = "Internal-bend Brush splats use the shared interval, end percentage and P1/P2/P3 shares with deterministic target closure.";
+    for (const control of [els.midTrainingOverdensityCorrection, els.overdensityCorrectionSchedule,
+      els.overdensityCorrectionInterval, els.overdensityDonorPercent]) control.disabled = true;
+    els.midTrainingOverdensityCorrection.closest("label").title =
+      "Unavailable for Internal-bend Brush splats because relocation of owned bend metadata is not implemented.";
+  } else {
+    els.layerUpdateInterval.title = "Optimize layer-order micro-depth every N iterations. 1 updates every iteration.";
+    els.growthPercentage.title = "Maximum growth requested per shared density event.";
+    els.midTrainingOverdensityCorrection.closest("label").title =
+      "Using the selected schedule, safely reuses low-utility splats from over-budget regions in under-budget high-residual regions.";
   }
-  for (const heading of ["colorWorkflowHeading", "layerVisibilityHeading", "growthDetailHeading"]) {
-    document.querySelector(`[aria-labelledby="${heading}"]`)?.classList.toggle("flow-hidden", internalBend);
+  document.querySelector('[aria-labelledby="colorWorkflowHeading"]')?.classList.toggle("flow-hidden", internalBend);
+  for (const heading of ["layerVisibilityHeading", "growthDetailHeading"]) {
+    document.querySelector(`[aria-labelledby="${heading}"]`)?.classList.remove("flow-hidden");
   }
 }
 

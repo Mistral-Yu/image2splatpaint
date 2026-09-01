@@ -11,12 +11,23 @@
     return value === "internal-bend" ? value : "birth-linked";
   }
 
+  function selectedLinkedSplatRange() {
+    const minimum = Math.max(2, Math.min(9, Math.round(
+      Number(els.flowLinkedSplatMin?.value) || 2,
+    )));
+    const maximum = Math.max(minimum, Math.min(9, Math.round(
+      Number(els.flowLinkedSplatMax?.value) || 9,
+    )));
+    return { min: minimum, max: maximum };
+  }
+
   function initialize(image, requestedInitialCount) {
     const maxCount = Math.max(32, Math.round(Number(els.finalSplatCount.value) || 8192));
+    const linkedSplats = selectedLinkedSplatRange();
     const enabled = Boolean(els.flowSplatUnderpainting.checked);
     const share = clampNumber(els.flowSplatUnderpaintPercent.value, 0, 50, 10) / 100;
-    const fixedCount = enabled ? Math.min(maxCount - 3, Math.round(maxCount * share)) : 0;
-    const count = Math.min(maxCount, fixedCount + Math.max(3, requestedInitialCount));
+    const fixedCount = enabled ? Math.min(maxCount - linkedSplats.min, Math.round(maxCount * share)) : 0;
+    const count = Math.min(maxCount, fixedCount + Math.max(linkedSplats.min, requestedInitialCount));
     // Initialize the trainable cohort across the whole image, then prepend the
     // coverage layer. Overwriting the first BSP rows would keep only one edge
     // of its spatially ordered initial placement.
@@ -33,6 +44,8 @@
     }
     params.flowBirthLinksEnabled = true;
     params.flowBirthLinkStrength = 0.01;
+    params.flowLinkedSplatMin = linkedSplats.min;
+    params.flowLinkedSplatMax = linkedSplats.max;
     params.flowBackcoatCount = fixedCount;
     params.flowTrainingSize = [image.width, image.height];
     if (fixedCount) {
@@ -87,7 +100,10 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
     constructor(renderer, params, math, Graph) {
       this.renderer = renderer;
       this.math = math;
-      this.graph = new Graph(params.count);
+      this.graph = new Graph(params.count, {
+        minMembers: params.flowLinkedSplatMin || 2,
+        maxMembers: params.flowLinkedSplatMax || 9,
+      });
       this.fixedCount = params.flowBackcoatCount || 0;
       this.strength = params.flowBirthLinkStrength;
       this.dirty = true;
@@ -193,7 +209,12 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
             normalization: Math.max(1, ra.radius + rb.radius),
           });
         }
-        this.packed = this.graph.pack();
+        // Two-dab groups are already valid visible stroke fragments. Training
+        // them immediately avoids waiting for a third child before continuity
+        // starts contributing gradients.
+        this.packed = this.graph.pack(() => true, {
+          includeDormant: this.graph.minMembers <= 2,
+        });
         const data = new Float32Array(params.count * 8), slots = new Uint8Array(params.count);
         for (let i = 0; i < params.count * 2; i++) data[i * 4] = -1;
         for (const edge of this.packed.edges) {
@@ -246,15 +267,18 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
     }
 
     summary() {
-      const packed = this.graph.pack();
+      const packed = this.graph.pack(() => true, {
+        includeDormant: this.graph.minMembers <= 2,
+      });
       return { path: "shared-dab-birth-links", actual_optimizer: "shared-exact-backward-adam", strength: this.strength,
         linked_dabs: packed.linkedCount, edges: packed.edges.length, groups: packed.groups.map(group => group.length),
+        linked_splats_min: this.graph.minMembers, linked_splats_max: this.graph.maxMembers,
         fixed_backcoat_count: this.fixedCount, extra_gradient_passes: this.passes, lineage_readback_bytes: this.readbackBytes, events: this.events };
     }
   }
 
   global.Image2SplatPaintFlowBirthLinks = Object.freeze({
-    selectedPath, initialize, configure,
+    selectedPath, selectedLinkedSplatRange, initialize, configure,
     async create(renderer, params) {
       const [math, Graph] = classicDependencies();
       return new Runtime(renderer, params, math, Graph);
