@@ -734,6 +734,7 @@ function growParamPlaceholders(params, targetCount) {
       flowBirthLinkStrength: params.flowBirthLinkStrength,
       flowLinkedSplatMin: params.flowLinkedSplatMin,
       flowLinkedSplatMax: params.flowLinkedSplatMax,
+      flowStrokeCoherence: params.flowStrokeCoherence || 0,
       flowBackcoatCount: params.flowBackcoatCount,
       flowTrainingSize: params.flowTrainingSize?.slice(),
     } : {}),

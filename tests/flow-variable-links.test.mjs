@@ -23,6 +23,7 @@ async function loadBirthLinks() {
   vm.runInContext(await read("web/training/flow-birth-links.js"), context);
   return context.Image2SplatPaintFlowBirthLinks._test;
 }
+
 const stroke = (random = 0.4) => ({
   start_x: 24, start_y: 40, control_1_x: 36, control_1_y: 28,
   control_2_x: 56, control_2_y: 48, end_x: 72, end_y: 40,
@@ -131,6 +132,19 @@ test("Direction-guided local chains prefer compatible Brush axes", async () => {
     "distant same-layer dabs must remain separate");
 });
 
+test("Linked-stroke learning keeps 0% Baseline weights and increases all structural terms", async () => {
+  const { coherenceWeights } = await loadBirthLinks();
+  const baseline = coherenceWeights(0);
+  assert.equal(baseline.link, .03);
+  assert.equal(baseline.pigment, 10);
+  assert.equal(baseline.tangent, 6);
+  assert.equal(baseline.width, 2);
+  const strong = coherenceWeights(1);
+  for (const key of Object.keys(baseline)) assert.ok(strong[key] > baseline[key], key);
+  for (const key of Object.keys(baseline)) assert.equal(coherenceWeights(-1)[key], baseline[key]);
+  for (const key of Object.keys(strong)) assert.equal(coherenceWeights(2)[key], strong[key]);
+});
+
 test("A full linked stroke starts a sibling curve fragment instead of isolated split dots", async () => {
   const BirthGraph = await loadBirthGraph();
   const graph = new BirthGraph(4, { minMembers: 2, maxMembers: 4 });
@@ -193,11 +207,13 @@ test("P1 backcoat has the same source pigment and full-cell coverage as the fina
   const html = await read("web/index.html");
   assert.match(html, /id="flowLinkedSplatMin"[^>]+value="2"/);
   assert.match(html, /id="flowLinkedSplatMax"[^>]+value="9"/);
+  assert.match(html, /id="flowStrokeCoherence"[^>]+value="50"/);
   assert.match(html, /id="flowInternalBendControlPointCount"[^>]+value="1"/);
   assert.match(html, /id="flowInternalBendControlPointPositions"[^>]+value="50"/);
   assert.doesNotMatch(html, /id="flowSplatFusionVariableLinks"/);
   assert.match(html.match(/<input id="flowSplatBackcoatFromP1"[^>]+>/)[0], /checked/);
   const controls = await read("web/ui/training-controls.js");
   assert.match(controls, /flowLinkedSplatMin.disabled = state.running \|\| !sharedFlow \|\| internalBend/);
+  assert.match(controls, /flowStrokeCoherence.disabled = state.running \|\| !sharedFlow \|\| internalBend/);
   assert.match(controls, /flowInternalBendControlPointCount.disabled = state.running \|\| !internalBend/);
 });

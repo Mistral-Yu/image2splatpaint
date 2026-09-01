@@ -193,6 +193,11 @@ els.flowLinkedSplatMax.addEventListener("change", () => {
   normalizeLinkedSplatRangeUi("max");
   publishState();
 });
+els.flowStrokeCoherence.addEventListener("input", () => {
+  els.flowStrokeCoherence.value = String(Math.max(0, Math.min(100,
+    Number(els.flowStrokeCoherence.value) || 0)));
+  publishState();
+});
 els.flowInternalBendControlPointCount.addEventListener("change", () => {
   normalizeInternalBendControlPointUi({regenerate: true});
   publishState();

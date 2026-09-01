@@ -321,6 +321,8 @@ const els = {
   flowLinkedSplatRange: document.querySelector("#flowLinkedSplatRange"),
   flowLinkedSplatMin: document.querySelector("#flowLinkedSplatMin"),
   flowLinkedSplatMax: document.querySelector("#flowLinkedSplatMax"),
+  flowStrokeCoherenceLabel: document.querySelector("#flowStrokeCoherenceLabel"),
+  flowStrokeCoherence: document.querySelector("#flowStrokeCoherence"),
   flowInternalBendControlPointCountLabel: document.querySelector("#flowInternalBendControlPointCountLabel"),
   flowInternalBendControlPointCount: document.querySelector("#flowInternalBendControlPointCount"),
   flowInternalBendControlPointPositionsLabel: document.querySelector("#flowInternalBendControlPointPositionsLabel"),

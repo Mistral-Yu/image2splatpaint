@@ -25,6 +25,20 @@
     return { min: minimum, max: maximum };
   }
 
+  function selectedStrokeCoherence() {
+    return clampNumber(els.flowStrokeCoherence?.value, 0, 100, 50) / 100;
+  }
+
+  function coherenceWeights(value = 0) {
+    const amount = Math.max(0, Math.min(1, Number(value) || 0));
+    return {
+      link: PAINTERLY_LINK_STRENGTH * (1 + 2 * amount),
+      pigment: PAINTERLY_PIGMENT_WEIGHT * (1 + 0.5 * amount),
+      tangent: PAINTERLY_TANGENT_WEIGHT * (1 + amount),
+      width: PAINTERLY_WIDTH_WEIGHT * (1 + 1.5 * amount),
+    };
+  }
+
   function initialize(image, requestedInitialCount) {
     const maxCount = Math.max(32, Math.round(Number(els.finalSplatCount.value) || 8192));
     const linkedSplats = selectedLinkedSplatRange();
@@ -50,6 +64,7 @@
     params.flowBirthLinkStrength = PAINTERLY_LINK_STRENGTH;
     params.flowLinkedSplatMin = linkedSplats.min;
     params.flowLinkedSplatMax = linkedSplats.max;
+    params.flowStrokeCoherence = selectedStrokeCoherence();
     params.flowBackcoatCount = fixedCount;
     params.flowTrainingSize = [image.width, image.height];
     if (fixedCount) {
@@ -240,6 +255,7 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
       });
       this.fixedCount = params.flowBackcoatCount || 0;
       this.strength = params.flowBirthLinkStrength;
+      this.strokeCoherence = params.flowStrokeCoherence || 0;
       this.dirty = true;
       this.passes = 0;
       this.events = [];
@@ -422,9 +438,10 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
         this.lastDiagnostics = chainDiagnostics(this.graph, this.packed, p, image, this.fixedCount);
         this.dirty = false;
       }
+      const weights = coherenceWeights(this.strokeCoherence);
       r.device.queue.writeBuffer(this.uniform, 0, new Float32Array([
-        (image.width - 1) / 2, (image.height - 1) / 2, params.discreteLayerCount || 8, PAINTERLY_PIGMENT_WEIGHT,
-        params.count, this.strength, PAINTERLY_TANGENT_WEIGHT, PAINTERLY_WIDTH_WEIGHT,
+        (image.width - 1) / 2, (image.height - 1) / 2, params.discreteLayerCount || 8, weights.pigment,
+        params.count, weights.link, weights.tangent, weights.width,
         settings.widthStart, settings.widthEnd, settings.widthTaperEnabled ? 1 : 0, 1 - settings.feather,
       ]));
     }
@@ -469,13 +486,15 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
         linked_dabs: packed.linkedCount, edges: packed.edges.length, groups: packed.groups.map(group => group.length),
         ...(this.lastDiagnostics || {}),
         linked_splats_min: this.graph.minMembers, linked_splats_max: this.graph.maxMembers,
+        stroke_coherence: this.strokeCoherence,
+        coherence_weights: coherenceWeights(this.strokeCoherence),
         fixed_backcoat_count: this.fixedCount, extra_gradient_passes: this.passes, lineage_readback_bytes: this.readbackBytes, events: this.events };
     }
   }
 
   global.Image2SplatPaintFlowBirthLinks = Object.freeze({
-    selectedPath, selectedLinkedSplatRange, initialize, configure,
-    _test: Object.freeze({ localChains, chainDiagnostics }),
+    selectedPath, selectedLinkedSplatRange, selectedStrokeCoherence, initialize, configure,
+    _test: Object.freeze({ localChains, chainDiagnostics, coherenceWeights }),
     async create(renderer, params) {
       const [math, Graph] = classicDependencies();
       return new Runtime(renderer, params, math, Graph);

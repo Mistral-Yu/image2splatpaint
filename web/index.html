@@ -256,6 +256,10 @@
                         <input id="flowLinkedSplatMax" data-testid="flow-linked-splat-max" type="number" min="2" max="9" step="1" value="9" />
                       </label>
                     </div>
+                    <label id="flowStrokeCoherenceLabel" class="field-wide" title="Requires retraining. Strengthens linked Brush Splats' overlap, tangent, width and pigment learning from P1 through P3. It adds no connector Splats and is not a final post-effect. 0% is exactly the current linked-stroke Baseline.">
+                      Linked-stroke learning (%)
+                      <input id="flowStrokeCoherence" data-testid="flow-stroke-coherence" type="number" min="0" max="100" step="5" value="50" />
+                    </label>
                     <label id="flowInternalBendControlPointCountLabel" title="Number of fixed longitudinal control-point positions used by each internal-bend Brush Splat. The per-Splat bend amount remains learned by the shared optimizer.">
                       Internal control points
                       <input id="flowInternalBendControlPointCount" data-testid="flow-internal-bend-control-point-count" type="number" min="1" max="6" step="1" value="1" />
@@ -846,27 +850,27 @@
     <script src="./training/flow-splat-fusion.js?v=curved-brush-controls-v1"></script>
     <script src="./training/brush-support.js?v=balanced-flat-head-v1"></script>
     <script src="./training/flow-birth-graph.js?v=direction-curves-v1"></script>
-    <script src="./training/flow-birth-links.js?v=direction-curves-v1"></script>
+    <script src="./training/flow-birth-links.js?v=linked-stroke-learning-v1"></script>
     <script src="./training/internal-bend.js?v=curved-brush-painterly-v1"></script>
     <script src="./training/internal-bend-trainer.js?v=curved-brush-controls-v1"></script>
     <script src="./training/trainer.js?v=internal-bend-v3"></script>
     <script src="./training/metrics.js?v=app-refactor-v1"></script>
-    <script src="./training/initialization.js?v=curved-brush-controls-v1"></script>
+    <script src="./training/initialization.js?v=linked-stroke-learning-v1"></script>
     <script src="./training/initialization-runtime.js?v=rectangle-orientation-tolerance-v1"></script>
-    <script src="./training/densification.js?v=curved-brush-controls-v1"></script>
+    <script src="./training/densification.js?v=linked-stroke-learning-v1"></script>
     <script src="./training/runtime.js?v=internal-bend-compaction-v1"></script>
     <script src="./core/algorithms.js?v=balanced-flat-head-v1"></script>
-    <script src="./ui/training-controls.js?v=curved-brush-controls-v1"></script>
+    <script src="./ui/training-controls.js?v=linked-stroke-learning-v1"></script>
     <script src="./export/runtime.js?v=curved-brush-controls-v1"></script>
     <script src="./export/actions.js?v=app-refactor-v1"></script>
-    <script src="./ui/status.js?v=rectangle-orientation-degrees-v1"></script>
+    <script src="./ui/status.js?v=linked-stroke-learning-v1"></script>
     <script src="./ui/preview.js?v=flow-splat-fusion-v1"></script>
     <script src="./ui/tilt.js?v=app-refactor-v1"></script>
     <script src="./ui/preview-runtime.js?v=app-refactor-v1"></script>
     <script src="./ui/splat-controls.js?v=internal-bend-v3"></script>
-    <script src="./app.js?v=curved-brush-controls-v1"></script>
+    <script src="./app.js?v=linked-stroke-learning-v1"></script>
     <script src="./ui/bootstrap.js?v=brush-rectangle-flow-surface-v1"></script>
     <script src="./qa/runtime.js?v=curved-brush-painterly-v1"></script>
-    <script src="./ui/controls.js?v=curved-brush-controls-v1"></script>
+    <script src="./ui/controls.js?v=linked-stroke-learning-v1"></script>
   </body>
 </html>

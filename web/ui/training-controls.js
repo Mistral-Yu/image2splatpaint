@@ -122,6 +122,7 @@ function setInputControlsDisabled(disabled) {
     els.flowSplatFusionEdgeAccents,
     els.flowLinkedSplatMin,
     els.flowLinkedSplatMax,
+    els.flowStrokeCoherence,
     els.flowInternalBendControlPointCount,
     els.flowInternalBendControlPointPositions,
     els.flowSplatFusionMovementLimit,
@@ -249,6 +250,8 @@ function syncAlgorithmRequirements() {
   els.flowLinkedSplatRange.classList.toggle("flow-hidden", !sharedFlow || internalBend);
   els.flowLinkedSplatMin.disabled = state.running || !sharedFlow || internalBend;
   els.flowLinkedSplatMax.disabled = state.running || !sharedFlow || internalBend;
+  els.flowStrokeCoherenceLabel.classList.toggle("flow-hidden", !sharedFlow || internalBend);
+  els.flowStrokeCoherence.disabled = state.running || !sharedFlow || internalBend;
   els.flowInternalBendControlPointCountLabel.classList.toggle("flow-hidden", !internalBend);
   els.flowInternalBendControlPointPositionsLabel.classList.toggle("flow-hidden", !internalBend);
   els.flowInternalBendControlPointCount.disabled = state.running || !internalBend;

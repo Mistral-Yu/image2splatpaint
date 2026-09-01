@@ -345,6 +345,7 @@ function publishState() {
   data.currentContributionCompactionWindowInput = String(contributionCompaction.requestedWindowSteps);
   data.currentContributionCompactionEffectiveWindow = String(contributionCompaction.measurementWindowSteps);
   data.blendMode = "standard-alpha";
+  data.flowStrokeCoherenceInput = els.flowStrokeCoherence?.value || "0";
   data.gpuDensifyEnabled = "true";
   data.tileCullingEnabled = String(Boolean(els.tileCullingToggle?.checked));
   data.trainLayerOrderInput = String(Boolean(els.trainLayerOrder?.checked));

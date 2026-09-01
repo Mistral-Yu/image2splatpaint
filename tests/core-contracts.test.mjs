@@ -1192,11 +1192,14 @@ test("Single-Splat internal bend grows the real active count through P1/P2/P3", 
   assert.match(links, /this\.graph\.resetEdges\(trainableRows\)/);
   assert.match(links, /group_size_histogram/);
   assert.match(links, /mean_arc_height_px/);
+  assert.match(links, /flowStrokeCoherence/);
+  assert.match(links, /stroke_coherence/);
+  assert.doesNotMatch(links, /connection_blend|activeThreshold/);
   assert.match(links, /baseMinorScaleByNode\.get\(event\.parent\)/);
   assert.match(links, /train\.colorBuffers\[front\]/);
   assert.match(links, /PAINTERLY_LINK_STRENGTH = 0\.03/);
   assert.match(links, /PAINTERLY_PIGMENT_WEIGHT = 10/);
-  assert.match(links, /PAINTERLY_TANGENT_WEIGHT, PAINTERLY_WIDTH_WEIGHT/);
+  assert.match(links, /weights\.tangent, weights\.width/);
   assert.match(links, /groupBendSign \* this\.baseMinorScaleByNode\.get\(node\)/);
   assert.match(trainer, /front_footprint_refinement_v2/);
   assert.match(trainer, /surfaceLayerSortAtStep/);
