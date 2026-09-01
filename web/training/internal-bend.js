@@ -1,4 +1,5 @@
-// Fixed-count internal bend path; no fusion, growth, split, clone or relocation.
+// Progressive-count internal bend path. The shared density allocator adds
+// independent rows while each row keeps one owned analytic bend footprint.
 (() => {
 const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
 function seeded(seed) {let a=seed>>>0;return ()=>{a=(Math.imul(a,1664525)+1013904223)>>>0;return a/4294967296;};}
@@ -28,25 +29,33 @@ const shader=`struct Frozen{p:vec4<f32>,t:vec4<f32>,c:vec4<f32>};
 @compute @workgroup_size(64) fn restore(@builtin(global_invocation_id) id:vec3<u32>){
 let i=id.x;if(i>=arrayLength(&frozen)){return;}xy[i]=frozen[i].p;transform[i]=frozen[i].t;color[i]=frozen[i].c;}`;
 class FixedCountBendRuntime{
- constructor(renderer,params){this.renderer=renderer;this.count=params.count;this.fixedCount=params.flowBackcoatCount||0;this.frozen=null;if(this.fixedCount){const p=packPositions(params),t=packTransforms(params),c=packColors(params),data=new Float32Array(this.fixedCount*12);for(let i=0;i<this.fixedCount;i++){data.set(p.subarray(i*4,i*4+4),i*12);data.set(t.subarray(i*4,i*4+4),i*12+4);data.set(c.subarray(i*4,i*4+4),i*12+8);}this.frozen=renderer.device.createBuffer({size:data.byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});renderer.device.queue.writeBuffer(this.frozen,0,data);}}
+ constructor(renderer,params){this.renderer=renderer;this.capacity=params.internalBendCapacity||params.count;this.count=params.count;this.fixedCount=params.flowBackcoatCount||0;this.frozen=null;if(this.fixedCount){const p=packPositions(params),t=packTransforms(params),c=packColors(params),data=new Float32Array(this.fixedCount*12);for(let i=0;i<this.fixedCount;i++){data.set(p.subarray(i*4,i*4+4),i*12);data.set(t.subarray(i*4,i*4+4),i*12+4);data.set(c.subarray(i*4,i*4+4),i*12+8);}this.frozen=renderer.device.createBuffer({size:data.byteLength,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});renderer.device.queue.writeBuffer(this.frozen,0,data);}}
  buffers(){return this.frozen?[this.frozen]:[];}
- async prepare(image,p){if(p.count!==this.count)throw Error('Fixed-count bend gate: topology changed');if(!this.frozen||this.pipeline)return;const d=this.renderer.device,module=d.createShaderModule({code:shader});const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==='error');if(errors.length)throw Error(errors.map(m=>m.message).join('\n'));this.pipeline=await d.createComputePipelineAsync({layout:'auto',compute:{module,entryPoint:'restore'}});}
+ async prepare(image,p){if(p.count>this.capacity)throw Error('Internal bend capacity exceeded');this.count=p.count;if(!this.frozen||this.pipeline)return;const d=this.renderer.device,module=d.createShaderModule({code:shader});const errors=(await module.getCompilationInfo()).messages.filter(m=>m.type==='error');if(errors.length)throw Error(errors.map(m=>m.message).join('\n'));this.pipeline=await d.createComputePipelineAsync({layout:'auto',compute:{module,entryPoint:'restore'}});}
  encode(){} // All image gradients go directly to the existing per-Splat Adam.
  restore(encoder,front){if(!this.frozen)return;const r=this.renderer,bind=r.device.createBindGroup({layout:this.pipeline.getBindGroupLayout(0),entries:[this.frozen,r.trainState.xyBuffers[front],r.trainState.transformBuffers[front],r.trainState.colorBuffers[front]].map((buffer,binding)=>({binding,resource:{buffer}}))});const pass=encoder.beginComputePass();pass.setPipeline(this.pipeline);pass.setBindGroup(0,bind);pass.dispatchWorkgroups(Math.ceil(this.fixedCount/64));pass.end();}
  restoreNow(){if(!this.frozen)return;const r=this.renderer,e=r.device.createCommandEncoder();for(let i=0;i<r.trainState.xyBuffers.length;i++)this.restore(e,i);r.device.queue.submit([e.finish()]);}
- grow(){throw Error('Split/clone not implemented: bend-only gate');}
+ grow(oldCount,newCount){if(oldCount!==this.count||newCount>this.capacity)throw Error('Internal bend growth contract changed');this.count=newCount;}
  compact(){throw Error('Pruning not implemented: bend-only gate');}
  relocate(){throw Error('Relocation not implemented: bend-only gate');}
- summary(){return {count:this.count,backcoat:this.fixedCount,fusion:false,edges:0,splits:0,clones:0};}
+ summary(){return {count:this.count,capacity:this.capacity,backcoat:this.fixedCount,fusion:false,edges:0};}
 }
 
 let generation = 0;
-function initializeParams(image, count) {
+function initializeParams(image, count, capacity = count) {
   const rows = initialize(image.rgb, image.width, image.height, count);
+  const safeCapacity = Math.max(count, Math.round(capacity));
+  const catalog = initialize(image.rgb, image.width, image.height, safeCapacity);
+  for (let i = 0; i < rows.length; i++) {
+    rows[i].axis = catalog[i].axis;
+    rows[i].family = catalog[i].family;
+  }
   const p = initLayeredOpaqueBrush(image, count);
   Object.assign(p, {
     internalBendKey: `internal-bend-${++generation}`,
     internalBendShapes: Uint32Array.from(rows.flatMap(row => [row.axis, row.family])),
+    internalBendCapacity: safeCapacity,
+    internalBendCapacityShapes: Uint32Array.from(catalog.flatMap(row => [row.axis, row.family])),
     kernelShape: "opaque-brush", opaqueLayered: true,
     minimumOpacityEnabled: true, minimumOpacity: .995, maximumOpacity: .995,
     brushWidthTaperEnabled: true, brushWidthTaperStart: 1, brushWidthTaperEnd: 1,
@@ -76,12 +85,24 @@ function rowAt(p, i, sx = p.scale[i * 2], sy = p.scale[i * 2 + 1]) {
 }
 
 function createSession(params) {
-  const rows = Array.from({length: params.count}, (_, i) => rowAt(params, i));
+  const shapes = params.internalBendCapacityShapes || params.internalBendShapes;
+  const rows = Array.from({length: shapes.length / 2}, (_, i) => ({axis: shapes[i * 2], family: shapes[i * 2 + 1]}));
   return new Image2SplatPaintInternalBendKernel.OwnedHostSession(rows, {
-    kernel: "owned-brush-v2", fixedCount: true, virtual: false, split: false, clone: false,
+    kernel: "owned-brush-v2", fixedCount: false, virtual: false, split: true, clone: true,
     fusion: false, directionalTaper: false, opacityGradientMin: 1, opacityGradientMax: 1,
     centerOpacityMin: 1, centerOpacityMax: 1, feather: .18, coarseLoss: false,
   }, {storageUsage: GPUBufferUsage.STORAGE});
+}
+
+function growParams(params, targetCount) {
+  const capacity = params.internalBendCapacity || params.count;
+  if (targetCount <= params.count || targetCount > capacity) throw Error("Invalid internal bend growth target");
+  const next = growParamPlaceholders(params, targetCount);
+  next.internalBendKey = params.internalBendKey;
+  next.internalBendCapacity = capacity;
+  next.internalBendCapacityShapes = params.internalBendCapacityShapes;
+  next.internalBendShapes = params.internalBendCapacityShapes.slice(0, targetCount * 2);
+  return next;
 }
 
 function extent(params, index, sx, sy) {
@@ -89,5 +110,5 @@ function extent(params, index, sx, sy) {
 }
 
 globalThis.Image2SplatPaintInternalBend = Object.freeze({initializeRows: initialize, initialize: initializeParams,
-  FixedCountBendRuntime, createSession, extent});
+  growParams, FixedCountBendRuntime, createSession, extent});
 })();

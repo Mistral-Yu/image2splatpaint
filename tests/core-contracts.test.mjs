@@ -1086,3 +1086,27 @@ test("compaction WGSL factories preserve generated source fingerprints", async (
     "a88c9daca1327bb375968105080619c0fbe177270f218ebeda52639c431e6e3b",
   );
 });
+
+test("Single-Splat internal bend grows the real active count through P1/P2/P3", async () => {
+  const context = vm.createContext({ Map, Math, Object });
+  vm.runInContext(
+    await readFile(new URL("../web/training/internal-bend-trainer.js", import.meta.url), "utf8"),
+    context,
+  );
+  const schedule = context.buildInternalBendGrowthSchedule(3000, 128, 8192);
+  assert.equal(schedule.horizonStep, 2700);
+  assert.equal(schedule.events[0].step, 100);
+  assert.ok(schedule.events[0].targetCount > 128);
+  assert.ok(schedule.events[0].targetCount < 8192);
+  assert.equal(schedule.events.at(-1).targetCount, 8192);
+  assert.equal(schedule.events.at(-1).terminal, true);
+  assert.ok(schedule.events.every((event, index) => (
+    index === 0 || event.targetCount >= schedule.events[index - 1].targetCount
+  )));
+
+  const runtime = await readFile(new URL("../web/training/internal-bend.js", import.meta.url), "utf8");
+  const controls = await readFile(new URL("../web/ui/training-controls.js", import.meta.url), "utf8");
+  assert.match(runtime, /growParamPlaceholders\(params, targetCount\)/);
+  assert.match(runtime, /internalBendCapacityShapes\.slice\(0, targetCount \* 2\)/);
+  assert.doesNotMatch(controls, /state\.running \|\| internalBend \|\|/);
+});

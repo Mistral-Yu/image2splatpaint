@@ -1,6 +1,45 @@
-// Fixed topology orchestration for the opt-in analytic bend kernel. Each call
-// below is one real update of the existing shared WebGPU optimizer, not Flow's
+// Progressive active-count orchestration for the opt-in analytic bend kernel.
+// Each call below is one real update of the shared WebGPU optimizer, not Flow's
 // 10-step schedule stride. No source curves or secondary optimizer are used.
+const INTERNAL_BEND_GROWTH_INTERVAL = 100;
+const INTERNAL_BEND_GROWTH_APPLY_UNTIL = 0.90;
+const INTERNAL_BEND_PHASE_GROWTH_SHARES = Object.freeze([0.20, 0.40, 0.40]);
+
+function buildInternalBendGrowthSchedule(steps, initialCount, finalCount) {
+  const safeSteps = Math.max(1, Math.round(steps));
+  const start = Math.max(1, Math.min(finalCount, Math.round(initialCount)));
+  const finish = Math.max(start, Math.round(finalCount));
+  if (start >= finish) return {events: [], horizonStep: 0, initialCount: start, finalCount: finish};
+  const horizonStep = Math.max(1, Math.round(safeSteps * INTERNAL_BEND_GROWTH_APPLY_UNTIL));
+  const boundaries = [
+    Math.max(1, Math.round(safeSteps / 3)),
+    Math.max(1, Math.round(safeSteps * 2 / 3)),
+    horizonStep,
+  ].map((step) => Math.min(horizonStep, step));
+  const due = new Set(boundaries);
+  for (let step = INTERNAL_BEND_GROWTH_INTERVAL; step <= horizonStep; step += INTERNAL_BEND_GROWTH_INTERVAL) {
+    due.add(step);
+  }
+  due.add(horizonStep);
+  const cumulative = [0, INTERNAL_BEND_PHASE_GROWTH_SHARES[0],
+    INTERNAL_BEND_PHASE_GROWTH_SHARES[0] + INTERNAL_BEND_PHASE_GROWTH_SHARES[1], 1];
+  const edges = [0, ...boundaries];
+  const events = [...due].filter((step) => step > 0).sort((a, b) => a - b).map((step) => {
+    let segment = edges.length - 2;
+    for (let i = 0; i < edges.length - 1; i += 1) {
+      if (step <= edges[i + 1]) { segment = i; break; }
+    }
+    const span = Math.max(1, edges[segment + 1] - edges[segment]);
+    const local = Math.max(0, Math.min(1, (step - edges[segment]) / span));
+    const progress = cumulative[segment] + (cumulative[segment + 1] - cumulative[segment]) * local;
+    const targetCount = step >= horizonStep
+      ? finish
+      : Math.max(start, Math.min(finish, Math.round(start + (finish - start) * progress)));
+    return {step, targetCount, phase: segment + 1, terminal: step >= horizonStep};
+  });
+  return {events, horizonStep, initialCount: start, finalCount: finish};
+}
+
 async function trainInternalBend(run) {
   assertTrainingRun(run);
   if (!state.image || state.running) return;
@@ -18,10 +57,19 @@ async function trainInternalBend(run) {
   assertTrainingRun(run);
   syncTrainSizeUi();
   clearSafetyStop();
-  const count = normalizeUiSplatCount(els.finalSplatCount.value, DEFAULT_FINAL_SPLATS, 14000);
-  const failure = safetyFailure(computeBudgetFor(Number(els.trainSize.value), count, steps), "start");
+  const finalCount = normalizeUiSplatCount(els.finalSplatCount.value, DEFAULT_FINAL_SPLATS, 14000);
+  const initialCount = Math.min(finalCount, normalizeUiSplatCount(
+    els.initialSplatCount.value,
+    DEFAULT_INITIAL_SPLATS,
+    finalCount,
+  ));
+  els.initialSplatCount.value = String(initialCount);
+  els.finalSplatCount.value = String(finalCount);
+  const failure = safetyFailure(computeBudgetFor(Number(els.trainSize.value), finalCount, steps), "start");
   if (failure) {setSafetyStop(failure); throw Error(`Internal bend safety guard: ${failure.reason}`);}
-  const params = Image2SplatPaintInternalBend.initialize(state.image, count);
+  let params = Image2SplatPaintInternalBend.initialize(state.image, initialCount, finalCount);
+  const growthSchedule = buildInternalBendGrowthSchedule(steps, initialCount, finalCount);
+  const growthByStep = new Map(growthSchedule.events.map((event) => [event.step, event]));
   const learningRates = {...selectedLearningRates(), opacity: 0};
   const previewRefresh = selectedPreviewRefresh();
   const periodicMetrics = periodicTrainingEvaluationEnabled();
@@ -29,14 +77,19 @@ async function trainInternalBend(run) {
     state.recommendation?.metricInterval || Math.floor(steps / 60)));
   const metrics = {
     algorithm: FLOW_SPLAT_FUSION_ALGORITHM_ID, flow_training_path: "internal-bend",
-    backend: "webgpu", steps_requested: steps, steps_done: 0, num_gaussians: count,
-    initial_splats: count, final_splats: count, initial_param_snapshot: snapshotParams(params),
+    backend: "webgpu", steps_requested: steps, steps_done: 0, num_gaussians: initialCount,
+    initial_splats: initialCount, final_splats: finalCount, initial_param_snapshot: snapshotParams(params),
     started_at: new Date().toISOString(), stopped: false, params_revision: 0,
     preview_frames: 0, preview_refresh: previewRefresh, tile_retry_steps: 0,
     initial_ssim: null, initial_global_ssim: null, initial_psnr: null,
     fusion_events: emptyFusionEvents(), learning_rates: learningRates,
-    internal_bend: {version: 2, fixed_count: count, backcoat: params.flowBackcoatCount,
-      layer_shares: [20, 40, 40], seed: 20260831, fusion: false, split: false, clone: false},
+    density_gpu_ms: 0, densify_events: [],
+    growth_schedule: {mode: "internal-bend-progressive", interval: INTERNAL_BEND_GROWTH_INTERVAL,
+      apply_until: INTERNAL_BEND_GROWTH_APPLY_UNTIL, phase_shares: [20, 40, 40],
+      event_steps: growthSchedule.events.map((event) => event.step), cap_reached_step: initialCount >= finalCount ? 0 : null},
+    internal_bend: {version: 3, fixed_count: false, progressive_count: true,
+      initial_count: initialCount, max_count: finalCount, backcoat: params.flowBackcoatCount,
+      phase_growth_shares: [20, 40, 40], seed: 20260831, fusion: false},
     gpu_training_memory: {peak_active_bytes: 0, peak_reserved_bytes: 0},
   };
   for (const key of ["losses", "rgb_mse", "psnr", "alpha_losses", "alpha_ssim", "objective_losses",
@@ -71,7 +124,7 @@ async function trainInternalBend(run) {
     // tile bounds. Alternative gradient backends have not passed this gate.
     renderer.configureExperimentalPerformance({...performanceVariants(),
       shapeAwarePaintCulling: true, segmentedExactBackward: false, fixedPointExactGradient: false});
-    await awaitTrainingRun(run, renderer.uploadTrainState(state.image, params, count));
+    await awaitTrainingRun(run, renderer.uploadTrainState(state.image, params, finalCount));
     await awaitTrainingRun(run, renderer.prepareFlowBirthLinks(state.image, params));
     await updatePreview(0, false, {}, run);
     metrics.initial_ssim = metrics.latest_ssim;
@@ -81,6 +134,38 @@ async function trainInternalBend(run) {
     for (let step = 1; step <= steps && !state.stopRequested;) {
       while (state.paused && !state.stopRequested) await awaitTrainingRun(run, nextFrame());
       if (state.stopRequested) break;
+      const growthEvent = growthByStep.get(step);
+      if (growthEvent?.targetCount > params.count) {
+        const before = params.count;
+        const growthStarted = performance.now();
+        await refreshTrainingResidualSignal(step, "internal-bend-growth", run);
+        const growth = await awaitTrainingRun(run, renderer.growExperimentalGpu(
+          state.image,
+          params,
+          growthEvent.targetCount,
+          step,
+          steps,
+          {forceZeroMassFallback: growthEvent.terminal},
+        ));
+        const gpuMs = performance.now() - growthStarted;
+        metrics.density_gpu_ms += gpuMs;
+        if (!growth) throw Error("Internal bend GPU growth failed");
+        if (growth.grown) {
+          params = Image2SplatPaintInternalBend.growParams(params, growth.count);
+          state.params = params;
+          updateTrainingRunOwnership(run, {params});
+          metrics.num_gaussians = params.count;
+          if (params.count >= finalCount && metrics.growth_schedule.cap_reached_step === null) {
+            metrics.growth_schedule.cap_reached_step = step;
+          }
+          setTrainingMessage(`Training internal bend: P${growthEvent.phase}, ${params.count.toLocaleString()} / ${finalCount.toLocaleString()} Splats...`);
+        }
+        metrics.densify_events.push({step, phase: growthEvent.phase, count_before: before,
+          requested_count: growthEvent.targetCount, actual_count: params.count,
+          added: params.count - before, terminal: growthEvent.terminal,
+          candidate_mass: Number.isFinite(growth.candidateMass) ? growth.candidateMass : null,
+          zero_mass_fallback: Boolean(growth.zeroMassFallback), gpu_ms: gpuMs});
+      }
       const started = performance.now();
       await awaitTrainingRun(run, renderer.trainStepRenderGradientGpu(state.image, params, learningRates,
         {sync: true, currentStepOverride: step, suppressSgldNoise: true}));
@@ -109,6 +194,11 @@ async function trainInternalBend(run) {
       step += 1;
     }
     metrics.stopped = state.stopRequested;
+    if (!metrics.stopped && params.count !== finalCount) {
+      throw Error(`Internal bend growth did not reach Max splats: ${params.count} / ${finalCount}`);
+    }
+    metrics.final_splats = params.count;
+    metrics.internal_bend.final_count = params.count;
     state.previewMode = "splats";
     updatePreviewModeControls();
     setStatus("finalizing");

@@ -170,7 +170,7 @@
                 <div class="lr-body">
                   <p id="flowSplatFusionPanelNote" class="local-flow-paint-note">Choose linked Brush dabs with growth, or an experimental single Splat with a learned internal bend. The coverage backcoat is protected.</p>
                   <div class="training-grid">
-                    <label class="field-wide" title="Shared dabs learn position, size and rotation with the common Brush optimizer. Split/clone ancestry retains 3–9-dab links; unrelated residual births stay independent. Single-Splat internal bend keeps a fixed count and learns curvature inside each Splat.">
+                    <label class="field-wide" title="Shared dabs learn position, size and rotation with the common Brush optimizer. Split/clone ancestry retains 3–9-dab links; unrelated residual births stay independent. Single-Splat internal bend grows from Initial to Max while learning curvature inside each Splat.">
                       Training path
                       <select id="flowTrainingPath">
                         <option value="birth-linked" selected>Shared dabs + birth links</option>
@@ -814,44 +814,44 @@
     <script src="./gpu/memory.js?v=app-refactor-v1"></script>
     <script src="./gpu/shaders/tile-pipeline.js?v=deep-refactor-v1"></script>
     <script src="./gpu/shaders/optimizer-reset.js?v=deep-refactor-v1"></script>
-    <script src="./gpu/shaders/training-pipelines.js?v=internal-bend-v2"></script>
+    <script src="./gpu/shaders/training-pipelines.js?v=internal-bend-v3"></script>
     <script src="./gpu/shaders/preview-pipelines.js?v=deep-refactor-v1"></script>
     <script src="./gpu/shaders/metric-pipelines.js?v=deep-refactor-v1"></script>
-    <script src="./gpu/shaders/density-pipelines.js?v=internal-bend-v2"></script>
+    <script src="./gpu/shaders/density-pipelines.js?v=internal-bend-v3"></script>
     <script src="./gpu/shaders/compaction-pipelines.js?v=deep-refactor-v1"></script>
-    <script src="./gpu/internal-bend-kernel.js?v=internal-bend-v2"></script>
-    <script src="./gpu/renderer.js?v=internal-bend-v2"></script>
+    <script src="./gpu/internal-bend-kernel.js?v=internal-bend-v3"></script>
+    <script src="./gpu/renderer.js?v=internal-bend-v3"></script>
     <script src="./gpu/runtime.js?v=app-refactor-v1"></script>
-    <script src="./gpu/tile-pipelines.js?v=internal-bend-v2"></script>
+    <script src="./gpu/tile-pipelines.js?v=internal-bend-v3"></script>
     <script src="./gpu/tile-runtime.js?v=app-refactor-v1"></script>
-    <script src="./gpu/optimizer-runtime.js?v=internal-bend-v2"></script>
+    <script src="./gpu/optimizer-runtime.js?v=internal-bend-v3"></script>
     <script src="./training/flow-paint-reference.js?v=flow-adaptive-recognition-v1"></script>
     <script src="./training/flow-ribbon-trainer.js?v=flow-adaptive-recognition-v1"></script>
     <script src="./training/flow-stroke-topology.js?v=flow-adaptive-recognition-v1"></script>
-    <script src="./training/flow-splat-fusion.js?v=internal-bend-v2"></script>
-    <script src="./training/brush-support.js?v=internal-bend-v2"></script>
-    <script src="./training/flow-birth-graph.js?v=internal-bend-v2"></script>
-    <script src="./training/flow-birth-links.js?v=internal-bend-v2"></script>
-    <script src="./training/internal-bend.js?v=internal-bend-v2"></script>
-    <script src="./training/internal-bend-trainer.js?v=internal-bend-v2"></script>
-    <script src="./training/trainer.js?v=internal-bend-v2"></script>
+    <script src="./training/flow-splat-fusion.js?v=internal-bend-v3"></script>
+    <script src="./training/brush-support.js?v=internal-bend-v3"></script>
+    <script src="./training/flow-birth-graph.js?v=internal-bend-v3"></script>
+    <script src="./training/flow-birth-links.js?v=internal-bend-v3"></script>
+    <script src="./training/internal-bend.js?v=internal-bend-v3"></script>
+    <script src="./training/internal-bend-trainer.js?v=internal-bend-v3"></script>
+    <script src="./training/trainer.js?v=internal-bend-v3"></script>
     <script src="./training/metrics.js?v=app-refactor-v1"></script>
-    <script src="./training/initialization.js?v=internal-bend-v2"></script>
+    <script src="./training/initialization.js?v=internal-bend-v3"></script>
     <script src="./training/initialization-runtime.js?v=rectangle-orientation-tolerance-v1"></script>
-    <script src="./training/densification.js?v=internal-bend-v2"></script>
+    <script src="./training/densification.js?v=internal-bend-v3"></script>
     <script src="./training/runtime.js?v=app-refactor-v1"></script>
-    <script src="./core/algorithms.js?v=internal-bend-v2"></script>
-    <script src="./ui/training-controls.js?v=internal-bend-v2"></script>
-    <script src="./export/runtime.js?v=internal-bend-v2"></script>
+    <script src="./core/algorithms.js?v=internal-bend-v3"></script>
+    <script src="./ui/training-controls.js?v=internal-bend-v3"></script>
+    <script src="./export/runtime.js?v=internal-bend-v3"></script>
     <script src="./export/actions.js?v=app-refactor-v1"></script>
     <script src="./ui/status.js?v=rectangle-orientation-degrees-v1"></script>
     <script src="./ui/preview.js?v=flow-splat-fusion-v1"></script>
     <script src="./ui/tilt.js?v=app-refactor-v1"></script>
     <script src="./ui/preview-runtime.js?v=app-refactor-v1"></script>
-    <script src="./ui/splat-controls.js?v=internal-bend-v2"></script>
-    <script src="./app.js?v=internal-bend-v2"></script>
+    <script src="./ui/splat-controls.js?v=internal-bend-v3"></script>
+    <script src="./app.js?v=internal-bend-v3"></script>
     <script src="./ui/bootstrap.js?v=brush-rectangle-flow-surface-v1"></script>
     <script src="./qa/runtime.js?v=unified-flow-chain-v1"></script>
-    <script src="./ui/controls.js?v=internal-bend-v2"></script>
+    <script src="./ui/controls.js?v=internal-bend-v3"></script>
   </body>
 </html>

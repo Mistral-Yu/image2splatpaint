@@ -169,18 +169,22 @@ function adaptTileShader(source) {
 }
 
 // Immutable per-Splat axis/family metadata, shared by training and preview.
+function assertOwnedShape(row) {
+  if(![0,1].includes(row?.axis)||![0,1,2].includes(row?.family))throw Error('Missing owned axis/family');
+}
+
 class OwnedMetadata {
   #rows; #buffer=null; #disposed=false;
   constructor(rows) {
     if(!rows.length)throw Error('Empty owned shape session');
-    this.#rows=rows.map(row=>{assertRow(row);return Object.freeze({axis:row.axis,family:row.family});});
+    this.#rows=rows.map(row=>{assertOwnedShape(row);return Object.freeze({axis:row.axis,family:row.family});});
   }
   get count(){return this.#rows.length;}
   assertCompatible(rows) {
     if(this.#disposed)throw Error('Owned metadata disposed; fresh session required');
-    if(rows.length!==this.count)throw Error('Split / clone / compaction not enabled in fixed-count gate');
+    if(rows.length>this.count)throw Error('Owned metadata capacity exceeded');
     rows.forEach((row,i)=>{
-      assertRow(row);
+      assertOwnedShape(row);
       if(row.axis!==this.#rows[i].axis||row.family!==this.#rows[i].family)throw Error('Owned shape changed');
     });
   }
@@ -210,7 +214,7 @@ class OwnedMetadata {
 // Deliberately narrower than product controls: same sRGB/alpha contract and no
 // silently ignored opacity/taper/depth/shape modes. Call before generating shaders.
 function assertFixtureContract(config) {
-  const expected={kernel:'owned-brush-v2',fixedCount:true,virtual:false,split:false,clone:false,
+  const expected={kernel:'owned-brush-v2',fixedCount:false,virtual:false,split:true,clone:true,
     fusion:false,directionalTaper:false,opacityGradientMin:1,opacityGradientMax:1,
     centerOpacityMin:1,centerOpacityMax:1,feather:.18,coarseLoss:false};
   for(const [key,value] of Object.entries(expected))if(config[key]!==value)throw Error(`Unsupported owned fixture config: ${key}`);
@@ -250,7 +254,7 @@ class OwnedHostSession {
     if(this.#closed||this.#closing||!renderer||renderer!==this.#renderer)
       throw Error('Owned session not live on this renderer');
     for(const value of [renderer.trainState,renderer.resultRenderState])
-      if(value&&value.count!==this.count)throw Error('Owned fixed-count session changed count');
+      if(value&&value.count>this.count)throw Error('Owned metadata capacity exceeded');
     return renderer;
   }
   assertRows(rows){this.#live();this.#metadata.assertCompatible(rows);}

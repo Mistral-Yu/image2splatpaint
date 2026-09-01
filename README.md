@@ -76,7 +76,8 @@ Neither public path traces source curves. `Backcoat size variation` defaults to
 40%; 0% uses uniform cells.
 
 `Single-Splat internal bend (experimental)` instead learns a curve inside each
-Splat at a fixed count, with 20/40/40 layers and no fusion or density changes.
+Splat. It starts at `Initial splats` and progressively grows the active GPU set
+to `Max splats` while preserving existing optimizer history.
 
 The selector configures the next run. Once a result exists, Export eligibility
 and Tilt availability stay bound to that completed result until Reset, Clear,

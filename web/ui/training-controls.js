@@ -166,18 +166,18 @@ function syncAlgorithmRequirements() {
   els.flowSplatFusionPanelSummary.textContent = "Flow Brush Fusion settings";
   els.flowSplatFusionPanelNote.textContent =
     internalBend
-      ? "Experimental: one independently curved Brush Splat per row. Max splats is a fixed count; layers are 20/40/40 with a protected 20% backcoat. Position, scale, rotation, RGB and internal bend learn on the shared WebGPU optimizer. Iterations are actual updates. No fusion, split, clone or pruning. Training opacity is fixed at 0.995 and aspect limits at 1–8; curve width/backcoat controls do not apply. Splats-tab opacity, size, aspect and order effects still change the preview and PNG."
+      ? "Experimental: one independently curved Brush Splat per row. Training starts at Initial splats and grows to Max splats through P1/P2/P3 using the shared residual/structure allocator. Position, scale, rotation, RGB and internal bend learn on the shared WebGPU optimizer. Training opacity is fixed at 0.995 and aspect limits at 1–8; curve width/backcoat controls do not apply. Splats-tab opacity, size, aspect and order effects still change the preview and PNG."
       : sharedFlow
       ? "Each Brush dab learns position, scale and rotation. Accepted split/clone ancestry keeps soft 3–9-dab links; independent births remain free. Use Shared training and Brush dab settings below. The protected backcoat starts in P1, in addition to Initial splats and within Max splats. Iterations counts actual optimizer updates."
       : "Layered curved Brush Splats with an opaque interior and feathered edges. Edge-guided fine strokes are off by default. Use eight dabs per curve or try variable 3–9 links. Training grows, moves, splits, and merges strokes. Backcoat from P1 is on by default to fill the canvas early, but can reduce final detail quality.";
-  els.initialSplatCount.closest("label").classList.toggle("flow-hidden", internalBend || (flowSelected && !sharedFlow));
+  els.initialSplatCount.closest("label").classList.toggle("flow-hidden", flowSelected && !sharedFlow);
   els.initialSplatCountLabel.textContent = "Initial splats";
   els.finalSplatCountLabel.textContent = "Max splats";
   els.initialSplatCount.closest("label").title = sharedFlow
     ? "Initial trainable Brush dabs, in addition to the protected backcoat, within Max splats."
     : "Number of splats created before the first training iteration.";
   els.finalSplatCount.closest("label").title = internalBend
-    ? "Fixed physical Splat count including the 20% protected backcoat. One Splat owns one internal bend."
+    ? "Final physical Splat count. Active rows grow progressively from Initial splats; one Splat owns one internal bend."
     : sharedFlow
     ? "Total Splat budget, including the protected backcoat and trainable Brush dabs."
     : flowSelected
@@ -260,7 +260,7 @@ function syncAlgorithmRequirements() {
     els.layerAwareAccumulation.checked = true;
     els.discreteLayers.checked = true;
   }
-  els.initialSplatCount.disabled = state.running || internalBend || (flowSelected && !sharedFlow);
+  els.initialSplatCount.disabled = state.running || (flowSelected && !sharedFlow);
   els.flowTrainingPath.disabled = state.running || !flowSelected;
   for (const control of [els.flowSplatFusionStrokeTexture, els.flowSplatFusionStrokeOptimization,
     els.flowSplatFusionScaleMatchedResidualRepaint, els.flowSplatFusionPaintCurriculum,
