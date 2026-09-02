@@ -260,6 +260,32 @@
                       Linked-stroke learning (%)
                       <input id="flowStrokeCoherence" data-testid="flow-stroke-coherence" type="number" min="0" max="100" step="5" value="50" />
                     </label>
+                    <div id="flowStrokeWidthProfile" class="paired-setting-row field-wide" role="group" aria-labelledby="flowStrokeWidthProfileHeading">
+                      <span id="flowStrokeWidthProfileHeading" class="paired-setting-heading">Linked-stroke width profile</span>
+                      <label title="Target width of the two end Splats relative to their inherited Brush width. Requires retraining.">
+                        Ends (%)
+                        <input id="flowStrokeEndWidth" data-testid="flow-stroke-end-width" type="number" min="25" max="200" step="5" value="75" />
+                      </label>
+                      <label title="Target width of the central Splat relative to its inherited Brush width. Values above the ends create a pressure-shaped stroke body. Requires retraining.">
+                        Center (%)
+                        <input id="flowStrokeCenterWidth" data-testid="flow-stroke-center-width" type="number" min="50" max="300" step="5" value="160" />
+                      </label>
+                    </div>
+                    <label id="flowAlternatingStructureUpdatesLabel" class="inline-option field-wide" title="Requires retraining. Experimental: interleaves ordinary image optimization with geometry-focused updates. Geometry-focused updates keep a weak image anchor while emphasizing linked position, scale, rotation, bend and width learning. RGB, opacity and depth stay frozen; normal growth evidence and cadence are retained.">
+                      <input id="flowAlternatingStructureUpdates" data-testid="flow-alternating-structure-updates" type="checkbox" checked />
+                      Alternating stroke-structure updates (experimental)
+                    </label>
+                    <div id="flowStructureUpdateSettings" class="paired-setting-row field-wide" role="group" aria-labelledby="flowStructureUpdateSettingsHeading">
+                      <span id="flowStructureUpdateSettingsHeading" class="paired-setting-heading">Structure-focused update</span>
+                      <label title="Base interval in P1. P2 uses one extra ordinary update and P3 uses five extra ordinary updates; the final 10% is ordinary optimization only.">
+                        Interval
+                        <input id="flowStructureUpdateInterval" data-testid="flow-structure-update-interval" type="number" min="2" max="20" step="1" value="3" />
+                      </label>
+                      <label title="Share of the ordinary image geometry gradient retained during a structure-focused update. RGB, opacity and depth remain frozen while growth evidence stays active.">
+                        Image anchor (%)
+                        <input id="flowStructureImageAnchor" data-testid="flow-structure-image-anchor" type="number" min="0" max="100" step="5" value="25" />
+                      </label>
+                    </div>
                     <label id="flowInternalBendControlPointCountLabel" title="Number of fixed longitudinal control-point positions used by each internal-bend Brush Splat. The per-Splat bend amount remains learned by the shared optimizer.">
                       Internal control points
                       <input id="flowInternalBendControlPointCount" data-testid="flow-internal-bend-control-point-count" type="number" min="1" max="6" step="1" value="1" />
@@ -843,34 +869,34 @@
     <script src="./gpu/runtime.js?v=app-refactor-v1"></script>
     <script src="./gpu/tile-pipelines.js?v=internal-bend-v3"></script>
     <script src="./gpu/tile-runtime.js?v=app-refactor-v1"></script>
-    <script src="./gpu/optimizer-runtime.js?v=internal-bend-v3"></script>
+    <script src="./gpu/optimizer-runtime.js?v=alternating-stroke-structure-v1"></script>
     <script src="./training/flow-paint-reference.js?v=flow-adaptive-recognition-v1"></script>
     <script src="./training/flow-ribbon-trainer.js?v=curved-brush-controls-v1"></script>
     <script src="./training/flow-stroke-topology.js?v=flow-adaptive-recognition-v1"></script>
     <script src="./training/flow-splat-fusion.js?v=curved-brush-controls-v1"></script>
-    <script src="./training/brush-support.js?v=curved-underpaint-v1"></script>
+    <script src="./training/brush-support.js?v=alternating-stroke-structure-v1"></script>
     <script src="./training/flow-birth-graph.js?v=direction-curves-v1"></script>
-    <script src="./training/flow-birth-links.js?v=curved-underpaint-v1"></script>
+    <script src="./training/flow-birth-links.js?v=alternating-stroke-structure-v1"></script>
     <script src="./training/internal-bend.js?v=curved-brush-painterly-v1"></script>
     <script src="./training/internal-bend-trainer.js?v=curved-brush-controls-v1"></script>
-    <script src="./training/trainer.js?v=internal-bend-v3"></script>
+    <script src="./training/trainer.js?v=alternating-stroke-structure-v1"></script>
     <script src="./training/metrics.js?v=app-refactor-v1"></script>
-    <script src="./training/initialization.js?v=curved-underpaint-v1"></script>
+    <script src="./training/initialization.js?v=alternating-stroke-structure-v1"></script>
     <script src="./training/initialization-runtime.js?v=rectangle-orientation-tolerance-v1"></script>
-    <script src="./training/densification.js?v=curved-underpaint-v1"></script>
+    <script src="./training/densification.js?v=alternating-stroke-structure-v1"></script>
     <script src="./training/runtime.js?v=internal-bend-compaction-v1"></script>
     <script src="./core/algorithms.js?v=balanced-flat-head-v1"></script>
-    <script src="./ui/training-controls.js?v=curved-underpaint-v1"></script>
+    <script src="./ui/training-controls.js?v=alternating-stroke-structure-v1"></script>
     <script src="./export/runtime.js?v=curved-brush-controls-v1"></script>
     <script src="./export/actions.js?v=app-refactor-v1"></script>
-    <script src="./ui/status.js?v=linked-stroke-learning-v1"></script>
+    <script src="./ui/status.js?v=alternating-stroke-structure-v1"></script>
     <script src="./ui/preview.js?v=flow-splat-fusion-v1"></script>
     <script src="./ui/tilt.js?v=app-refactor-v1"></script>
     <script src="./ui/preview-runtime.js?v=app-refactor-v1"></script>
     <script src="./ui/splat-controls.js?v=internal-bend-v3"></script>
-    <script src="./app.js?v=linked-stroke-learning-v1"></script>
+    <script src="./app.js?v=alternating-stroke-structure-v1"></script>
     <script src="./ui/bootstrap.js?v=brush-rectangle-flow-surface-v1"></script>
     <script src="./qa/runtime.js?v=curved-brush-painterly-v1"></script>
-    <script src="./ui/controls.js?v=linked-stroke-learning-v1"></script>
+    <script src="./ui/controls.js?v=alternating-stroke-structure-v1"></script>
   </body>
 </html>

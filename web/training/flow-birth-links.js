@@ -30,6 +30,38 @@
     return clampNumber(els.flowStrokeCoherence?.value, 0, 100, 50) / 100;
   }
 
+  function selectedStructureSettings() {
+    return Object.freeze({
+      enabled: Boolean(els.flowAlternatingStructureUpdates?.checked),
+      interval: Math.round(clampNumber(els.flowStructureUpdateInterval?.value, 2, 20, 3)),
+      imageAnchor: clampNumber(els.flowStructureImageAnchor?.value, 0, 100, 25) / 100,
+      endWidth: clampNumber(els.flowStrokeEndWidth?.value, 25, 200, 75) / 100,
+      centerWidth: clampNumber(els.flowStrokeCenterWidth?.value, 50, 300, 160) / 100,
+    });
+  }
+
+  function structureUpdateSpec(step, steps, params, stage = "full") {
+    const enabled = Boolean(params?.flowAlternatingStructureEnabled && !params?.internalBendKey);
+    const current = Math.max(1, Math.round(Number(step) || 1));
+    const total = Math.max(1, Math.round(Number(steps) || 1));
+    const baseInterval = Math.max(2, Math.min(20, Math.round(
+      Number(params?.flowStructureUpdateInterval) || 3,
+    )));
+    const interval = stage === "coarse"
+      ? baseInterval
+      : stage === "mid"
+        ? Math.min(20, baseInterval + 1)
+        : Math.min(20, baseInterval + 5);
+    const beforeFinalSettle = current <= Math.floor(total * 0.9);
+    return Object.freeze({
+      enabled,
+      focus: enabled && beforeFinalSettle && current % interval === 0,
+      interval,
+      imageAnchor: Math.max(0, Math.min(1, Number(params?.flowStructureImageAnchor) || 0)),
+      stage,
+    });
+  }
+
   function coherenceWeights(value = 0) {
     const amount = Math.max(0, Math.min(1, Number(value) || 0));
     return {
@@ -103,6 +135,7 @@
   function initialize(image, requestedInitialCount) {
     const maxCount = Math.max(32, Math.round(Number(els.finalSplatCount.value) || 8192));
     const linkedSplats = selectedLinkedSplatRange();
+    const structureSettings = selectedStructureSettings();
     const enabled = Boolean(els.flowSplatUnderpainting.checked);
     const share = clampNumber(els.flowSplatUnderpaintPercent.value, 0, 50, 10) / 100;
     const underpaint = splitUnderpaintBudget(enabled, maxCount, share, linkedSplats.min);
@@ -127,6 +160,11 @@
     params.flowLinkedSplatMin = linkedSplats.min;
     params.flowLinkedSplatMax = linkedSplats.max;
     params.flowStrokeCoherence = selectedStrokeCoherence();
+    params.flowAlternatingStructureEnabled = structureSettings.enabled;
+    params.flowStructureUpdateInterval = structureSettings.interval;
+    params.flowStructureImageAnchor = structureSettings.imageAnchor;
+    params.flowStrokeEndWidth = structureSettings.endWidth;
+    params.flowStrokeCenterWidth = structureSettings.centerWidth;
     params.flowBackcoatCount = fixedCount;
     params.flowUnderpaintCount = underpaint.total;
     params.flowTrainableUnderpaintCount = underpaint.trainable;
@@ -318,11 +356,19 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
       this.underpaintCount = params.flowUnderpaintCount || this.fixedCount;
       this.strength = params.flowBirthLinkStrength;
       this.strokeCoherence = params.flowStrokeCoherence || 0;
+      this.structureUpdatesEnabled = Boolean(params.flowAlternatingStructureEnabled);
+      this.structureUpdateInterval = params.flowStructureUpdateInterval || 3;
+      this.structureImageAnchor = params.flowStructureImageAnchor || 0;
+      this.strokeEndWidth = params.flowStrokeEndWidth || .75;
+      this.strokeCenterWidth = params.flowStrokeCenterWidth || 1.6;
+      this.structureFocus = false;
+      this.structureFocusPasses = 0;
       this.dirty = true;
       this.passes = 0;
       this.events = [];
       this.readbackBytes = 0;
-      this.uniform = null;
+      this.uniforms = [];
+      this.activeUniform = null;
       this.neighbors = null;
       this.frozen = null;
       this.baseMinorScaleByNode = new Map();
@@ -349,7 +395,7 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
       }
     }
 
-    buffers() { return [this.uniform, this.neighbors, this.frozen].filter(Boolean); }
+    buffers() { return [...this.uniforms, this.neighbors, this.frozen].filter(Boolean); }
 
     async compile(code, entryPoint) {
       const device = this.renderer.device;
@@ -415,7 +461,7 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
       this.events.push({ kind: "compact", step: state.metrics.steps_done, count: keep.length });
     }
 
-    async prepare(image, params) {
+    async prepare(image, params, { structureFocus = false, batchSlot = 0 } = {}) {
       const r = this.renderer;
       if (this.graph.rows.length !== params.count) throw new Error("Flow lineage count is stale.");
       const fixed = Boolean(r.trainState.fixedPointExactGradient?.enabled);
@@ -424,7 +470,12 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
         this.fixed = fixed;
       }
       if (this.frozen && !this.restorePipeline) this.restorePipeline = await this.compile(restoreShader, "restore");
-      if (!this.uniform) this.uniform = r.device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const uniformSlot = Math.max(0, Math.round(Number(batchSlot) || 0));
+      this.uniforms[uniformSlot] ||= r.device.createBuffer({
+        size: 64,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+      this.activeUniform = this.uniforms[uniformSlot];
       const settings = this.math.settingsFromParams(params);
       if (this.dirty) {
         const p = { ...params };
@@ -479,7 +530,9 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
             const progress = ordered.length > 1 ? index / (ordered.length - 1) : .5;
             // Narrow ends and a broad body make each linked group read as one
             // pressure-varying stroke, while retaining the parent's scale family.
-            const pressure = .75 + .85 * Math.pow(Math.sin(Math.PI * progress), .8);
+            const pressure = this.strokeEndWidth +
+              (this.strokeCenterWidth - this.strokeEndWidth) *
+              Math.pow(Math.sin(Math.PI * progress), .8);
             // Preserve a stable bend side across compaction by encoding the
             // stable node's sign in the otherwise-positive width target.
             widthTargets[row] = groupBendSign * this.baseMinorScaleByNode.get(node) * pressure;
@@ -501,8 +554,10 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
         this.dirty = false;
       }
       const weights = coherenceWeights(this.strokeCoherence);
-      r.device.queue.writeBuffer(this.uniform, 0, new Float32Array([
-        (image.width - 1) / 2, (image.height - 1) / 2, params.discreteLayerCount || 8, weights.pigment,
+      this.structureFocus = Boolean(structureFocus && this.structureUpdatesEnabled);
+      r.device.queue.writeBuffer(this.activeUniform, 0, new Float32Array([
+        (image.width - 1) / 2, (image.height - 1) / 2, params.discreteLayerCount || 8,
+        this.structureFocus ? 0 : weights.pigment,
         params.count, weights.link, weights.tangent, weights.width,
         settings.widthStart, settings.widthEnd, settings.widthTaperEnabled ? 1 : 0, 1 - settings.feather,
         this.strokeCoherence, 0, 0, 0,
@@ -513,10 +568,11 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
       if (!this.strength || !this.packed?.edges.length) return;
       if (this.packed.count !== params.count) throw new Error("Flow neighbor buffer is stale.");
       const r = this.renderer, train = r.trainState, front = train.front;
-      const buffers = [this.uniform, train.xyBuffers[front], train.transformBuffers[front], train.exactGradientBuffer,
+      const buffers = [this.activeUniform, train.xyBuffers[front], train.transformBuffers[front], train.exactGradientBuffer,
         this.neighbors, train.colorBuffers[front]];
       if (this.fixed) buffers.push(train.fixedPointGradientControlBuffer);
       this.dispatch(encoder, this.pipeline, buffers, Math.ceil(params.count / 64), "flow-birth-links");this.passes++;
+      if (this.structureFocus) this.structureFocusPasses++;
     }
 
     dispatch(encoder, pipeline, buffers, count, label) {
@@ -550,6 +606,13 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
         ...(this.lastDiagnostics || {}),
         linked_splats_min: this.graph.minMembers, linked_splats_max: this.graph.maxMembers,
         stroke_coherence: this.strokeCoherence,
+        stroke_end_width: this.strokeEndWidth,
+        stroke_center_width: this.strokeCenterWidth,
+        alternating_structure_updates: this.structureUpdatesEnabled,
+        structure_update_interval: this.structureUpdateInterval,
+        structure_image_anchor: this.structureImageAnchor,
+        structure_focus_passes: this.structureFocusPasses,
+        structure_uniform_slots: this.uniforms.length,
         coherence_weights: coherenceWeights(this.strokeCoherence),
         fixed_backcoat_count: this.fixedCount,
         trainable_underpaint_count: Math.max(0, this.underpaintCount - this.fixedCount),
@@ -558,8 +621,9 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
   }
 
   global.Image2SplatPaintFlowBirthLinks = Object.freeze({
-    selectedPath, selectedLinkedSplatRange, selectedStrokeCoherence, initialize, configure,
-    _test: Object.freeze({ localChains, chainDiagnostics, coherenceWeights,
+    selectedPath, selectedLinkedSplatRange, selectedStrokeCoherence, selectedStructureSettings,
+    structureUpdateSpec, initialize, configure,
+    _test: Object.freeze({ localChains, chainDiagnostics, coherenceWeights, structureUpdateSpec,
       splitUnderpaintBudget, orientedUnderpaintShape }),
     async create(renderer, params) {
       const [math, Graph] = classicDependencies();

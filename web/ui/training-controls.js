@@ -123,6 +123,11 @@ function setInputControlsDisabled(disabled) {
     els.flowLinkedSplatMin,
     els.flowLinkedSplatMax,
     els.flowStrokeCoherence,
+    els.flowStrokeEndWidth,
+    els.flowStrokeCenterWidth,
+    els.flowAlternatingStructureUpdates,
+    els.flowStructureUpdateInterval,
+    els.flowStructureImageAnchor,
     els.flowInternalBendControlPointCount,
     els.flowInternalBendControlPointPositions,
     els.flowSplatFusionMovementLimit,
@@ -252,6 +257,15 @@ function syncAlgorithmRequirements() {
   els.flowLinkedSplatMax.disabled = state.running || !sharedFlow || internalBend;
   els.flowStrokeCoherenceLabel.classList.toggle("flow-hidden", !sharedFlow || internalBend);
   els.flowStrokeCoherence.disabled = state.running || !sharedFlow || internalBend;
+  els.flowStrokeWidthProfile.classList.toggle("flow-hidden", !sharedFlow || internalBend);
+  els.flowStrokeEndWidth.disabled = state.running || !sharedFlow || internalBend;
+  els.flowStrokeCenterWidth.disabled = state.running || !sharedFlow || internalBend;
+  els.flowAlternatingStructureUpdatesLabel.classList.toggle("flow-hidden", !sharedFlow || internalBend);
+  els.flowAlternatingStructureUpdates.disabled = state.running || !sharedFlow || internalBend;
+  els.flowStructureUpdateSettings.classList.toggle("flow-hidden", !sharedFlow || internalBend);
+  const structureUpdatesEnabled = sharedFlow && !internalBend && els.flowAlternatingStructureUpdates.checked;
+  els.flowStructureUpdateInterval.disabled = state.running || !structureUpdatesEnabled;
+  els.flowStructureImageAnchor.disabled = state.running || !structureUpdatesEnabled;
   els.flowInternalBendControlPointCountLabel.classList.toggle("flow-hidden", !internalBend);
   els.flowInternalBendControlPointPositionsLabel.classList.toggle("flow-hidden", !internalBend);
   els.flowInternalBendControlPointCount.disabled = state.running || !internalBend;

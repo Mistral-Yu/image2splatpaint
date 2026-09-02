@@ -1,10 +1,10 @@
 class WebGpuOptimizerRuntime {
-  async prepareFlowBirthLinks(image, params) {
+  async prepareFlowBirthLinks(image, params, options = {}) {
     if (!params.flowBirthLinksEnabled) return;
     this.flowBirthLinks ||= params.internalBendKey
       ? new Image2SplatPaintInternalBend.FixedCountBendRuntime(this, params)
       : await Image2SplatPaintFlowBirthLinks.create(this, params);
-    await this.flowBirthLinks.prepare(image, params);
+    await this.flowBirthLinks.prepare(image, params, options);
   }
 
   async ensureOptimizerResetPipeline() {
@@ -50,9 +50,12 @@ class WebGpuOptimizerRuntime {
     virtualDepthUpdateInterval = DEFAULT_VIRTUAL_DEPTH_UPDATE_INTERVAL,
     virtualDepthCameraConfidence = 0,
     gofDensity = false,
+    flowStructureFocus = false,
   } = {}) {
     await this.ensureRenderGradientPipelines();
-    if (params.flowBirthLinksEnabled && !batchEncoder) await this.prepareFlowBirthLinks(image, params);
+    if (params.flowBirthLinksEnabled && !batchEncoder) {
+      await this.prepareFlowBirthLinks(image, params, { structureFocus: flowStructureFocus });
+    }
     if (params.discreteLayersEnabled) await this.ensureDiscreteLayerPipelines();
     const variants = phase33Variants();
     const phase37 = phase37Variants();
@@ -908,6 +911,7 @@ class WebGpuOptimizerRuntime {
     currentStepOverride = null,
     batchEncoder = null,
     batchConfigSlot = -1,
+    flowStructureFocus = null,
   } = {}) {
     if (
       !this.trainState ||
@@ -930,6 +934,15 @@ class WebGpuOptimizerRuntime {
       this.trainState.coarseImage,
       this.trainState.midImage,
     );
+    const flowStructureSpec = Image2SplatPaintFlowBirthLinks.structureUpdateSpec(
+      currentStep,
+      requestedSteps,
+      params,
+      stage,
+    );
+    const effectiveFlowStructureFocus = flowStructureFocus === null
+      ? flowStructureSpec.focus
+      : Boolean(flowStructureFocus);
     const samplingVariants = virtualCameraSampling || virtualCameraSamplingVariants(false);
     const virtualCameraWarmupSteps = 0;
     const sampledCamera = virtualCameraSamplingStepSpec(
@@ -1071,6 +1084,13 @@ class WebGpuOptimizerRuntime {
       currentStepOverride: currentStep,
       batchEncoder,
       batchConfigSlot,
+      flowStructureFocus: effectiveFlowStructureFocus,
+      gradientChannels: effectiveFlowStructureFocus
+        // Freeze RGB/opacity and depth updates, but retain the ordinary density
+        // evidence used by scheduled growth. Density is an allocation signal,
+        // not a separate learned parameter update.
+        ? { geometry: flowStructureSpec.imageAnchor, appearance: 0, density: 1, depth: 0 }
+        : null,
     });
   }
 
@@ -1084,6 +1104,26 @@ class WebGpuOptimizerRuntime {
     let errorScopeOpen = true;
     try {
       for (let slot = 0; slot < batchSteps.length; slot += 1) {
+        if (params.flowAlternatingStructureEnabled && !params.internalBendKey) {
+          const batchStep = batchSteps[slot];
+          const stage = curriculumTrainingStage(
+            batchStep,
+            state.metrics?.steps_requested || 1,
+            phase33Variants(),
+            this.trainState.coarseImage,
+            this.trainState.midImage,
+          );
+          const structureSpec = Image2SplatPaintFlowBirthLinks.structureUpdateSpec(
+            batchStep,
+            state.metrics?.steps_requested || 1,
+            params,
+            stage,
+          );
+          await this.prepareFlowBirthLinks(image, params, {
+            structureFocus: structureSpec.focus,
+            batchSlot: slot,
+          });
+        }
         await this.trainStepGpu(image, params, learningRates, {
           sync: false,
           virtualCameraSampling,

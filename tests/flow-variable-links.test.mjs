@@ -145,6 +145,23 @@ test("Linked-stroke learning keeps 0% Baseline weights and increases all structu
   for (const key of Object.keys(strong)) assert.equal(coherenceWeights(2)[key], strong[key]);
 });
 
+test("Alternating stroke-structure updates are phase-aware and stop for final settling", async () => {
+  const { structureUpdateSpec } = await loadBirthLinks();
+  const params = {
+    flowAlternatingStructureEnabled: true,
+    flowStructureUpdateInterval: 3,
+    flowStructureImageAnchor: .25,
+  };
+  assert.equal(structureUpdateSpec(3, 1000, params, "coarse").focus, true);
+  assert.equal(structureUpdateSpec(2, 1000, params, "coarse").focus, false);
+  assert.equal(structureUpdateSpec(4, 1000, params, "mid").focus, true);
+  assert.equal(structureUpdateSpec(8, 1000, params, "full").focus, true);
+  assert.equal(structureUpdateSpec(904, 1000, params, "full").focus, false);
+  assert.equal(structureUpdateSpec(8, 1000, { ...params, internalBendKey: "bend" }, "full").focus, false);
+  assert.equal(structureUpdateSpec(8, 1000, { ...params, flowAlternatingStructureEnabled: false }, "full").focus, false);
+  assert.equal(structureUpdateSpec(8, 1000, params, "full").imageAnchor, .25);
+});
+
 test("Linked Brush splits underpainting into a small fixed safety prefix and trainable curved rows", async () => {
   const { splitUnderpaintBudget, orientedUnderpaintShape } = await loadBirthLinks();
   const budget = splitUnderpaintBudget(true, 8192, .10, 2);
@@ -229,12 +246,31 @@ test("P1 backcoat has the same source pigment and full-cell coverage as the fina
   assert.match(html, /id="flowLinkedSplatMin"[^>]+value="4"/);
   assert.match(html, /id="flowLinkedSplatMax"[^>]+value="9"/);
   assert.match(html, /id="flowStrokeCoherence"[^>]+value="50"/);
+  assert.match(html, /id="flowStrokeEndWidth"[^>]+value="75"/);
+  assert.match(html, /id="flowStrokeCenterWidth"[^>]+value="160"/);
+  assert.match(html.match(/<input id="flowAlternatingStructureUpdates"[^>]+>/)[0], /checked/);
+  assert.match(html, /id="flowStructureUpdateInterval"[^>]+value="3"/);
+  assert.match(html, /id="flowStructureImageAnchor"[^>]+value="25"/);
   assert.match(html, /id="flowInternalBendControlPointCount"[^>]+value="1"/);
   assert.match(html, /id="flowInternalBendControlPointPositions"[^>]+value="50"/);
+  assert.doesNotMatch(html, /flowPersistentStrokeSpine|Learned curved stroke spine/);
   assert.doesNotMatch(html, /id="flowSplatFusionVariableLinks"/);
   assert.match(html.match(/<input id="flowSplatBackcoatFromP1"[^>]+>/)[0], /checked/);
   const controls = await read("web/ui/training-controls.js");
   assert.match(controls, /flowLinkedSplatMin.disabled = state.running \|\| !sharedFlow \|\| internalBend/);
   assert.match(controls, /flowStrokeCoherence.disabled = state.running \|\| !sharedFlow \|\| internalBend/);
+  assert.match(controls, /structureUpdatesEnabled = sharedFlow && !internalBend/);
   assert.match(controls, /flowInternalBendControlPointCount.disabled = state.running \|\| !internalBend/);
+  const inputControls = await read("web/ui/controls.js");
+  assert.match(inputControls, /flowStrokeCoherence\.addEventListener\("input", publishState\)/);
+  assert.match(inputControls, /flowStrokeCoherence\.addEventListener\("change", \(\) =>/);
+  assert.match(inputControls, /event\.key !== "Enter"/);
+  const optimizer = await read("web/gpu/optimizer-runtime.js");
+  assert.match(optimizer, /geometry: flowStructureSpec\.imageAnchor, appearance: 0, density: 1, depth: 0/);
+  assert.doesNotMatch(optimizer, /Alternating Flow structure updates require sequential GPU steps/);
+  assert.match(optimizer, /batchSlot: slot/);
+  const links = await read("web/training/flow-birth-links.js");
+  assert.match(links, /this\.structureFocus \? 0 : weights\.pigment/);
+  assert.match(links, /this\.uniforms\[uniformSlot\]/);
+  assert.match(links, /this\.strokeCenterWidth - this\.strokeEndWidth/);
 });

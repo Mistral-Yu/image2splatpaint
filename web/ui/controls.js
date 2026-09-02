@@ -193,9 +193,40 @@ els.flowLinkedSplatMax.addEventListener("change", () => {
   normalizeLinkedSplatRangeUi("max");
   publishState();
 });
-els.flowStrokeCoherence.addEventListener("input", () => {
-  els.flowStrokeCoherence.value = String(Math.max(0, Math.min(100,
-    Number(els.flowStrokeCoherence.value) || 0)));
+els.flowStrokeCoherence.addEventListener("input", publishState);
+els.flowStrokeCoherence.addEventListener("change", () => {
+  const value = Number(els.flowStrokeCoherence.value);
+  els.flowStrokeCoherence.value = String(Number.isFinite(value)
+    ? Math.max(0, Math.min(100, value))
+    : 50);
+  publishState();
+});
+els.flowStrokeCoherence.addEventListener("keydown", event => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  event.currentTarget.blur();
+});
+function bindFlowCommittedNumber(element, minimum, maximum, fallback) {
+  element.addEventListener("input", publishState);
+  element.addEventListener("change", () => {
+    const value = Number(element.value);
+    element.value = String(Number.isFinite(value)
+      ? Math.max(minimum, Math.min(maximum, value))
+      : fallback);
+    publishState();
+  });
+  element.addEventListener("keydown", event => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    event.currentTarget.blur();
+  });
+}
+bindFlowCommittedNumber(els.flowStrokeEndWidth, 25, 200, 75);
+bindFlowCommittedNumber(els.flowStrokeCenterWidth, 50, 300, 160);
+bindFlowCommittedNumber(els.flowStructureUpdateInterval, 2, 20, 3);
+bindFlowCommittedNumber(els.flowStructureImageAnchor, 0, 100, 25);
+els.flowAlternatingStructureUpdates.addEventListener("change", () => {
+  syncAlgorithmRequirements();
   publishState();
 });
 els.flowInternalBendControlPointCount.addEventListener("change", () => {

@@ -346,6 +346,14 @@ function publishState() {
   data.currentContributionCompactionEffectiveWindow = String(contributionCompaction.measurementWindowSteps);
   data.blendMode = "standard-alpha";
   data.flowStrokeCoherenceInput = els.flowStrokeCoherence?.value || "0";
+  data.flowStrokeEndWidthInput = els.flowStrokeEndWidth?.value || "75";
+  data.flowStrokeCenterWidthInput = els.flowStrokeCenterWidth?.value || "160";
+  data.flowAlternatingStructureUpdatesInput = String(Boolean(els.flowAlternatingStructureUpdates?.checked));
+  data.flowStructureUpdateIntervalInput = els.flowStructureUpdateInterval?.value || "3";
+  data.flowStructureImageAnchorInput = els.flowStructureImageAnchor?.value || "25";
+  data.flowStructureFocusPasses = String(
+    state.metrics?.flow_birth_links?.structure_focus_passes ?? 0,
+  );
   data.gpuDensifyEnabled = "true";
   data.tileCullingEnabled = String(Boolean(els.tileCullingToggle?.checked));
   data.trainLayerOrderInput = String(Boolean(els.trainLayerOrder?.checked));

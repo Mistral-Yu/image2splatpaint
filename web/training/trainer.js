@@ -1403,7 +1403,9 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         }
         if (growthResult.grown) {
           targetCount = growthResult.count;
-          state.params = growParamPlaceholders(state.params, targetCount);
+          state.params = state.params.internalBendKey
+            ? Image2SplatPaintInternalBend.growParams(state.params, targetCount)
+            : growParamPlaceholders(state.params, targetCount);
           updateTrainingRunOwnership(run, { params: state.params });
           state.metrics.webgpu_densify = true;
           state.metrics.num_gaussians = state.params.count;
@@ -1645,6 +1647,13 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         surfaceLayerSortScheduleAtStep.due ||
         brushSurfaceRecoveryDueAtStep ||
         discreteLayerScheduledAtStep;
+      const flowStructureUpdateAtStep = Image2SplatPaintFlowBirthLinks.structureUpdateSpec(
+        step,
+        steps,
+        state.params,
+        trainingStageAtStep,
+      );
+      const flowStructureFocusAtStep = flowStructureUpdateAtStep.focus && !structuralStep;
       const effectiveSyncInterval = effectiveTrainSyncInterval(
         state.params.count,
         state.metrics.train_sync_interval,
@@ -1673,7 +1682,9 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         runVirtualCameraSampling.enabled &&
         runVirtualCameraSampling.frontGradientAnchorWeight > 0,
       );
-      const gpuBatchSize = balancedFrontAnchorActive ? 1 : plannedGpuBatchSize;
+      const gpuBatchSize = balancedFrontAnchorActive
+        ? 1
+        : plannedGpuBatchSize;
       const shouldSyncTrain = performanceSelection.gpuSchedulingMode === "adaptive"
         ? true
         : qaHashPending ||
@@ -1723,6 +1734,8 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         await awaitTrainingRun(run, renderer.trainStepGpu(trainingImage, state.params, learningRates, {
           sync: shouldSyncTrain,
           virtualCameraSampling: runVirtualCameraSampling,
+          currentStepOverride: step,
+          flowStructureFocus: flowStructureFocusAtStep,
         }));
       }
       stepTrainMs = performance.now() - trainStarted;
@@ -1742,6 +1755,7 @@ async function trainGaussianAlgorithm(virtualCameraSamplingEnabled, run = beginT
         maximum_observed_batch_size: gpuBatchTuning.maximumObservedSize,
         target_batch_ms: gpuBatchTuning.targetMs,
         balanced_front_anchor_sequential: balancedFrontAnchorActive,
+        alternating_structure_batch_compatible: Boolean(flowStructureUpdateAtStep.enabled),
       };
       const completedStep = step + gpuBatchSize - 1;
       step = completedStep;

@@ -1209,6 +1209,9 @@ test("Single-Splat internal bend grows the real active count through P1/P2/P3", 
   assert.match(links, /minMembers: params\.flowLinkedSplatMin \|\| 2/);
   assert.match(links, /maxMembers: params\.flowLinkedSplatMax \|\| 9/);
   assert.match(links, /includeDormant: this\.graph\.minMembers <= 2/);
+  const sharedTrainer = await readFile(new URL("../web/training/trainer.js", import.meta.url), "utf8");
+  assert.match(sharedTrainer, /state\.params\.internalBendKey\s*\?\s*Image2SplatPaintInternalBend\.growParams/);
+  assert.doesNotMatch(links, /flowPersistentStrokeSpine|attachLinkedSpine|project_spine_layer/);
   assert.match(controls, /FLOW_BRUSH_DEFAULT_MIN_ASPECT_RATIO = 2\.2/);
   assert.match(controls, /FLOW_STAGE_GROWTH_DEFAULTS = Object\.freeze\(\[20, 40, 40\]\)/);
   assert.match(controls, /syncFlowStageGrowthDefaults\(sharedFlow\)/);
