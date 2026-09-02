@@ -736,6 +736,8 @@ function growParamPlaceholders(params, targetCount) {
       flowLinkedSplatMax: params.flowLinkedSplatMax,
       flowStrokeCoherence: params.flowStrokeCoherence || 0,
       flowBackcoatCount: params.flowBackcoatCount,
+      flowUnderpaintCount: params.flowUnderpaintCount || params.flowBackcoatCount || 0,
+      flowTrainableUnderpaintCount: params.flowTrainableUnderpaintCount || 0,
       flowTrainingSize: params.flowTrainingSize?.slice(),
     } : {}),
     rectangleTopRatio: clampNumber(

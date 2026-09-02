@@ -145,6 +145,27 @@ test("Linked-stroke learning keeps 0% Baseline weights and increases all structu
   for (const key of Object.keys(strong)) assert.equal(coherenceWeights(2)[key], strong[key]);
 });
 
+test("Linked Brush splits underpainting into a small fixed safety prefix and trainable curved rows", async () => {
+  const { splitUnderpaintBudget, orientedUnderpaintShape } = await loadBirthLinks();
+  const budget = splitUnderpaintBudget(true, 8192, .10, 2);
+  assert.equal(budget.total, 819);
+  assert.equal(budget.fixed, 164);
+  assert.equal(budget.trainable, 655);
+  assert.deepEqual({ ...splitUnderpaintBudget(false, 8192, .10, 2) },
+    { total: 0, fixed: 0, trainable: 0 });
+  const mark = {
+    center_x: 120, center_y: 80, control_1_x: 145, control_1_y: 92,
+    coverage_cell_min_x: 100, coverage_cell_max_x: 140,
+    coverage_cell_min_y: 60, coverage_cell_max_y: 100,
+    underpaint_sigma_long_px: 42, underpaint_sigma_short_px: 24,
+  };
+  const trained = orientedUnderpaintShape(mark, { width: 512, height: 344 }, true);
+  const safety = orientedUnderpaintShape(mark, { width: 512, height: 344 }, false);
+  assert.ok(trained.sx > trained.sy, "the Brush long axis must stay explicit after aspect correction");
+  assert.notEqual(trained.theta, 0, "the source structure direction must reach initialization");
+  assert.ok(safety.sx > safety.sy, "the fixed safety footprint must not fall back to a square");
+});
+
 test("A full linked stroke starts a sibling curve fragment instead of isolated split dots", async () => {
   const BirthGraph = await loadBirthGraph();
   const graph = new BirthGraph(4, { minMembers: 2, maxMembers: 4 });
@@ -205,7 +226,7 @@ test("P1 backcoat has the same source pigment and full-cell coverage as the fina
   assert.match(integration, /const rearPlan = finalUnderpaint.strokePlan/);
   assert.match(integration, /topologyParams.subarray\(\s*previousStage.metadata.underpaint_parent_count \* Image2SplatPaintFlowRibbonTrainer.constants.PARAM_STRIDE/);
   const html = await read("web/index.html");
-  assert.match(html, /id="flowLinkedSplatMin"[^>]+value="2"/);
+  assert.match(html, /id="flowLinkedSplatMin"[^>]+value="4"/);
   assert.match(html, /id="flowLinkedSplatMax"[^>]+value="9"/);
   assert.match(html, /id="flowStrokeCoherence"[^>]+value="50"/);
   assert.match(html, /id="flowInternalBendControlPointCount"[^>]+value="1"/);

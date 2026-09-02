@@ -3,6 +3,7 @@
   const PAINTERLY_PIGMENT_WEIGHT = 10;
   const PAINTERLY_TANGENT_WEIGHT = 6;
   const PAINTERLY_WIDTH_WEIGHT = 2;
+  const FIXED_UNDERPAINT_SAFETY_SHARE = 0.2;
   function classicDependencies() {
     const math = global.Image2SplatPaintBrushSupport;
     const Graph = global.Image2SplatPaintFlowBirthGraph?.BirthGraph;
@@ -17,7 +18,7 @@
 
   function selectedLinkedSplatRange() {
     const minimum = Math.max(2, Math.min(9, Math.round(
-      Number(els.flowLinkedSplatMin?.value) || 2,
+      Number(els.flowLinkedSplatMin?.value) || 4,
     )));
     const maximum = Math.max(minimum, Math.min(9, Math.round(
       Number(els.flowLinkedSplatMax?.value) || 9,
@@ -39,13 +40,74 @@
     };
   }
 
+  function splitUnderpaintBudget(enabled, maxCount, share, minimumDetailCount) {
+    const total = enabled
+      ? Math.min(maxCount - minimumDetailCount, Math.round(maxCount * share))
+      : 0;
+    const fixed = total > 0
+      ? Math.max(1, Math.min(total, Math.round(total * FIXED_UNDERPAINT_SAFETY_SHARE)))
+      : 0;
+    return Object.freeze({ total, fixed, trainable: total - fixed });
+  }
+
+  function orientedUnderpaintShape(mark, image, trainable) {
+    const dx = mark.control_1_x - mark.center_x;
+    const dy = mark.control_1_y - mark.center_y;
+    const pixelAngle = Math.atan2(dy, dx);
+    const pixelHalfWidth = Math.max(1, image.width - 1) / 2;
+    const pixelHalfHeight = Math.max(1, image.height - 1) / 2;
+    let theta = Math.atan2(Math.sin(pixelAngle) / pixelHalfHeight,
+      Math.cos(pixelAngle) / pixelHalfWidth);
+    const c = Math.cos(theta), s = Math.sin(theta);
+    const majorMetric = Math.hypot(pixelHalfWidth * c, pixelHalfHeight * s);
+    const minorMetric = Math.hypot(pixelHalfWidth * s, pixelHalfHeight * c);
+    const diagonal = Math.hypot(mark.coverage_cell_max_x - mark.coverage_cell_min_x,
+      mark.coverage_cell_max_y - mark.coverage_cell_min_y);
+    // Only the small frozen safety prefix needs to close every source cell by
+    // itself. The larger trainable cohort starts as elongated Brush marks and
+    // is allowed to move, rotate, resize, split and re-link with the optimizer.
+    const minorExtentPx = trainable
+      ? Math.max(mark.underpaint_sigma_short_px || 0, diagonal * 0.58)
+      : diagonal * 1.15;
+    const majorExtentPx = trainable
+      ? Math.max(mark.underpaint_sigma_long_px || 0, minorExtentPx * 1.85)
+      : minorExtentPx * 1.35;
+    let sx = majorExtentPx / (1.5 * Math.max(1, majorMetric));
+    let sy = minorExtentPx / (1.5 * Math.max(1, minorMetric));
+    // Brush family and tangent logic use the numerically larger local scale as
+    // the long axis. Preserve the intended pixel-space direction on wide or
+    // tall images by swapping local axes when necessary.
+    if (sx < sy) {
+      [sx, sy] = [sy, sx];
+      theta -= Math.PI / 2;
+    }
+    return Object.freeze({ sx, sy, theta });
+  }
+
+  function writeUnderpaintPlan(params, plan, start, image, { trainable, depth }) {
+    for (let local = 0; local < plan.strokePlan.length; local += 1) {
+      const i = start + local;
+      const mark = plan.strokePlan[local];
+      const shape = orientedUnderpaintShape(mark, image, trainable);
+      params.xy[i * 2] = 2 * (mark.center_x - 0.5) / Math.max(1, image.width - 1) - 1;
+      params.xy[i * 2 + 1] = 2 * (mark.center_y - 0.5) / Math.max(1, image.height - 1) - 1;
+      params.scale[i * 2] = shape.sx;
+      params.scale[i * 2 + 1] = shape.sy;
+      params.theta[i] = shape.theta;
+      params.depthOrder[i] = depth;
+      params.detailTags[i] = 1;
+      params.rgb.set([mark.color_r, mark.color_g, mark.color_b], i * 3);
+    }
+  }
+
   function initialize(image, requestedInitialCount) {
     const maxCount = Math.max(32, Math.round(Number(els.finalSplatCount.value) || 8192));
     const linkedSplats = selectedLinkedSplatRange();
     const enabled = Boolean(els.flowSplatUnderpainting.checked);
     const share = clampNumber(els.flowSplatUnderpaintPercent.value, 0, 50, 10) / 100;
-    const fixedCount = enabled ? Math.min(maxCount - linkedSplats.min, Math.round(maxCount * share)) : 0;
-    const count = Math.min(maxCount, fixedCount + Math.max(linkedSplats.min, requestedInitialCount));
+    const underpaint = splitUnderpaintBudget(enabled, maxCount, share, linkedSplats.min);
+    const fixedCount = underpaint.fixed;
+    const count = Math.min(maxCount, underpaint.total + Math.max(linkedSplats.min, requestedInitialCount));
     // Initialize the trainable cohort across the whole image, then prepend the
     // coverage layer. Overwriting the first BSP rows would keep only one edge
     // of its spatially ordered initial placement.
@@ -66,31 +128,30 @@
     params.flowLinkedSplatMax = linkedSplats.max;
     params.flowStrokeCoherence = selectedStrokeCoherence();
     params.flowBackcoatCount = fixedCount;
+    params.flowUnderpaintCount = underpaint.total;
+    params.flowTrainableUnderpaintCount = underpaint.trainable;
     params.flowTrainingSize = [image.width, image.height];
-    if (fixedCount) {
-      const plan = Image2SplatPaintFlowPaintReference.createSplatUnderpaintPlan(image, {
+    if (underpaint.total) {
+      const sizeVariation = clampNumber(els.flowSplatBackcoatSizeVariation.value, 0, 75, 40) / 100;
+      const fixedPlan = Image2SplatPaintFlowPaintReference.createSplatUnderpaintPlan(image, {
         count: fixedCount, seed: 240825,
-        sizeVariation: clampNumber(els.flowSplatBackcoatSizeVariation.value, 0, 75, 40) / 100,
+        sizeVariation,
       });
-      for (let i = 0; i < fixedCount; i++) {
-        const mark = plan.strokePlan[i];
-        const diagonal = Math.hypot(mark.coverage_cell_max_x - mark.coverage_cell_min_x,
-          mark.coverage_cell_max_y - mark.coverage_cell_min_y);
-        // Conservative base-Brush core, not a source-image background texture.
-        // The narrowest family keeps all corners of this mean-color cell opaque.
-        const extentPx = diagonal * 1.15;
-        params.xy[i * 2] = 2 * (mark.center_x - 0.5) / Math.max(1, image.width - 1) - 1;
-        params.xy[i * 2 + 1] = 2 * (mark.center_y - 0.5) / Math.max(1, image.height - 1) - 1;
-        params.scale[i * 2] = extentPx / (1.5 * Math.max(1, image.width - 1) / 2);
-        params.scale[i * 2 + 1] = extentPx / (1.5 * Math.max(1, image.height - 1) / 2);
-        params.theta[i] = 0;
-        params.depthOrder[i] = 0;
-        params.detailTags[i] = 1;
-        params.rgb.set([mark.color_r, mark.color_g, mark.color_b], i * 3);
-      }
       const layers = Math.max(2, Number(els.discreteLayerCount.value) || 8);
-      for (let i = fixedCount; i < count; i++) {
-        params.depthOrder[i] = 1 / layers + (1 - 1 / layers) * (count - i) / (count - fixedCount);
+      writeUnderpaintPlan(params, fixedPlan, 0, image, { trainable: false, depth: 0 });
+      if (underpaint.trainable) {
+        const trainablePlan = Image2SplatPaintFlowPaintReference.createSplatUnderpaintPlan(image, {
+          count: underpaint.trainable, seed: 240825 ^ 0x9e3779b9,
+          sizeVariation,
+        });
+        writeUnderpaintPlan(params, trainablePlan, fixedCount, image, {
+          trainable: true,
+          depth: 1 / layers,
+        });
+      }
+      for (let i = underpaint.total; i < count; i++) {
+        params.depthOrder[i] = 2 / layers
+          + (1 - 2 / layers) * (count - i) / Math.max(1, count - underpaint.total);
       }
     }
     return params;
@@ -254,6 +315,7 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
         maxMembers: params.flowLinkedSplatMax || 9,
       });
       this.fixedCount = params.flowBackcoatCount || 0;
+      this.underpaintCount = params.flowUnderpaintCount || this.fixedCount;
       this.strength = params.flowBirthLinkStrength;
       this.strokeCoherence = params.flowStrokeCoherence || 0;
       this.dirty = true;
@@ -362,7 +424,7 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
         this.fixed = fixed;
       }
       if (this.frozen && !this.restorePipeline) this.restorePipeline = await this.compile(restoreShader, "restore");
-      if (!this.uniform) this.uniform = r.device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      if (!this.uniform) this.uniform = r.device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       const settings = this.math.settingsFromParams(params);
       if (this.dirty) {
         const p = { ...params };
@@ -443,6 +505,7 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
         (image.width - 1) / 2, (image.height - 1) / 2, params.discreteLayerCount || 8, weights.pigment,
         params.count, weights.link, weights.tangent, weights.width,
         settings.widthStart, settings.widthEnd, settings.widthTaperEnabled ? 1 : 0, 1 - settings.feather,
+        this.strokeCoherence, 0, 0, 0,
       ]));
     }
 
@@ -488,13 +551,16 @@ struct Frozen { p:vec4<f32>, t:vec4<f32>, c:vec4<f32> };
         linked_splats_min: this.graph.minMembers, linked_splats_max: this.graph.maxMembers,
         stroke_coherence: this.strokeCoherence,
         coherence_weights: coherenceWeights(this.strokeCoherence),
-        fixed_backcoat_count: this.fixedCount, extra_gradient_passes: this.passes, lineage_readback_bytes: this.readbackBytes, events: this.events };
+        fixed_backcoat_count: this.fixedCount,
+        trainable_underpaint_count: Math.max(0, this.underpaintCount - this.fixedCount),
+        extra_gradient_passes: this.passes, lineage_readback_bytes: this.readbackBytes, events: this.events };
     }
   }
 
   global.Image2SplatPaintFlowBirthLinks = Object.freeze({
     selectedPath, selectedLinkedSplatRange, selectedStrokeCoherence, initialize, configure,
-    _test: Object.freeze({ localChains, chainDiagnostics, coherenceWeights }),
+    _test: Object.freeze({ localChains, chainDiagnostics, coherenceWeights,
+      splitUnderpaintBudget, orientedUnderpaintShape }),
     async create(renderer, params) {
       const [math, Graph] = classicDependencies();
       return new Runtime(renderer, params, math, Graph);

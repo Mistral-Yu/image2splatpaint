@@ -195,7 +195,7 @@ test("Curved Brush Splats is the third public Algorithm and legacy Brush is a Re
   assert.match(html, /value="fine-bristles">Fine bristles \(Gaussian\)/);
   assert.match(controls, /forms linked strokes within the selected Min\/Max group size/);
   assert.match(html, /Paint with curved Brush Splats using linked strokes or learned internal bends/);
-  assert.match(html, /id="flowLinkedSplatMin"[^>]*value="2"/);
+  assert.match(html, /id="flowLinkedSplatMin"[^>]*value="4"/);
   assert.match(html, /id="flowLinkedSplatMax"[^>]*value="9"/);
   assert.match(html, /id="flowInternalBendControlPointCount"[^>]*value="1"/);
   assert.match(html, /id="flowInternalBendControlPointPositions"[^>]*value="50"/);
@@ -204,7 +204,7 @@ test("Curved Brush Splats is the third public Algorithm and legacy Brush is a Re
   assert.match(html, /id="flowSplatFusionSplatSizeVariation"[^>]*value="40"/);
   assert.match(html, /id="flowSplatFusionMovementLimit"[^>]*value="12"/);
   assert.match(html, /id="flowSplatUnderpainting"[^>]*\bchecked\b/);
-  assert.match(html, /Opaque coverage backcoat/);
+  assert.match(html, /Curved Brush underpainting/);
   assert.match(html, /id="flowSplatUnderpaintPercent"[^>]*value="10"/);
   assert.doesNotMatch(html, /flowPaintPreviewButton|localFlowPaintTrain/);
   assert.doesNotMatch(bootstrap, /FLOW_SPLAT_FUSION_ALGORITHM_ID/);

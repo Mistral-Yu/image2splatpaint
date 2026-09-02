@@ -249,7 +249,7 @@
                       <span id="flowLinkedSplatRangeHeading" class="paired-setting-heading">Splats per linked stroke</span>
                       <label title="Minimum linked group size that contributes the continuity gradient. Groups continue growing through split/clone ancestry up to Max.">
                         Min
-                        <input id="flowLinkedSplatMin" data-testid="flow-linked-splat-min" type="number" min="2" max="9" step="1" value="2" />
+                        <input id="flowLinkedSplatMin" data-testid="flow-linked-splat-min" type="number" min="2" max="9" step="1" value="4" />
                       </label>
                       <label title="Maximum physical Brush Splats retained in one linked stroke. This does not change the total Max splats budget.">
                         Max
@@ -276,20 +276,20 @@
                       Movement limit (px)
                       <input id="flowSplatFusionMovementLimit" data-testid="flow-splat-fusion-movement-limit" type="number" min="0" max="64" step="0.5" value="12" />
                     </label>
-                    <label class="inline-option field-wide" title="Adds a fixed-geometry source-colored compact Brush Splat grid behind every stroke in the final stage. Each source-opaque grid cell stays inside one flat alpha=0.99 interior. Enable Backcoat from P1 to include it throughout training. Standard alpha and the physical Max splats budget are preserved.">
+                    <label class="inline-option field-wide" title="Adds source-colored Curved Brush underpainting behind the detail strokes. In Linked Brush mode, most of it joins normal training while a small protected safety layer prevents background exposure. Standard alpha and the physical Max splats budget are preserved.">
                       <input id="flowSplatUnderpainting" data-testid="flow-splat-underpainting" type="checkbox" checked />
-                      Opaque coverage backcoat
+                      Curved Brush underpainting
                     </label>
                     <label class="inline-option field-wide" title="Requires retraining. Experimental: add the same fixed Brush undercoat from the first P1 preview. It fills the canvas without widening every curve, but also changes the training residual and may reduce final detail quality. Off retains final-stage-only placement.">
                       <input id="flowSplatBackcoatFromP1" data-testid="flow-splat-backcoat-from-p1" type="checkbox" checked />
-                      Backcoat from P1 (experimental)
+                      Underpainting from P1 (experimental)
                     </label>
                     <label id="flowSplatUnderpaintPercentLabel" title="Share of the physical Splat budget reserved for the compact Brush backcoat. More cells preserve finer source-color variation; the default leaves 90% for detail strokes.">
-                      Backcoat budget (%)
+                      Underpainting budget (%)
                       <input id="flowSplatUnderpaintPercent" data-testid="flow-splat-underpaint-percent" type="number" min="0" max="50" step="0.25" value="10" />
                     </label>
                     <label title="Requires retraining. Varies the sizes of source-colored backcoat cells while keeping complete opaque coverage. 0% restores the uniform grid; 40% gives moderate size variation. Backcoat geometry remains fixed during training.">
-                      Backcoat size variation (%)
+                      Underpainting size variation (%)
                       <input id="flowSplatBackcoatSizeVariation" data-testid="flow-splat-backcoat-size-variation" type="number" min="0" max="75" step="5" value="40" />
                     </label>
                     <label id="flowSplatFusionMaxArcLabel" title="Maximum cubic ribbon arc length as a percentage of the training image short side. 0 disables the limit.">
@@ -848,19 +848,19 @@
     <script src="./training/flow-ribbon-trainer.js?v=curved-brush-controls-v1"></script>
     <script src="./training/flow-stroke-topology.js?v=flow-adaptive-recognition-v1"></script>
     <script src="./training/flow-splat-fusion.js?v=curved-brush-controls-v1"></script>
-    <script src="./training/brush-support.js?v=balanced-flat-head-v1"></script>
+    <script src="./training/brush-support.js?v=curved-underpaint-v1"></script>
     <script src="./training/flow-birth-graph.js?v=direction-curves-v1"></script>
-    <script src="./training/flow-birth-links.js?v=linked-stroke-learning-v1"></script>
+    <script src="./training/flow-birth-links.js?v=curved-underpaint-v1"></script>
     <script src="./training/internal-bend.js?v=curved-brush-painterly-v1"></script>
     <script src="./training/internal-bend-trainer.js?v=curved-brush-controls-v1"></script>
     <script src="./training/trainer.js?v=internal-bend-v3"></script>
     <script src="./training/metrics.js?v=app-refactor-v1"></script>
-    <script src="./training/initialization.js?v=linked-stroke-learning-v1"></script>
+    <script src="./training/initialization.js?v=curved-underpaint-v1"></script>
     <script src="./training/initialization-runtime.js?v=rectangle-orientation-tolerance-v1"></script>
-    <script src="./training/densification.js?v=linked-stroke-learning-v1"></script>
+    <script src="./training/densification.js?v=curved-underpaint-v1"></script>
     <script src="./training/runtime.js?v=internal-bend-compaction-v1"></script>
     <script src="./core/algorithms.js?v=balanced-flat-head-v1"></script>
-    <script src="./ui/training-controls.js?v=linked-stroke-learning-v1"></script>
+    <script src="./ui/training-controls.js?v=curved-underpaint-v1"></script>
     <script src="./export/runtime.js?v=curved-brush-controls-v1"></script>
     <script src="./export/actions.js?v=app-refactor-v1"></script>
     <script src="./ui/status.js?v=linked-stroke-learning-v1"></script>

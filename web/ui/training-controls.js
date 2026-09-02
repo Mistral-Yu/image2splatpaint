@@ -259,7 +259,7 @@ function syncAlgorithmRequirements() {
   els.flowSplatFusionMovementLimit.disabled = state.running || !flowSelected;
   els.flowSplatUnderpainting.disabled = state.running || !flowSelected;
   els.flowSplatUnderpainting.closest("label").title = sharedFlow
-    ? "Adds fixed source-mean-color Brush dabs behind the trainable dabs from P1. Their geometry, color and opacity are protected from optimizer, growth, relocation and pruning. Included in Max splats; opacity follows Fixed stroke opacity."
+    ? "Adds source-mean-color Curved Brush underpainting from P1. Most rows join the normal position, scale, rotation, color, growth and linked-stroke training; only a small rear safety prefix stays protected to prevent background exposure. Included in Max splats; opacity follows Fixed stroke opacity."
     : "Adds a fixed-geometry source-colored compact Brush Splat grid behind every stroke in the final stage. Each source-opaque grid cell stays inside one flat alpha=0.99 interior. Enable Backcoat from P1 to include it throughout training. Standard alpha and the physical Max splats budget are preserved.";
   els.flowSplatBackcoatFromP1.disabled = state.running || !flowSelected || !els.flowSplatUnderpainting.checked;
   els.flowSplatBackcoatSizeVariation.disabled = state.running || !flowSelected || !els.flowSplatUnderpainting.checked;

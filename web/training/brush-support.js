@@ -85,7 +85,7 @@
   function supportShader(fixed=false,fixedScale=8192) {
     return `
 struct Position {center:vec2<f32>,taper:f32,pad:f32};
-struct Options {geometry:vec4<f32>,runtime:vec4<f32>,brush:vec4<f32>};
+struct Options {geometry:vec4<f32>,runtime:vec4<f32>,brush:vec4<f32>,shape:vec4<f32>};
 struct QSample {q:f32,g:vec2<f32>};
 struct Radius {r:f32,logs:vec2<f32>,theta:f32,direction:vec2<f32>,valid:f32};
 @group(0) @binding(0) var<uniform> options:Options;
@@ -184,9 +184,13 @@ fn birth_links(@builtin(global_invocation_id) id:vec3<u32>){
       let centerPx=positions[row].center*options.geometry.xy;
       let signedDistance=dot(centerPx-midpoint,normal);
       let direction=select(-1.0,1.0,signedTargetWidth>0.0);
-      let desired=direction*min(18.0,max(1.2,0.18*chordLength));
+      let coherence=clamp(options.shape.x,0.0,1.0);
+      let desiredFraction=.18*(1.0+coherence);
+      let desiredCap=18.0+20.0*coherence;
+      let desiredMinimum=1.2+1.6*coherence;
+      let desired=direction*min(desiredCap,max(desiredMinimum,desiredFraction*chordLength));
       let curvatureGradient=(signedDistance-desired)/max(1.0,chordLength*chordLength);
-      center+=12.0*curvatureGradient*normal*options.geometry.xy;
+      center+=(12.0+8.0*coherence)*curvatureGradient*normal*options.geometry.xy;
     }
   }
   let multiplier=options.runtime.y*max(.01,load(row*16u+9u));
